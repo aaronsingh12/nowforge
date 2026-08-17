@@ -474,3 +474,61 @@ sized for reasoning models (intent 3000, generation 12000).
 
 No SDK limitation prevented any Phase 2 requirement. Live authoring, subflows, offline
 validation, idempotent redeploy, and deletion all work through supported commands.
+
+---
+
+## 11. Phase 3 findings (semantic verification)
+
+### No supported manual-execute path for scheduled flows ⚠️
+
+Checked before building the verification layer, because firing a scheduled flow on demand
+would be the cleanest way to verify one:
+
+- **`now-sdk --help`** exposes no run/execute/trigger command. The only execution-related
+  commands are `cicd test run` and `cicd testsuite run`, which run **ATF** tests — that
+  requires authoring ATF artifacts, not executing a flow.
+- **`sn_fd.FlowAPI`** (`FlowAPI.getRunner().flow('scope.name').inBackground().run()`) exists,
+  but it is **server-side script only**. Reaching it over REST would mean creating a Scripted
+  REST API or running a background script purely to trigger a flow — neither is a supported
+  path, and both are exactly the kind of hack this project refuses.
+- Forcing the platform scheduler (editing the `sys_trigger` row's `next_action`) manipulates
+  internals and is not verification of the flow's own schedule.
+
+**Consequence:** scheduled flows are verified by **metadata assertion** against the decoded
+`trigger_inputs` config — the flow is active, a scheduled trigger exists, and the cadence
+fields carry the expected values. `verifySchedule()` returns an explicit `caveat` saying this
+proves the schedule is *configured*, not that it *fired*. Waiting on wall-clock firing is not
+an option a verification run can take.
+
+### `.verify.json` next to sources is safe ✅
+
+The build scans `fluentDir` for `.now.ts` only. A `probe-test.verify.json` placed in
+`src/fluent/flows/` built cleanly and produced no extra artifact, so verification specs can
+live beside their source (same slug) without polluting the app.
+
+### Journal fields need a different read path
+
+`work_notes` and `comments` are journal fields: a plain `GET` returns them empty, because the
+entries live in `sys_journal_field` keyed by `element_id` + `element`. Any assertion on a work
+note has to read that table instead — this is why the Phase 1 manual proof queried
+`sys_journal_field` directly. `readFieldValue()` detects journal types from the schema and
+switches read path automatically, and compares by **containment** (journals accumulate
+entries) while every other field compares **exactly**.
+
+### sys_flow_context states
+
+```
+terminal ok   : COMPLETE
+terminal bad  : ERROR, CANCELLED, PRESUMED_INTERRUPTED
+settled-paused: WAITING, PAUSED          ← an approval flow legitimately stops here
+in flight     : IN_PROGRESS, QUEUED, CONTINUE_SYNC, PAUSED_IN_DEBUG
+```
+
+The runner treats settled-paused as assertable (effects before the pause have landed), which
+is what makes approval flows verifiable at all.
+
+### Whole-app install touches every artifact's `sys_updated_on`
+
+Measured during the Step 0 clean-up: deleting two flows advanced `sys_updated_on` on **all
+three** surviving artifacts, because `install` redeploys the entire application. Idempotency
+must therefore be measured as *same sys_id, no new rows* — never as *timestamps unchanged*.

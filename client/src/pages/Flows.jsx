@@ -172,11 +172,105 @@ function LiveBuild({ capOk, seedSpec, onDeployed }) {
   );
 }
 
+const VERIFY_LABEL = {
+  verify_setup: 'Creating a record that matches the trigger…',
+  verify_setup_done: 'Test record created',
+  verify_waiting: 'Waiting for the flow to run…',
+  verify_execution: 'Execution state',
+  verify_assert: 'Assertion',
+  verify_cleanup: 'Deleting test data…',
+};
+
+function verifyLine(e) {
+  const base = VERIFY_LABEL[e.type] || e.type;
+  if (e.type === 'verify_setup') return `${base} (${e.table})`;
+  if (e.type === 'verify_setup_done') return `${base}: ${e.record}`;
+  if (e.type === 'verify_waiting') return `${base} (up to ${e.timeoutSec}s)`;
+  if (e.type === 'verify_execution') return `${base}: ${e.state}`;
+  if (e.type === 'verify_assert') {
+    return `${e.pass ? '✓' : '✗'} ${e.field}: expected "${e.expected}"${e.pass ? '' : `, got "${e.actual ?? ''}"`}`;
+  }
+  return base;
+}
+
+/** Streams a verification run for one managed artifact. */
+function VerifyPanel({ name, onClose }) {
+  const [events, setEvents] = useState([]);
+  const [result, setResult] = useState(null);
+  const [running, setRunning] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        await sse('/flows/live/verify', { name }, (e) => {
+          if (!live) return;
+          if (e.type === 'done') setResult(e.result);
+          else if (e.type === 'error') setError(e.message);
+          else setEvents((prev) => [...prev, e]);
+        });
+      } catch (e) { if (live) setError(e.message); }
+      finally { if (live) setRunning(false); }
+    })();
+    return () => { live = false; };
+  }, [name]);
+
+  return (
+    <div className="card" style={{ marginTop: 10 }}>
+      <div className="spread">
+        <div className="card-title" style={{ marginBottom: 0 }}>Verifying “{name}”</div>
+        <button className="btn sm" onClick={onClose} disabled={running}>Close</button>
+      </div>
+      {events.map((e, i) => (
+        <div key={i} style={{ fontSize: 12.5, padding: '2px 0' }}>
+          <span className="mono" style={{ color: 'var(--muted)' }}>›</span> {verifyLine(e)}
+        </div>
+      ))}
+      {running && <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>running…</div>}
+
+      {result && (
+        <div className={`note ${result.ok ? '' : 'warn'}`} style={{ marginTop: 10, borderLeftColor: result.ok ? 'var(--verdigris)' : undefined }}>
+          <b>{result.ok ? 'Verified' : 'Verification failed'}</b>
+          <div style={{ fontSize: 12.5, marginTop: 4 }}>{result.message}</div>
+          {result.execution && (
+            <div className="mono" style={{ fontSize: 11, marginTop: 4 }}>
+              execution {result.execution.name} — {result.execution.state}
+            </div>
+          )}
+          {result.assertions?.length > 0 && (
+            <table className="table" style={{ marginTop: 8 }}>
+              <thead><tr><th /><th>Field</th><th>Expected</th><th>Actual</th><th>Proves</th></tr></thead>
+              <tbody>
+                {result.assertions.map((a, i) => (
+                  <tr key={i}>
+                    <td><span className={`badge ${a.pass ? 'green' : 'red'}`}>{a.pass ? 'pass' : 'fail'}</span></td>
+                    <td className="mono" style={{ fontSize: 11.5 }}>{a.table}.{a.field}</td>
+                    <td style={{ fontSize: 11.5 }}>{String(a.expected ?? '')}</td>
+                    <td style={{ fontSize: 11.5 }}>{a.reason || String(a.actual ?? '')}</td>
+                    <td style={{ fontSize: 11.5, color: 'var(--muted)' }}>{a.note}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>
+            Test data was deleted. Verification proves the asserted effects on a real execution; it cannot prove
+            effects nobody asserted.
+          </p>
+        </div>
+      )}
+      {error && <p className="error-text">{error}</p>}
+    </div>
+  );
+}
+
 /** NowForge-managed Fluent sources and their live state. */
 function ManagedArtifacts({ reloadKey, onChanged }) {
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [verifying, setVerifying] = useState('');
 
   const load = () => api.get('/flows/live').then(setData).catch((e) => setError(e.message));
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [reloadKey]);
@@ -199,28 +293,40 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
       {data.managed.length === 0 && <div className="empty">Nothing managed yet — build one above.</div>}
       {data.managed.length > 0 && (
         <table className="table">
-          <thead><tr><th>Name</th><th>Kind</th><th>On instance</th><th>Source file</th><th /></tr></thead>
+          <thead><tr><th>Name</th><th>Kind</th><th>On instance</th><th>Verification</th><th /></tr></thead>
           <tbody>
             {data.managed.map((m) => (
               <tr key={m.file + m.name}>
-                <td>{m.name}</td>
+                <td>{m.name}<div className="mono" style={{ fontSize: 10.5, color: 'var(--muted)' }}>{m.file}</div></td>
                 <td><span className={`badge ${m.kind === 'subflow' ? 'blue' : ''}`}>{m.kind}</span></td>
                 <td>
                   {m.live
                     ? <span className={`badge ${m.live.active ? 'green' : ''}`}>{m.live.active ? 'active' : 'inactive'}</span>
                     : <span className="badge red">not found</span>}
                 </td>
-                <td className="mono" style={{ fontSize: 11 }}>{m.file}</td>
                 <td>
-                  <button className="btn sm" onClick={() => remove(m.name)} disabled={busy === m.name}>
-                    {busy === m.name ? 'Removing…' : 'Delete'}
-                  </button>
+                  {m.verification?.available
+                    ? <span className="badge">{m.verification.assertions} assertion{m.verification.assertions === 1 ? '' : 's'}</span>
+                    : <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>—</span>}
+                </td>
+                <td>
+                  <div className="row">
+                    {m.verification?.available && (
+                      <button className="btn amber sm" onClick={() => setVerifying(m.name)} disabled={Boolean(verifying)}>
+                        Verify
+                      </button>
+                    )}
+                    <button className="btn sm" onClick={() => remove(m.name)} disabled={busy === m.name}>
+                      {busy === m.name ? 'Removing…' : 'Delete'}
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
+      {verifying && <VerifyPanel name={verifying} onClose={() => setVerifying('')} />}
       {data.staged?.length > 0 && (
         <p className="note" style={{ marginTop: 10 }}>
           Staged (build-verified, deliberately not deployed): <span className="mono">{data.staged.join(', ')}</span>

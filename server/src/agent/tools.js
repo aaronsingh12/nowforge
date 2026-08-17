@@ -2,7 +2,7 @@ import { table, testConnection } from '../servicenow/client.js';
 import { getSchema, referenceLookup, tableLookup } from '../servicenow/schema.js';
 import { catalog } from '../servicenow/catalog.js';
 import { flows, designFlowBlueprint } from '../servicenow/flows.js';
-import { capability, createLiveFlow, listManaged, removeManaged, smokeRun } from '../servicenow/fluent.js';
+import { capability, createLiveFlow, listManaged, removeManaged, smokeRun, verify } from '../servicenow/fluent.js';
 
 /**
  * Tool registry — the agent's hands.
@@ -282,6 +282,18 @@ export const TOOLS = [
       required: ['name'],
     },
     execute: ({ name }) => removeManaged(name),
+  },
+  {
+    name: 'verify_flow_live',
+    description:
+      'SEMANTIC VERIFICATION. Prove a deployed record-triggered flow actually does what was asked: creates a record matching its trigger, waits for the execution to settle, asserts the promised effects (field set, note added, record created), then deletes the test data. Compiling only proves a flow is well-formed — this proves it is correct. Writes real records, so it needs its own approval and never runs automatically after a deploy.',
+    mutating: true,
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: 'Exact flow name as deployed' } },
+      required: ['name'],
+    },
+    execute: ({ name }) => verify(name),
   },
   {
     name: 'smoke_test_flow',

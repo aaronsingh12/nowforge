@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { flows, designFlowBlueprint, blueprintToBusinessRule } from '../servicenow/flows.js';
-import { capability, createLiveFlow, listManaged, removeManaged, smokeRun } from '../servicenow/fluent.js';
+import { capability, createLiveFlow, listManaged, removeManaged, smokeRun, verify } from '../servicenow/fluent.js';
 
 export const flowsRouter = Router();
 
@@ -38,6 +38,33 @@ flowsRouter.post('/live', async (req, res) => {
   try {
     const result = await createLiveFlow(text, emit);
     emit(result.ok ? { type: 'done', result } : { type: 'error', ...result });
+  } catch (err) {
+    emit({ type: 'error', message: err.message });
+  } finally {
+    clearInterval(keepAlive);
+    res.end();
+  }
+});
+
+/**
+ * POST /api/flows/live/verify { name }
+ * Runs the stored verification spec: setup → wait → assert → cleanup, streamed.
+ * This CREATES a real record (and deletes it again), so it is never automatic.
+ */
+flowsRouter.post('/live/verify', async (req, res) => {
+  const { name } = req.body || {};
+  if (!name) return res.status(400).json({ message: 'name is required' });
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
+  try {
+    const result = await verify(name, emit);
+    emit({ type: 'done', result });
   } catch (err) {
     emit({ type: 'error', message: err.message });
   } finally {

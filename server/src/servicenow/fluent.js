@@ -645,8 +645,30 @@ export async function createLiveFlow(spec, emit = () => {}) {
   const gen = await generateAndValidate(spec, emit);
   if (!gen.ok) return { ok: false, stage: 'validate', ...gen };
 
+  // Verification spec: only record-triggered flows can be proven by firing them.
+  // Scheduled flows and subflows are covered by verifySchedule()/their caller.
+  let verification = { available: false, reason: null };
+  const isRecordTriggered = String(gen.intent?.trigger_kind || '').startsWith('record');
+  if (isRecordTriggered) {
+    const vr = await generateVerification(
+      { spec, source: gen.source, context: gen.context, flowName: gen.name },
+      emit
+    );
+    if (vr.ok) {
+      await fsp.writeFile(verifyPath(gen.name), JSON.stringify(vr.spec, null, 2), 'utf8');
+      verification = { available: true, file: path.basename(verifyPath(gen.name)), attempts: vr.attempts, assertions: vr.spec.assert.length };
+      emit({ type: 'verify_spec_ready', assertions: vr.spec.assert.length, attempts: vr.attempts });
+    } else {
+      // Loud, not silent: the flow still deploys, but the gap is reported.
+      verification = { available: false, reason: `Could not produce a valid verification spec in ${vr.attempts} attempts.`, errors: vr.errors };
+      emit({ type: 'verify_spec_failed', errors: vr.errors });
+    }
+  } else {
+    verification = { available: false, reason: `Trigger kind "${gen.intent?.trigger_kind}" is not verified by firing; use schedule-metadata verification.` };
+  }
+
   const dep = await deploy(gen.name, emit);
-  if (!dep.ok) return { ok: false, stage: 'deploy', ...dep, source: gen.source };
+  if (!dep.ok) return { ok: false, stage: 'deploy', ...dep, source: gen.source, verification };
 
   // No terminal 'done' here — the caller (route) emits it with the full result,
   // and emitting a bare one first would give consumers two terminal events.
@@ -657,6 +679,7 @@ export async function createLiveFlow(spec, emit = () => {}) {
     artifacts: gen.artifacts,
     attempts: gen.attempts,
     source: gen.source,
+    verification,
     ...dep,
   };
 }
@@ -681,7 +704,15 @@ export async function listManaged() {
           };
         }
       } catch (err) { live = { error: err.message }; }
-      out.push({ file: f, name: a.name, kind: a.kind, live });
+      const vf = verifyPath(a.name);
+      let verification = { available: false };
+      if (fs.existsSync(vf)) {
+        try {
+          const vs = JSON.parse(await fsp.readFile(vf, 'utf8'));
+          verification = { available: true, file: path.basename(vf), assertions: vs.assert?.length ?? 0, setupTable: vs.setup?.table };
+        } catch { verification = { available: false, error: 'verification spec unreadable' }; }
+      }
+      out.push({ file: f, name: a.name, kind: a.kind, live, verification });
     }
   }
   const staged = await fsp.readdir(STAGED_DIR).catch(() => []);
@@ -703,6 +734,8 @@ export async function removeManaged(name, emit = () => {}) {
   const artifacts = parseArtifacts(src);
 
   await fsp.rm(file, { force: true });
+  // The verification spec belongs to the source; it must not outlive it.
+  await fsp.rm(verifyPath(name), { force: true });
   emit({ type: 'building' });
   const b = await build();
   if (!b.ok) {
@@ -786,7 +819,377 @@ export async function smokeRun({ table: tableName, values, waitMs = 45_000 }, em
   }
 }
 
+/* ================================================================== *
+ * Semantic verification
+ *
+ * Compiling proves a flow is well-formed; it says nothing about whether the
+ * flow does what the request asked for. A flow that fires on Low risk when the
+ * spec said High compiles and installs perfectly. So each record-triggered
+ * flow gets a verification spec (<slug>.verify.json, ignored by the build)
+ * describing how to prove its CLAIMED effects on a real record:
+ *
+ *     setup   → create a record that satisfies the flow's own trigger condition
+ *     wait    → poll sys_flow_context until this execution settles
+ *     assert  → check the effects the request promised
+ *     cleanup → always, even on failure
+ *
+ * What this catches: wrong field written, effect never applied, flow never
+ * fired, flow errored. What it CANNOT catch: a trigger condition that is wrong
+ * in the same direction as the setup payload (both derived from the same
+ * misreading), effects on records the assertions don't look at, and anything
+ * timing-dependent beyond the wait window.
+ * ================================================================== */
+
+const TERMINAL_OK = ['COMPLETE'];
+const TERMINAL_BAD = ['ERROR', 'CANCELLED', 'PRESUMED_INTERRUPTED'];
+// A flow that hits an approval or a wait legitimately stops here; its effects
+// up to that point are still assertable.
+const SETTLED_PAUSED = ['WAITING', 'PAUSED'];
+
+const verifyPath = (name) => path.join(FLOWS_DIR, `${slugify(name)}.verify.json`);
+
+const VERIFY_SYSTEM = `You write a VERIFICATION SPEC that proves a ServiceNow flow actually does what a request asked for.
+
+You are given the automation request, the compiled Fluent source of the flow, and live schema context. Respond with ONLY a JSON object — no prose, no markdown fences:
+
+{
+  "setup":   { "table": "<table the flow triggers on>",
+               "payload": { "<field>": "<value>", ... } },
+  "wait":    { "flowName": "<exact flow name>", "timeoutSec": 90 },
+  "assert":  [ { "table": "<table to read>",
+                 "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" },
+                 "field": "<field name>",
+                 "expect": { "value": "<raw value>" } | { "display": "<display value>" },
+                 "note": "<what promise of the request this proves>" } ],
+  "cleanup": [ { "table": "<table>", "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" } } ]
+}
+
+RULES:
+1. setup.payload MUST satisfy the flow's own trigger condition — read the condition out of the source and mirror it exactly, using real sys_ids and real numeric choice VALUES from the live context.
+2. Every assertion must test an effect the REQUEST PROMISED (a field the flow writes, a record the flow creates, a note the flow adds).
+3. FORBIDDEN: asserting a field that setup.payload itself sets. That is trivially true and proves nothing about the flow. If the request promises "set assigned_to when empty", then setup.payload must NOT set assigned_to, and the assertion checks assigned_to afterwards.
+4. Use "display" for reference fields and choice fields (a person's name, a group's name); use "value" for raw strings, numbers and journal text.
+5. For journal fields (work_notes, comments) assert the distinctive text the flow writes — a substring match is applied.
+6. In byQuery you may use the token {{setup.sys_id}}, which is replaced with the created record's sys_id. Use it to find records the flow created (e.g. "parent={{setup.sys_id}}").
+7. cleanup MUST include the setup record ({ "bySetupRecord": true }) plus every record the flow creates.
+8. Keep setup.payload minimal: only what the trigger condition requires, plus a short_description so the record is identifiable.`;
+
+/** Ask the model for a verification spec for a freshly generated flow. */
+async function generateVerifySpec({ spec, source, context, flowName, priorErrors }) {
+  const parts = [
+    `AUTOMATION REQUEST (the promises to verify):\n${spec}`,
+    `FLOW NAME: ${flowName}`,
+    `COMPILED FLUENT SOURCE:\n${source}`,
+  ];
+  if (context?.text) parts.push(`--- LIVE INSTANCE CONTEXT ---\n${context.text}`);
+  if (priorErrors?.length) {
+    parts.push(`YOUR PREVIOUS VERIFICATION SPEC WAS REJECTED:\n${priorErrors.map((e) => `- ${e}`).join('\n')}\n\nReturn a corrected COMPLETE spec.`);
+  }
+  parts.push('Return only the JSON object.');
+
+  const raw = await chatOnce({ system: VERIFY_SYSTEM, user: parts.join('\n\n'), maxTokens: 6000 });
+  const cleaned = String(raw || '').replace(/```json|```/g, '').trim();
+  try { return JSON.parse(cleaned); } catch {
+    const m = cleaned.match(/\{[\s\S]*\}/);
+    if (m) { try { return JSON.parse(m[0]); } catch { /* fall through */ } }
+    return null;
+  }
+}
+
+/**
+ * Structural + anti-triviality validation. The anti-triviality rule is enforced
+ * HERE rather than trusted to the prompt: an assertion that reads a field the
+ * setup payload already wrote would pass no matter what the flow does.
+ */
+export function validateVerifySpec(v) {
+  const errors = [];
+  if (!v || typeof v !== 'object') return { ok: false, errors: ['Not a JSON object.'] };
+
+  const setupTable = v.setup?.table;
+  const payload = v.setup?.payload;
+  if (!setupTable) errors.push('setup.table is required.');
+  if (!payload || typeof payload !== 'object' || !Object.keys(payload).length) {
+    errors.push('setup.payload must be a non-empty object.');
+  }
+  if (!v.wait?.flowName) errors.push('wait.flowName is required.');
+
+  if (!Array.isArray(v.assert) || v.assert.length === 0) {
+    errors.push('assert must contain at least one assertion.');
+  } else {
+    v.assert.forEach((a, i) => {
+      const at = `assert[${i}]`;
+      if (!a?.field) errors.push(`${at}.field is required.`);
+      if (!a?.table) errors.push(`${at}.table is required.`);
+      if (!a?.locate?.bySetupRecord && !a?.locate?.byQuery) {
+        errors.push(`${at}.locate needs bySetupRecord or byQuery.`);
+      }
+      const hasExpect = a?.expect && (a.expect.value !== undefined || a.expect.display !== undefined);
+      if (!hasExpect) errors.push(`${at}.expect needs a value or display.`);
+
+      // The anti-trivial rule.
+      if (a?.locate?.bySetupRecord && a?.table === setupTable && payload && a.field in payload) {
+        errors.push(
+          `${at} asserts "${a.field}" on the setup record, but setup.payload already sets "${a.field}" ` +
+          `to "${payload[a.field]}". That assertion is true regardless of what the flow does. ` +
+          `Either remove "${a.field}" from setup.payload (if the flow is supposed to set it) or assert a different effect.`
+        );
+      }
+    });
+  }
+
+  if (!Array.isArray(v.cleanup) || !v.cleanup.some((c) => c?.locate?.bySetupRecord)) {
+    errors.push('cleanup must include the setup record ({ "locate": { "bySetupRecord": true } }).');
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/** Generate a verification spec, rejecting and regenerating invalid ones. */
+async function generateVerification(args, emit = () => {}) {
+  let priorErrors = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    emit({ type: 'verify_spec_attempt', attempt, of: 3 });
+    const candidate = await generateVerifySpec({ ...args, priorErrors });
+    if (!candidate) { priorErrors = ['Response was not valid JSON.']; continue; }
+    const check = validateVerifySpec(candidate);
+    if (check.ok) return { ok: true, spec: candidate, attempts: attempt };
+    priorErrors = check.errors;
+    emit({ type: 'verify_spec_rejected', attempt, errors: check.errors });
+  }
+  return { ok: false, errors: priorErrors, attempts: 3 };
+}
+
+/**
+ * Read one field for assertion. Journal fields (work_notes, comments) are not
+ * returned by a normal GET — their entries live in sys_journal_field — so they
+ * need a different read path entirely.
+ */
+async function readFieldValue(tableName, sysId, field) {
+  let type = null;
+  try {
+    const schema = await getSchema(tableName);
+    type = schema.fields.find((f) => f.name === field)?.type || null;
+  } catch { /* fall through to a plain read */ }
+
+  if (type && /journal/.test(type)) {
+    const rows = await table.query('sys_journal_field', {
+      query: `element_id=${sysId}^element=${field}^ORDERBYDESCsys_created_on`,
+      fields: 'value,sys_created_on',
+      limit: 20,
+    });
+    const entries = rows.map((r) => r.value?.value ?? r.value).filter(Boolean);
+    return { kind: 'journal', value: entries.join('\n---\n'), display: entries.join('\n---\n'), entries };
+  }
+
+  const rec = await table.get(tableName, sysId);
+  const raw = rec?.[field];
+  return {
+    kind: 'field',
+    value: raw && typeof raw === 'object' ? raw.value : raw,
+    display: raw && typeof raw === 'object' ? (raw.display_value ?? raw.value) : raw,
+  };
+}
+
+const norm = (s) => String(s ?? '').trim().toLowerCase();
+
+function compare(actual, expect) {
+  const wantDisplay = expect.display !== undefined;
+  const want = wantDisplay ? expect.display : expect.value;
+  const got = wantDisplay ? actual.display : actual.value;
+  // Journal and long text are appended to, so containment is the correct test;
+  // everything else must match exactly.
+  const pass = actual.kind === 'journal'
+    ? norm(got).includes(norm(want))
+    : norm(got) === norm(want);
+  return { pass, want, got, mode: actual.kind === 'journal' ? 'contains' : 'exact' };
+}
+
+async function locate(loc, tableName, ctx) {
+  if (loc?.bySetupRecord) return ctx.setupSysId;
+  if (loc?.byQuery) {
+    const query = String(loc.byQuery).replace(/\{\{setup\.sys_id\}\}/g, ctx.setupSysId);
+    const rows = await table.query(tableName, { query, fields: 'sys_id', limit: 5 });
+    if (!rows.length) return null;
+    return rows[0].sys_id?.value ?? rows[0].sys_id;
+  }
+  return null;
+}
+
+/**
+ * Execute a verification spec: setup → wait → assert → cleanup.
+ * Cleanup runs in `finally`, so a failed assertion never leaves test data behind.
+ * A wait timeout is a FAIL carrying the last observed context state, not a hang.
+ */
+export async function verify(name, emit = () => {}) {
+  const file = verifyPath(name);
+  if (!fs.existsSync(file)) {
+    return { ok: false, available: false, message: `No verification spec for "${name}" (expected ${path.basename(file)}). Scheduled flows and subflows are verified by metadata instead.` };
+  }
+  const spec = JSON.parse(await fsp.readFile(file, 'utf8'));
+  const check = validateVerifySpec(spec);
+  if (!check.ok) {
+    return { ok: false, available: true, message: 'The stored verification spec is invalid.', errors: check.errors };
+  }
+
+  const timeoutSec = Math.min(Math.max(Number(spec.wait?.timeoutSec) || 90, 15), 300);
+  const created = [];
+  let setupSysId = null;
+  let setupLabel = null;
+  let execution = null;
+  const assertions = [];
+
+  try {
+    emit({ type: 'verify_setup', table: spec.setup.table, payload: spec.setup.payload });
+    const rec = await table.create(spec.setup.table, spec.setup.payload);
+    setupSysId = rec.sys_id?.value ?? rec.sys_id;
+    setupLabel = rec.number?.value ?? rec.name?.value ?? setupSysId;
+    created.push({ table: spec.setup.table, sys_id: setupSysId });
+    emit({ type: 'verify_setup_done', record: setupLabel, sys_id: setupSysId });
+
+    // --- wait ---
+    emit({ type: 'verify_waiting', timeoutSec, flowName: spec.wait.flowName });
+    const deadline = Date.now() + timeoutSec * 1000;
+    let lastState = null;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const ctxs = await table.query('sys_flow_context', {
+        query: `source_record=${setupSysId}`,
+        fields: 'sys_id,name,state,sys_created_on',
+        limit: 10,
+      });
+      // Prefer the context belonging to the flow under test.
+      const mine = ctxs.find((c) => norm(c.name?.display_value ?? c.name) === norm(spec.wait.flowName)) || ctxs[0];
+      if (mine) {
+        lastState = mine.state?.value ?? mine.state;
+        execution = {
+          sys_id: mine.sys_id?.value ?? mine.sys_id,
+          name: mine.name?.display_value ?? mine.name,
+          state: lastState,
+        };
+        emit({ type: 'verify_execution', state: lastState, name: execution.name });
+        if ([...TERMINAL_OK, ...TERMINAL_BAD, ...SETTLED_PAUSED].includes(lastState)) break;
+      }
+    }
+
+    if (!execution) {
+      return {
+        ok: false, available: true, stage: 'wait',
+        message: `No sys_flow_context appeared for ${setupLabel} within ${timeoutSec}s. The flow did not fire — its trigger condition probably does not match the setup record.`,
+        setup: { record: setupLabel, sys_id: setupSysId, payload: spec.setup.payload },
+        assertions: [], execution: null,
+      };
+    }
+    if (TERMINAL_BAD.includes(execution.state)) {
+      return {
+        ok: false, available: true, stage: 'wait',
+        message: `The flow ran but finished in state ${execution.state}.`,
+        setup: { record: setupLabel, sys_id: setupSysId }, execution, assertions: [],
+      };
+    }
+    if (![...TERMINAL_OK, ...SETTLED_PAUSED].includes(execution.state)) {
+      return {
+        ok: false, available: true, stage: 'wait',
+        message: `The flow did not settle within ${timeoutSec}s (last state ${execution.state}).`,
+        setup: { record: setupLabel, sys_id: setupSysId }, execution, assertions: [],
+      };
+    }
+
+    // Actions land a moment after the context settles.
+    await new Promise((r) => setTimeout(r, 4000));
+
+    // --- assert ---
+    for (const a of spec.assert) {
+      const target = await locate(a.locate, a.table, { setupSysId });
+      if (!target) {
+        assertions.push({ pass: false, table: a.table, field: a.field, note: a.note, reason: 'No record matched the locator.' });
+        emit({ type: 'verify_assert', pass: false, field: a.field, reason: 'no record matched' });
+        continue;
+      }
+      const actual = await readFieldValue(a.table, target, a.field);
+      const cmp = compare(actual, a.expect);
+      assertions.push({
+        pass: cmp.pass, table: a.table, field: a.field, note: a.note,
+        expected: cmp.want, actual: cmp.got, mode: cmp.mode, sys_id: target,
+      });
+      emit({ type: 'verify_assert', pass: cmp.pass, field: a.field, expected: cmp.want, actual: cmp.got });
+    }
+
+    const passed = assertions.filter((x) => x.pass).length;
+    return {
+      ok: assertions.length > 0 && passed === assertions.length,
+      available: true,
+      stage: 'assert',
+      setup: { record: setupLabel, sys_id: setupSysId, payload: spec.setup.payload },
+      execution,
+      assertions,
+      summary: `${passed}/${assertions.length} assertions passed`,
+      message: passed === assertions.length
+        ? `Verified: ${passed}/${assertions.length} assertions passed against a real execution.`
+        : `${assertions.length - passed} of ${assertions.length} assertions FAILED.`,
+    };
+  } finally {
+    // --- cleanup: always ---
+    emit({ type: 'verify_cleanup' });
+    for (const c of spec.cleanup || []) {
+      try {
+        const t = c.table || spec.setup.table;
+        if (c.locate?.bySetupRecord) continue; // handled below, after the extras
+        const id = await locate(c.locate, t, { setupSysId });
+        if (id) await table.remove(t, id).catch(() => {});
+      } catch { /* cleanup must never mask the real result */ }
+    }
+    for (const c of created) {
+      await table.remove(c.table, c.sys_id).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Scheduled flows cannot be verified by firing them: there is no supported
+ * manual-execute path. `now-sdk --help` exposes no run command (only ATF via
+ * cicd), and sn_fd.FlowAPI is server-side script only, reachable solely by
+ * creating a Scripted REST API or background script — neither is a supported
+ * REST path, and both would be a hack. Waiting for wall-clock firing is not
+ * verification. So a scheduled flow is verified against its DECODED trigger
+ * configuration instead: the schedule exists, with the expected cadence.
+ */
+export async function verifySchedule(name, expected = {}) {
+  const hits = await flows.findByName(name);
+  if (!hits.length) return { ok: false, message: `"${name}" is not on the instance.` };
+  const sysId = hits[0].sys_id?.value ?? hits[0].sys_id;
+  const detail = await flows.detail(sysId);
+  const trigger = detail.triggers[0];
+  const cfg = trigger?.config || {};
+  const triggerType = trigger ? (trigger.trigger_type?.value ?? trigger.trigger_type) : null;
+
+  const checks = [];
+  const add = (label, pass, got, want) => checks.push({ label, pass, got, want });
+
+  add('flow is active', (detail.flow.active?.value ?? detail.flow.active) === 'true', detail.flow.active?.value, 'true');
+  add('a trigger exists', Boolean(trigger), triggerType, 'present');
+  if (expected.triggerType) add('trigger type', triggerType === expected.triggerType, triggerType, expected.triggerType);
+  if (expected.cadenceKey) {
+    const got = cfg[expected.cadenceKey];
+    add(`schedule carries ${expected.cadenceKey}`, got != null && got !== '', got ?? '(absent)', expected.cadenceValue ?? 'present');
+    if (expected.cadenceValue != null) {
+      add(`${expected.cadenceKey} value`, norm(got) === norm(expected.cadenceValue), got, expected.cadenceValue);
+    }
+  }
+
+  const passed = checks.filter((c) => c.pass).length;
+  return {
+    ok: passed === checks.length,
+    kind: 'schedule-metadata',
+    sys_id: sysId,
+    triggerType,
+    config: cfg,
+    checks,
+    summary: `${passed}/${checks.length} metadata checks passed`,
+    caveat: 'Metadata only — no supported manual-execute path exists for scheduled flows, so this proves the schedule is configured, not that it fired.',
+  };
+}
+
 export const fluent = {
   capability, createLiveFlow, generateAndValidate, deploy,
   listManaged, removeManaged, smokeRun, slugify, parseArtifacts,
+  verify, verifySchedule, validateVerifySpec,
 };
