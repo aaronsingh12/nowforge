@@ -1,4 +1,4 @@
-// nowforge-spec: b0089b9a6a93e322
+// nowforge-spec: 760d0f37ea51f7e5
 import { Flow, Subflow, wfa, action, trigger } from '@servicenow/sdk/automation'
 import { StringColumn, BooleanColumn } from '@servicenow/sdk/core'
 
@@ -80,7 +80,7 @@ Flow(
         { $id: Now.ID['escalate_network_p1_trigger'] },
         {
             table: 'incident',
-            condition: 'priority=1^assignment_group.name=Network',
+            condition: 'priority=1^assignment_group.name=Network^assigned_toISEMPTY',
             run_flow_in: 'background',
         }
     ),
@@ -112,7 +112,7 @@ Flow(
                 table_name: 'incident',
                 record: wfa.dataPill(params.trigger.current, 'reference'),
                 values: TemplateValue({
-                    work_notes: 'NowForge escalated this P1 to the Network group manager',
+                    work_notes: 'NowForge URGENT escalation to the Network group manager',
                 }),
             }
         )

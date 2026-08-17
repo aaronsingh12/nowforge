@@ -563,7 +563,7 @@ async function build() {
  * removed and the workspace rebuilt, so a failed generation leaves nothing
  * behind in src/ and never reaches the instance — invariants (a) and (b).
  */
-export async function generateAndValidate(spec, emit = () => {}) {
+export async function generateAndValidate(spec, emit = () => {}, { updates = null } = {}) {
   const settings = getSettings();
   emit({ type: 'generating' });
 
@@ -574,9 +574,28 @@ export async function generateAndValidate(spec, emit = () => {}) {
   if (context.resolved.length) emit({ type: 'resolved', resolved: context.resolved });
 
   // Invariant (d): identity follows the request, not the model's chosen name.
+  //
+  // Two ways to land on an existing artifact:
+  //   - same request again  → matched by spec fingerprint
+  //   - EDITED request      → the caller names the artifact it supersedes via
+  //                           `updates`, because a changed spec fingerprints
+  //                           differently and would otherwise create a second
+  //                           artifact rather than updating the first.
   const fingerprint = specFingerprint(spec);
-  const existing = await findSourceByFingerprint(fingerprint);
-  if (existing) emit({ type: 'regenerating', file: existing.file, note: 'Updating the artifact this request already deployed.' });
+  let existing = null;
+  if (updates) {
+    const target = sourcePath(updates);
+    if (fs.existsSync(target)) {
+      existing = { file: path.basename(target), source: await fsp.readFile(target, 'utf8') };
+      emit({ type: 'regenerating', file: existing.file, note: `Updating "${updates}" in place.` });
+    } else {
+      emit({ type: 'update_target_missing', updates, note: `No managed source named "${updates}"; generating a new artifact instead.` });
+    }
+  }
+  if (!existing) {
+    existing = await findSourceByFingerprint(fingerprint);
+    if (existing) emit({ type: 'regenerating', file: existing.file, note: 'Updating the artifact this request already deployed.' });
+  }
 
   let source = null;
   let file = null;
@@ -732,13 +751,13 @@ export async function deploy(name, emit = () => {}) {
  * ------------------------------------------------------------------ */
 
 /** Full pipeline: spec → validated source → install → read-back. */
-export async function createLiveFlow(spec, emit = () => {}) {
+export async function createLiveFlow(spec, emit = () => {}, { updates = null } = {}) {
   const cap = await capability();
   if (!cap.ok) {
     return { ok: false, stage: 'capability', message: 'Live Fluent authoring is not available in this environment.', capability: cap };
   }
 
-  const gen = await generateAndValidate(spec, emit);
+  const gen = await generateAndValidate(spec, emit, { updates });
   if (!gen.ok) return { ok: false, stage: 'validate', ...gen };
 
   // Verification spec: only record-triggered flows can be proven by firing them.

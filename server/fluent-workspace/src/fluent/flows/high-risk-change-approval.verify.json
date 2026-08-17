@@ -2,8 +2,8 @@
   "setup": {
     "table": "change_request",
     "payload": {
-      "short_description": "High risk test change",
-      "risk": "2"
+      "risk": "2",
+      "short_description": "Verification test"
     }
   },
   "wait": {
@@ -18,9 +18,9 @@
       },
       "field": "approver",
       "expect": {
-        "display": "Bow Ruggeri"
+        "value": "f298d2d2c611227b0106c6be7f154bc8"
       },
-      "note": "approval is raised to the manager of the Network group"
+      "note": "approval routed to Network group manager"
     }
   ],
   "resume": {
@@ -44,20 +44,20 @@
       "expect": {
         "value": "NowForge: change approved by the Network manager"
       },
-      "note": "adds a work note after approval"
+      "note": "flow adds work note after approval"
     }
   ],
   "cleanup": [
     {
-      "table": "sysapproval_approver",
-      "locate": {
-        "byQuery": "document_id={{setup.sys_id}}"
-      }
-    },
-    {
       "table": "change_request",
       "locate": {
         "bySetupRecord": true
+      }
+    },
+    {
+      "table": "sysapproval_approver",
+      "locate": {
+        "byQuery": "document_id={{setup.sys_id}}"
       }
     }
   ]

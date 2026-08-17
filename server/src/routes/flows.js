@@ -21,7 +21,7 @@ flowsRouter.get('/live', async (_req, res, next) => {
  * Streams SSE progress, mirroring /api/agent/chat.
  */
 flowsRouter.post('/live', async (req, res) => {
-  const { spec, blueprint } = req.body || {};
+  const { spec, blueprint, updates } = req.body || {};
   const text = spec || (blueprint ? blueprintToSpec(blueprint) : null);
   if (!text) return res.status(400).json({ message: 'spec (or blueprint) is required' });
 
@@ -36,7 +36,7 @@ flowsRouter.post('/live', async (req, res) => {
   };
   const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
-    const result = await createLiveFlow(text, emit);
+    const result = await createLiveFlow(text, emit, { updates: updates || null });
     emit(result.ok ? { type: 'done', result } : { type: 'error', ...result });
   } catch (err) {
     emit({ type: 'error', message: err.message });

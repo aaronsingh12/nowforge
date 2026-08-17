@@ -2,10 +2,10 @@
   "setup": {
     "table": "incident",
     "payload": {
+      "short_description": "Escalation test",
       "impact": "1",
       "urgency": "1",
-      "assignment_group": "287ebd7da9fe198100f92cc8d1d2154e",
-      "short_description": "Verification test incident"
+      "assignment_group": "287ebd7da9fe198100f92cc8d1d2154e"
     }
   },
   "wait": {
@@ -20,9 +20,9 @@
       },
       "field": "work_notes",
       "expect": {
-        "value": "NowForge escalated this P1 to the Network group manager"
+        "value": "NowForge URGENT escalation to the Network group manager"
       },
-      "note": "adds a work note to the incident"
+      "note": "Adds a work note to the incident as promised"
     },
     {
       "table": "incident",
@@ -33,7 +33,7 @@
       "expect": {
         "display": "Bow Ruggeri"
       },
-      "note": "sets assigned_to to the Network group manager if unassigned"
+      "note": "Sets assigned_to to the Network group manager"
     }
   ],
   "cleanup": [

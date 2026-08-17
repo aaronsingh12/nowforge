@@ -204,26 +204,56 @@ declare global {
                     high_risk_change_approval_ask: {
                         table: 'sys_hub_action_instance_v2'
                         id: '7a2a72661556428c8ac096f3e93bfc83'
+                        deleted: true
                     }
                     high_risk_change_approval_flow_main: {
                         table: 'sys_hub_flow'
                         id: 'ccfaa494903b47ba9b494675c466a681'
+                        deleted: true
                     }
                     high_risk_change_approval_if_approved: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '58b763ae55e34382903fcc5007bcfbf2'
+                        deleted: true
                     }
                     high_risk_change_approval_lookup_network: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'a6d6da08d3fd47a7a6907471c8255724'
+                        deleted: true
                     }
                     high_risk_change_approval_trigger: {
                         table: 'sys_hub_trigger_instance_v2'
                         id: 'c2eeb5012b01434ea1c92c36d4e24723'
+                        deleted: true
                     }
                     high_risk_change_approval_update_note: {
                         table: 'sys_hub_action_instance_v2'
                         id: '85a7c398dfc34ec68575e54754c2328f'
+                        deleted: true
+                    }
+                    hrc_ask_approval: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'c3f8204bbaec45a6a142e29cfd35df4c'
+                    }
+                    hrc_flow: {
+                        table: 'sys_hub_flow'
+                        id: 'f251ba67ed9649af82866f955697260e'
+                    }
+                    hrc_if_approved: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '01a1f25226b54ea88b7a393ee0a3f3a1'
+                    }
+                    hrc_lookup_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '19d5beba58c54c7f87f40c3ec43e6b1a'
+                    }
+                    hrc_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '01fd948359bb4a08b921608bb2a1dc2d'
+                    }
+                    hrc_update_worknote: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '1a9dfa4ff6254075906effaf6a7df5d2'
                     }
                     if_unassigned: {
                         table: 'sys_hub_flow_logic_instance_v2'
