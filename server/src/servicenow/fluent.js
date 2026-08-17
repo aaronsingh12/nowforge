@@ -178,21 +178,31 @@ async function listSourceFiles() {
  * ------------------------------------------------------------------ */
 
 function parseAuthList(stdout) {
-  // Blocks look like:  *[alias]\n  host = https://...\n  type = basic\n  username = admin
+  // Blocks look like:
+  //   *[alias]
+  //         host = https://...
+  //         type = basic
+  //         username = admin
+  // Every CLI log line is also prefixed "[now-sdk] ...", so a bracket alone is
+  // not enough: the bracket must start a line and the block must declare a host.
   const creds = [];
-  const re = /(\*?)\[([^\]]+)\]([\s\S]*?)(?=\n\s*\*?\[|$)/g;
-  let m;
-  while ((m = re.exec(stdout))) {
-    const body = m[3];
-    const field = (k) => body.match(new RegExp(`${k}\\s*=\\s*(\\S+)`))?.[1] || null;
-    creds.push({
-      alias: m[2],
-      isDefault: m[1] === '*' || /default\s*=\s*Yes/i.test(body),
-      host: field('host'),
-      type: field('type'),
-      username: field('username'),
-    });
+  let cur = null;
+  for (const line of String(stdout || '').split(/\r?\n/)) {
+    // An alias header is a bracketed token alone on the line, e.g. "*[snada-pdi]".
+    const header = line.match(/^[ \t]*(\*?)\[([^\]\s]+)\][ \t]*$/);
+    if (header) {
+      if (cur?.host) creds.push(cur);
+      cur = { alias: header[2], isDefault: header[1] === '*', host: null, type: null, username: null };
+      continue;
+    }
+    const kv = line.match(/^[ \t]*(host|type|username|default)[ \t]*=[ \t]*(\S+)/);
+    if (kv && cur) {
+      if (kv[1] === 'default') cur.isDefault = cur.isDefault || /yes/i.test(kv[2]);
+      else cur[kv[1]] = kv[2];
+    }
   }
+  // A block without a host is a log line, not a credential.
+  if (cur?.host) creds.push(cur);
   return creds;
 }
 
