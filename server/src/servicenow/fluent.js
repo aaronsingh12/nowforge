@@ -369,10 +369,18 @@ async function buildLiveContext(intent) {
         .slice(0, 120)
         .map((f) => {
           const ref = f.reference ? ` -> ${f.reference}` : '';
-          const ch = f.choices?.length ? ` [${f.choices.slice(0, 8).map((c) => c.value).join('|')}]` : '';
+          // Choices MUST carry value=label pairs. Emitting bare values lets the
+          // model guess the mapping — which produced `risk=4` (Low) for a spec
+          // that asked for High risk, on an instance where High is 2.
+          const ch = f.choices?.length
+            ? ` choices[${f.choices.slice(0, 12).map((c) => `${c.value}=${c.label}`).join(', ')}]`
+            : '';
           return `  ${f.name} (${f.type}${ref})${ch}`;
         });
-      parts.push(`REAL SCHEMA for "${intent.trigger_table}" (hierarchy: ${schema.hierarchy.join(' -> ')}). Use these exact field names:\n${interesting.join('\n')}`);
+      parts.push(
+        `REAL SCHEMA for "${intent.trigger_table}" (hierarchy: ${schema.hierarchy.join(' -> ')}). Use these exact field names.\n` +
+        `For any choice field, use the numeric VALUE from choices[...] — never the label, and never assume a conventional ordering:\n${interesting.join('\n')}`
+      );
     } catch (err) {
       parts.push(`Schema for "${intent.trigger_table}" could not be read: ${err.message}. Use only field names you are certain of.`);
     }
@@ -630,7 +638,8 @@ export async function createLiveFlow(spec, emit = () => {}) {
   const dep = await deploy(gen.name, emit);
   if (!dep.ok) return { ok: false, stage: 'deploy', ...dep, source: gen.source };
 
-  emit({ type: 'done' });
+  // No terminal 'done' here — the caller (route) emits it with the full result,
+  // and emitting a bare one first would give consumers two terminal events.
   return {
     ok: true,
     name: gen.name,
