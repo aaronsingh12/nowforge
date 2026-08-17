@@ -1,0 +1,32 @@
+import express from 'express';
+import cors from 'cors';
+import { systemRouter } from './routes/system.js';
+import { incidentsRouter } from './routes/incidents.js';
+import { catalogRouter } from './routes/catalog.js';
+import { flowsRouter } from './routes/flows.js';
+import { agentRouter } from './routes/agent.js';
+import { SnowError } from './servicenow/client.js';
+
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '2mb' }));
+
+app.use('/api/system', systemRouter);
+app.use('/api/incidents', incidentsRouter);
+app.use('/api/catalog', catalogRouter);
+app.use('/api/flows', flowsRouter);
+app.use('/api/agent', agentRouter);
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, _req, res, _next) => {
+  const status = err instanceof SnowError ? err.status : (err.status || 500);
+  res.status(status >= 400 && status < 600 ? status : 500).json({
+    message: err.message || 'Internal error',
+    detail: err.detail || null,
+  });
+});
+
+const PORT = Number(process.env.PORT) || 4000;
+app.listen(PORT, () => {
+  console.log(`NowForge server listening on http://localhost:${PORT}`);
+});

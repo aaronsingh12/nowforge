@@ -1,0 +1,529 @@
+import { useEffect, useState } from 'react';
+import { api, val, disp } from '../api.js';
+import ReferenceField, { TableField } from '../components/ReferenceField.jsx';
+
+const CHOICE_TYPES = [3, 5, 18, 22];
+const REF_TYPES = [8, 21];
+
+/* ── Shared variable builder ── */
+function VariableForm({ types, onSubmit, busy }) {
+  const [v, setV] = useState({ name: '', question_text: '', type: '6', mandatory: false, order: 100, refTable: null, choicesText: '' });
+  const typeCode = Number(v.type);
+  const submit = () => {
+    const payload = {
+      name: v.name,
+      question_text: v.question_text || v.name,
+      type: typeCode,
+      mandatory: v.mandatory,
+      order: v.order,
+      reference_table: v.refTable?.id || '',
+      choices: v.choicesText
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((l) => {
+          const [text, value] = l.split('|').map((s) => s.trim());
+          return { text, value: value || undefined };
+        }),
+    };
+    onSubmit(payload, () => setV({ name: '', question_text: '', type: '6', mandatory: false, order: 100, refTable: null, choicesText: '' }));
+  };
+  return (
+    <div>
+      <div className="grid2">
+        <div className="field">
+          <label className="label">Internal name</label>
+          <input className="input mono" placeholder="laptop_model" value={v.name} onChange={(e) => setV({ ...v, name: e.target.value })} />
+        </div>
+        <div className="field">
+          <label className="label">Question text</label>
+          <input className="input" placeholder="Which laptop model?" value={v.question_text} onChange={(e) => setV({ ...v, question_text: e.target.value })} />
+        </div>
+        <div className="field">
+          <label className="label">Type</label>
+          <select className="select" value={v.type} onChange={(e) => setV({ ...v, type: e.target.value })}>
+            {types.map((t) => <option key={t.code} value={t.code}>{t.code} · {t.label}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label className="label">Order</label>
+          <input className="input" type="number" value={v.order} onChange={(e) => setV({ ...v, order: Number(e.target.value) })} />
+        </div>
+      </div>
+      {REF_TYPES.includes(typeCode) && (
+        <div className="field">
+          <label className="label">{typeCode === 21 ? 'List collector table' : 'Reference table'}</label>
+          <TableField value={v.refTable} onChange={(t) => setV({ ...v, refTable: t })} />
+        </div>
+      )}
+      {CHOICE_TYPES.includes(typeCode) && (
+        <div className="field">
+          <label className="label">Choices — one per line, "Display text | value"</label>
+          <textarea className="textarea mono" placeholder={'MacBook Pro 14 | mbp14\nThinkPad X1 | x1'} value={v.choicesText} onChange={(e) => setV({ ...v, choicesText: e.target.value })} />
+        </div>
+      )}
+      <div className="row">
+        <label className="check">
+          <input type="checkbox" checked={v.mandatory} onChange={(e) => setV({ ...v, mandatory: e.target.checked })} /> Mandatory
+        </label>
+        <button className="btn primary sm" onClick={submit} disabled={busy || !v.name}>Add variable</button>
+      </div>
+    </div>
+  );
+}
+
+function VariableTable({ variables, typeLabel, onDelete }) {
+  if (!variables?.length) return <div className="empty">No variables yet.</div>;
+  return (
+    <table className="table">
+      <thead><tr><th>Ord</th><th>Name</th><th>Question</th><th>Type</th><th>Ref</th><th /></tr></thead>
+      <tbody>
+        {variables.map((v) => (
+          <tr key={val(v, 'sys_id')}>
+            <td className="mono">{disp(v, 'order')}</td>
+            <td className="mono">{disp(v, 'name')}</td>
+            <td>{disp(v, 'question_text')}{val(v, 'mandatory') === 'true' && <span className="badge amber" style={{ marginLeft: 6 }}>req</span>}</td>
+            <td>{typeLabel(val(v, 'type'))}</td>
+            <td className="mono">{disp(v, 'reference') || disp(v, 'list_table') || '—'}</td>
+            <td>{onDelete && <button className="btn danger sm" onClick={() => onDelete(val(v, 'sys_id'))}>✕</button>}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/* ── Items tab ── */
+function ItemsTab({ meta, categories, catalogs, typeLabel }) {
+  const [items, setItems] = useState([]);
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState(null); // deep view
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState({ name: '', short_description: '', description: '', category: '', catalog: '' });
+  const [sets, setSets] = useState([]);
+  const [attachSet, setAttachSet] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = () => api.get(`/catalog/items?search=${encodeURIComponent(search)}`).then(setItems).catch((e) => setError(e.message));
+  useEffect(() => { load(); api.get('/catalog/variable-sets').then(setSets).catch(() => {}); /* eslint-disable-next-line */ }, []);
+
+  const openItem = (sysId) => {
+    setError('');
+    api.get(`/catalog/items/${sysId}`).then(setSelected).catch((e) => setError(e.message));
+  };
+
+  const createItem = async () => {
+    setBusy(true); setError('');
+    try {
+      const payload = { name: draft.name, short_description: draft.short_description, description: draft.description };
+      if (draft.category) payload.category = draft.category;
+      if (draft.catalog) payload.sc_catalogs = draft.catalog;
+      const r = await api.post('/catalog/items', payload);
+      setCreating(false);
+      setDraft({ name: '', short_description: '', description: '', category: '', catalog: '' });
+      load();
+      openItem(val(r, 'sys_id'));
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const addVariable = async (payload, reset) => {
+    setBusy(true); setError('');
+    try {
+      await api.post(`/catalog/items/${val(selected.item, 'sys_id')}/variables`, payload);
+      reset();
+      openItem(val(selected.item, 'sys_id'));
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const deleteVariable = async (sysId) => {
+    if (!window.confirm('Delete this variable?')) return;
+    try { await api.del(`/catalog/variables/${sysId}`); openItem(val(selected.item, 'sys_id')); }
+    catch (e) { setError(e.message); }
+  };
+
+  const doAttach = async () => {
+    if (!attachSet) return;
+    setBusy(true); setError('');
+    try {
+      await api.post(`/catalog/variable-sets/${attachSet}/attach`, { cat_item: val(selected.item, 'sys_id') });
+      setAttachSet('');
+      openItem(val(selected.item, 'sys_id'));
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const deleteItem = async () => {
+    const id = val(selected.item, 'sys_id');
+    if (!window.confirm(`Delete catalog item "${disp(selected.item, 'name')}"?`)) return;
+    try { await api.del(`/catalog/items/${id}`); setSelected(null); load(); }
+    catch (e) { setError(e.message); }
+  };
+
+  return (
+    <div className="split">
+      <div className="card">
+        <div className="spread" style={{ marginBottom: 12 }}>
+          <div className="card-title" style={{ marginBottom: 0 }}>Catalog items</div>
+          <button className="btn primary sm" onClick={() => setCreating(!creating)}>{creating ? 'Cancel' : 'New item'}</button>
+        </div>
+        {creating && (
+          <div style={{ marginBottom: 14, paddingBottom: 14, borderBottom: '1px solid var(--line)' }}>
+            <div className="field"><label className="label">Name</label>
+              <input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
+            <div className="field"><label className="label">Short description</label>
+              <input className="input" value={draft.short_description} onChange={(e) => setDraft({ ...draft, short_description: e.target.value })} /></div>
+            <div className="grid2">
+              <div className="field"><label className="label">Category</label>
+                <select className="select" value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value })}>
+                  <option value="">—</option>
+                  {categories.map((c) => <option key={val(c, 'sys_id')} value={val(c, 'sys_id')}>{disp(c, 'title')}</option>)}
+                </select></div>
+              <div className="field"><label className="label">Catalog</label>
+                <select className="select" value={draft.catalog} onChange={(e) => setDraft({ ...draft, catalog: e.target.value })}>
+                  <option value="">—</option>
+                  {catalogs.map((c) => <option key={c.sys_id} value={c.sys_id}>{c.title}</option>)}
+                </select></div>
+            </div>
+            <button className="btn primary sm" onClick={createItem} disabled={busy || !draft.name}>Create item</button>
+          </div>
+        )}
+        <div className="row" style={{ marginBottom: 10 }}>
+          <input className="input" placeholder="Search items…" value={search}
+            onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && load()} />
+        </div>
+        <table className="table">
+          <thead><tr><th>Name</th><th>Class</th><th>Active</th></tr></thead>
+          <tbody>
+            {items.map((r) => (
+              <tr key={val(r, 'sys_id')} className={`click ${selected && val(selected.item, 'sys_id') === val(r, 'sys_id') ? 'selected' : ''}`}
+                onClick={() => openItem(val(r, 'sys_id'))}>
+                <td>{disp(r, 'name')}</td>
+                <td className="mono" style={{ fontSize: 11 }}>{val(r, 'sys_class_name')}</td>
+                <td><span className={`badge ${val(r, 'active') === 'true' ? 'green' : ''}`}>{val(r, 'active') === 'true' ? 'active' : 'off'}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {items.length === 0 && <div className="empty">No items found.</div>}
+        {error && <p className="error-text">{error}</p>}
+      </div>
+
+      <div className="card">
+        {!selected ? (
+          <div className="empty">Select an item to inspect its variables, choices, and attached variable sets.</div>
+        ) : (
+          <>
+            <div className="spread">
+              <h3 style={{ fontSize: 16 }}>{disp(selected.item, 'name')}</h3>
+              <button className="btn danger sm" onClick={deleteItem}>Delete item</button>
+            </div>
+            <p style={{ color: 'var(--muted)', marginTop: 4 }}>{disp(selected.item, 'short_description')}</p>
+            <p className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>sys_id {val(selected.item, 'sys_id')}</p>
+
+            <div className="card-title" style={{ marginTop: 16 }}>Variables</div>
+            <VariableTable variables={selected.variables} typeLabel={typeLabel} onDelete={deleteVariable} />
+
+            <div className="card-title" style={{ marginTop: 16 }}>Add variable</div>
+            <VariableForm types={meta.variableTypes} onSubmit={addVariable} busy={busy} />
+
+            <div className="card-title" style={{ marginTop: 18 }}>Variable sets</div>
+            {selected.variableSets.length === 0 && <div className="empty">No sets attached.</div>}
+            {selected.variableSets.map((s) => (
+              <div key={val(s, 'sys_id')} style={{ marginBottom: 10 }}>
+                <div className="row"><span className="badge blue">{disp(s, 'title')}</span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>{disp(s, 'internal_name')}</span></div>
+                <VariableTable variables={s._variables} typeLabel={typeLabel} />
+              </div>
+            ))}
+            <div className="row">
+              <select className="select" style={{ maxWidth: 280 }} value={attachSet} onChange={(e) => setAttachSet(e.target.value)}>
+                <option value="">Attach existing set…</option>
+                {sets.map((s) => <option key={val(s, 'sys_id')} value={val(s, 'sys_id')}>{disp(s, 'title')}</option>)}
+              </select>
+              <button className="btn sm" onClick={doAttach} disabled={!attachSet || busy}>Attach</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Variable sets tab ── */
+function SetsTab({ meta, typeLabel }) {
+  const [sets, setSets] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [vars, setVars] = useState([]);
+  const [draft, setDraft] = useState({ title: '', description: '' });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = () => api.get('/catalog/variable-sets').then(setSets).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, []);
+
+  const loadSetVars = (setId) =>
+    api.get(`/catalog/variable-sets/${setId}/variables`).then(setVars).catch(() => setVars([]));
+
+  useEffect(() => { if (selected) loadSetVars(val(selected, 'sys_id')); /* eslint-disable-next-line */ }, [selected]);
+
+  const create = async () => {
+    setBusy(true); setError('');
+    try {
+      await api.post('/catalog/variable-sets', draft);
+      setDraft({ title: '', description: '' });
+      load();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const addVariable = async (payload, reset) => {
+    setBusy(true); setError('');
+    try {
+      await api.post(`/catalog/variable-sets/${val(selected, 'sys_id')}/variables`, payload);
+      reset();
+      loadSetVars(val(selected, 'sys_id'));
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="split">
+      <div className="card">
+        <div className="card-title">Variable sets</div>
+        <div className="field"><label className="label">Title</label>
+          <input className="input" value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></div>
+        <div className="field"><label className="label">Description</label>
+          <input className="input" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></div>
+        <button className="btn primary sm" onClick={create} disabled={busy || !draft.title}>Create set</button>
+        <table className="table" style={{ marginTop: 14 }}>
+          <thead><tr><th>Title</th><th>Internal name</th></tr></thead>
+          <tbody>
+            {sets.map((s) => (
+              <tr key={val(s, 'sys_id')} className={`click ${selected && val(selected, 'sys_id') === val(s, 'sys_id') ? 'selected' : ''}`} onClick={() => setSelected(s)}>
+                <td>{disp(s, 'title')}</td>
+                <td className="mono" style={{ fontSize: 11 }}>{disp(s, 'internal_name')}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {error && <p className="error-text">{error}</p>}
+      </div>
+      <div className="card">
+        {!selected ? (
+          <div className="empty">Select a set to add variables. Attach sets to items from the Items tab.</div>
+        ) : (
+          <>
+            <h3 style={{ fontSize: 15 }}>{disp(selected, 'title')}</h3>
+            <div className="card-title" style={{ marginTop: 12 }}>Variables in this set</div>
+            <VariableTable variables={vars} typeLabel={typeLabel} />
+            <div className="card-title" style={{ marginTop: 14 }}>Add variable</div>
+            <VariableForm types={meta.variableTypes} onSubmit={addVariable} busy={busy} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Order guides tab ── */
+function GuidesTab() {
+  const [guides, setGuides] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [guideItems, setGuideItems] = useState([]);
+  const [draft, setDraft] = useState({ name: '', short_description: '', two_step: true });
+  const [addItem, setAddItem] = useState({ item: null, order: 100, condition: '' });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = () => api.get('/catalog/order-guides').then(setGuides).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, []);
+
+  const open = (g) => {
+    setSelected(g); setError('');
+    api.get(`/catalog/order-guides/${val(g, 'sys_id')}/items`).then(setGuideItems).catch((e) => { setGuideItems([]); setError(e.message); });
+  };
+
+  const create = async () => {
+    setBusy(true); setError('');
+    try { await api.post('/catalog/order-guides', draft); setDraft({ name: '', short_description: '', two_step: true }); load(); }
+    catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const addGuideItem = async () => {
+    setBusy(true); setError('');
+    try {
+      await api.post(`/catalog/order-guides/${val(selected, 'sys_id')}/items`, {
+        item: addItem.item?.id, order: addItem.order, condition: addItem.condition,
+      });
+      setAddItem({ item: null, order: 100, condition: '' });
+      open(selected);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="split">
+      <div className="card">
+        <div className="card-title">Order guides</div>
+        <div className="field"><label className="label">Name</label>
+          <input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
+        <div className="field"><label className="label">Short description</label>
+          <input className="input" value={draft.short_description} onChange={(e) => setDraft({ ...draft, short_description: e.target.value })} /></div>
+        <label className="check" style={{ marginBottom: 10 }}>
+          <input type="checkbox" checked={draft.two_step} onChange={(e) => setDraft({ ...draft, two_step: e.target.checked })} /> Two-step checkout
+        </label>
+        <button className="btn primary sm" onClick={create} disabled={busy || !draft.name}>Create guide</button>
+        <table className="table" style={{ marginTop: 14 }}>
+          <thead><tr><th>Name</th><th>Two-step</th><th>Active</th></tr></thead>
+          <tbody>
+            {guides.map((g) => (
+              <tr key={val(g, 'sys_id')} className={`click ${selected && val(selected, 'sys_id') === val(g, 'sys_id') ? 'selected' : ''}`} onClick={() => open(g)}>
+                <td>{disp(g, 'name')}</td>
+                <td>{val(g, 'two_step') === 'true' ? 'yes' : 'no'}</td>
+                <td><span className={`badge ${val(g, 'active') === 'true' ? 'green' : ''}`}>{val(g, 'active') === 'true' ? 'active' : 'off'}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {error && <p className="error-text">{error}</p>}
+      </div>
+      <div className="card">
+        {!selected ? (
+          <div className="empty">Select a guide to manage its rule-base items.</div>
+        ) : (
+          <>
+            <h3 style={{ fontSize: 15 }}>{disp(selected, 'name')}</h3>
+            <div className="note warn" style={{ margin: '10px 0' }}>
+              Rule-base entries write to <span className="mono">sc_cat_item_guide_items</span>. If adds fail on your
+              release, verify the table name via Settings → table lookup and adjust GUIDE_RULE_TABLE in the server.
+            </div>
+            <div className="card-title">Included items</div>
+            {guideItems.length === 0 && <div className="empty">No items in this guide yet.</div>}
+            {guideItems.length > 0 && (
+              <table className="table">
+                <thead><tr><th>Ord</th><th>Item</th><th>Condition</th></tr></thead>
+                <tbody>
+                  {guideItems.map((gi) => (
+                    <tr key={val(gi, 'sys_id')}>
+                      <td className="mono">{disp(gi, 'order')}</td>
+                      <td>{disp(gi, 'item')}</td>
+                      <td className="mono" style={{ fontSize: 11 }}>{disp(gi, 'condition') || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <div className="card-title" style={{ marginTop: 14 }}>Add item to guide</div>
+            <div className="field"><label className="label">Catalog item</label>
+              <ReferenceField table="sc_cat_item" value={addItem.item} onChange={(v) => setAddItem({ ...addItem, item: v })} /></div>
+            <div className="grid2">
+              <div className="field"><label className="label">Order</label>
+                <input className="input" type="number" value={addItem.order} onChange={(e) => setAddItem({ ...addItem, order: Number(e.target.value) })} /></div>
+              <div className="field"><label className="label">Condition (encoded query, optional)</label>
+                <input className="input mono" value={addItem.condition} onChange={(e) => setAddItem({ ...addItem, condition: e.target.value })} /></div>
+            </div>
+            <button className="btn primary sm" onClick={addGuideItem} disabled={busy || !addItem.item}>Add to guide</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Record producers tab ── */
+function ProducersTab() {
+  const [producers, setProducers] = useState([]);
+  const [draft, setDraft] = useState({ name: '', table: null, short_description: '', script: '' });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const load = () => api.get('/catalog/record-producers').then(setProducers).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, []);
+
+  const create = async () => {
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const r = await api.post('/catalog/record-producers', {
+        name: draft.name,
+        table_name: draft.table?.id,
+        short_description: draft.short_description,
+        script: draft.script,
+      });
+      setNotice(`Created record producer "${disp(r, 'name')}" → ${draft.table?.id}`);
+      setDraft({ name: '', table: null, short_description: '', script: '' });
+      load();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="split">
+      <div className="card">
+        <div className="card-title">New record producer</div>
+        <div className="field"><label className="label">Name</label>
+          <input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
+        <div className="field"><label className="label">Target table</label>
+          <TableField value={draft.table} onChange={(t) => setDraft({ ...draft, table: t })} /></div>
+        <div className="field"><label className="label">Short description</label>
+          <input className="input" value={draft.short_description} onChange={(e) => setDraft({ ...draft, short_description: e.target.value })} /></div>
+        <div className="field"><label className="label">Script (maps variables → record)</label>
+          <textarea className="textarea mono" placeholder="current.short_description = producer.issue_summary;" value={draft.script} onChange={(e) => setDraft({ ...draft, script: e.target.value })} /></div>
+        <button className="btn primary sm" onClick={create} disabled={busy || !draft.name || !draft.table}>Create producer</button>
+        {notice && <p className="ok-text">{notice}</p>}
+        {error && <p className="error-text">{error}</p>}
+      </div>
+      <div className="card">
+        <div className="card-title">Record producers</div>
+        <table className="table">
+          <thead><tr><th>Name</th><th>Target table</th><th>Active</th></tr></thead>
+          <tbody>
+            {producers.map((p) => (
+              <tr key={val(p, 'sys_id')}>
+                <td>{disp(p, 'name')}</td>
+                <td className="mono">{disp(p, 'table_name')}</td>
+                <td><span className={`badge ${val(p, 'active') === 'true' ? 'green' : ''}`}>{val(p, 'active') === 'true' ? 'active' : 'off'}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {producers.length === 0 && <div className="empty">No record producers yet. Variables can be added from the Items tab (producers are catalog items too).</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ── Page ── */
+export default function Catalog() {
+  const [tab, setTab] = useState('items');
+  const [meta, setMeta] = useState({ variableTypes: [] });
+  const [categories, setCategories] = useState([]);
+  const [catalogs, setCatalogs] = useState([]);
+
+  useEffect(() => {
+    api.get('/catalog/meta').then(setMeta).catch(() => {});
+    api.get('/catalog/categories').then(setCategories).catch(() => {});
+    api.get('/catalog/catalogs').then(setCatalogs).catch(() => {});
+  }, []);
+
+  const typeLabel = (code) => meta.variableTypes.find((t) => String(t.code) === String(code))?.label || code;
+
+  return (
+    <div className="stack">
+      <div className="tabs">
+        <button className={`tab ${tab === 'items' ? 'active' : ''}`} onClick={() => setTab('items')}>Items & variables</button>
+        <button className={`tab ${tab === 'sets' ? 'active' : ''}`} onClick={() => setTab('sets')}>Variable sets</button>
+        <button className={`tab ${tab === 'guides' ? 'active' : ''}`} onClick={() => setTab('guides')}>Order guides</button>
+        <button className={`tab ${tab === 'producers' ? 'active' : ''}`} onClick={() => setTab('producers')}>Record producers</button>
+      </div>
+      {tab === 'items' && <ItemsTab meta={meta} categories={categories} catalogs={catalogs} typeLabel={typeLabel} />}
+      {tab === 'sets' && <SetsTab meta={meta} typeLabel={typeLabel} />}
+      {tab === 'guides' && <GuidesTab />}
+      {tab === 'producers' && <ProducersTab />}
+    </div>
+  );
+}
