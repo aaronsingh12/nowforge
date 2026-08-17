@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -171,6 +172,41 @@ async function listSourceFiles() {
     const entries = await fsp.readdir(FLOWS_DIR);
     return entries.filter((f) => f.endsWith('.now.ts'));
   } catch { return []; }
+}
+
+/* ------------------------------------------------------------------ *
+ * Request identity — the real anchor for invariant (d)
+ *
+ * The filename slug was originally derived from the model-supplied artifact
+ * name, which is NOT stable: the same spec produced "Escalate P1 Network
+ * Incidents" on one run and "...Incident" on the next, yielding a second file,
+ * fresh Now.ID keys, and duplicate records on the instance.
+ *
+ * Identity therefore comes from the REQUEST, not from what the model decided to
+ * call it. Each generated source carries a fingerprint of its spec, so a
+ * regeneration finds its own previous file and overwrites it. The previous
+ * source is then fed back to the model with an instruction to preserve every
+ * name and every Now.ID key — which is what actually keeps sys_ids stable,
+ * since keys.ts is keyed on those strings.
+ * ------------------------------------------------------------------ */
+
+const SPEC_MARKER = '// nowforge-spec:';
+
+export function specFingerprint(spec) {
+  const normalized = String(spec || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+}
+
+const stampSource = (source, fingerprint) =>
+  `${SPEC_MARKER} ${fingerprint}\n${source.replace(new RegExp(`^${SPEC_MARKER}.*\\r?\\n`), '')}`;
+
+/** Existing source generated from this same request, if any. */
+async function findSourceByFingerprint(fingerprint) {
+  for (const f of await listSourceFiles()) {
+    const src = await fsp.readFile(path.join(FLOWS_DIR, f), 'utf8').catch(() => '');
+    if (src.includes(`${SPEC_MARKER} ${fingerprint}`)) return { file: f, source: src };
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ *
@@ -346,9 +382,11 @@ const INTENT_SYSTEM = `You extract structured intent from a ServiceNow automatio
   "kind": "flow" | "subflow" | "flow+subflow",
   "trigger_kind": "record_created" | "record_updated" | "record_created_or_updated" | "scheduled" | "none",
   "trigger_table": "servicenow table name, or null for scheduled/subflow",
-  "lookups": [ { "table": "sys_user_group|sys_user|sc_category|cmdb_ci|...", "name": "the exact proper noun from the request" } ]
+  "lookups": [ { "table": "sys_user_group|sys_user|sc_category|cmdb_ci|...", "name": "the exact proper noun from the request" } ],
+  "promised_effects": [ "each distinct OBSERVABLE change the request promises" ]
 }
-"lookups" must list every proper noun the request names that has to become a real record reference (groups, people, categories, CIs). Use [] if there are none.`;
+"lookups" must list every proper noun the request names that has to become a real record reference (groups, people, categories, CIs). Use [] if there are none.
+"promised_effects" lists only effects that can be OBSERVED on a record afterwards — a field set, a note added, a record created. One entry per distinct effect. Sending an email is NOT observable on a record; looking something up is not an effect. Example: "adds an escalation work note to the incident", "sets assigned_to to the group manager".`;
 
 async function extractIntent(spec) {
   // Budgets are deliberately generous: reasoning models bill hidden reasoning
@@ -399,10 +437,37 @@ async function buildLiveContext(intent) {
   for (const l of intent.lookups || []) {
     if (!l?.table || !l?.name) continue;
     try {
-      const hits = await referenceLookup(l.table, l.name, 5);
+      const found = await referenceLookup(l.table, l.name, 5);
+      // referenceLookup orders by display field, so a LIKE search for "Network"
+      // returns "ATF_TestGroup_Network" ahead of the exact "Network". Put exact
+      // matches first: the model reads the list top-down, and enrichment below
+      // describes the best candidate.
+      const wanted = String(l.name).trim().toLowerCase();
+      const hits = [...found].sort((a, b) => {
+        const rank = (h) => (String(h.display).trim().toLowerCase() === wanted ? 0 : 1);
+        return rank(a) - rank(b);
+      });
       if (hits.length) {
         resolved.push({ table: l.table, search: l.name, matches: hits });
-        parts.push(`RESOLVED REFERENCE "${l.name}" on ${l.table}:\n${hits.map((h) => `  sys_id=${h.sys_id} display=${h.display}`).join('\n')}`);
+        // Also surface a few related fields of the best match. Verification
+        // assertions frequently name a dot-walked value ("the group's manager"),
+        // and without this the model invents a plausible display name — which
+        // fails the assertion for a flow that is actually correct.
+        const related = [];
+        try {
+          const rec = await table.get(l.table, hits[0].sys_id);
+          for (const f of ['name', 'manager', 'email', 'user_name', 'parent', 'assignment_group']) {
+            const cell = rec?.[f];
+            if (!cell) continue;
+            const dv = typeof cell === 'object' ? (cell.display_value ?? cell.value) : cell;
+            const rv = typeof cell === 'object' ? cell.value : cell;
+            if (dv) related.push(`    ${f} = "${dv}"${rv && rv !== dv ? ` (sys_id ${rv})` : ''}`);
+          }
+        } catch { /* related fields are a bonus, never required */ }
+        parts.push(
+          `RESOLVED REFERENCE "${l.name}" on ${l.table}:\n${hits.map((h) => `  sys_id=${h.sys_id} display=${h.display}`).join('\n')}` +
+          (related.length ? `\n  fields on "${hits[0].display}" — use these exact display values, do not invent names:\n${related.join('\n')}` : '')
+        );
       } else {
         parts.push(`NO MATCH on ${l.table} for "${l.name}". Do NOT invent a sys_id — match by name in an encoded query instead (e.g. assignment_group.name=${l.name}).`);
       }
@@ -436,7 +501,7 @@ async function readCheatsheet() {
  * Generate one Fluent source file from a plain-language spec.
  * `priorError` carries build diagnostics back into the prompt on a retry.
  */
-export async function generate(spec, { intent, context, priorSource, priorError } = {}) {
+export async function generate(spec, { intent, context, priorSource, priorError, existingSource } = {}) {
   const cheatsheet = await readCheatsheet();
   const system = [
     'You are a ServiceNow Fluent SDK code generator. You emit ServiceNow Flow Designer flows as TypeScript for @servicenow/sdk v4.',
@@ -447,7 +512,19 @@ export async function generate(spec, { intent, context, priorSource, priorError 
 
   const userParts = [`AUTOMATION REQUEST:\n${spec}`];
   if (context?.text) userParts.push(`--- LIVE INSTANCE CONTEXT ---\n${context.text}`);
-  if (intent?.name) userParts.push(`Use this as the artifact name: "${intent.name}"`);
+  if (existingSource) {
+    // Regeneration of a request already deployed: this must UPDATE the existing
+    // records, not create new ones. keys.ts is keyed on the Now.ID strings and
+    // the platform on the artifact names, so both must survive verbatim.
+    userParts.push(
+      `THIS REQUEST WAS ALREADY IMPLEMENTED. Below is the deployed source.\n` +
+      `You MUST reuse it as the base and keep EVERY name: value and EVERY Now.ID['...'] key exactly as they appear — ` +
+      `they are the stable identity of live records, and changing one creates a duplicate on the instance instead of updating it. ` +
+      `Change only what the request now requires; if nothing changed, return it essentially unchanged.\n\n--- DEPLOYED SOURCE ---\n${existingSource}`
+    );
+  } else if (intent?.name) {
+    userParts.push(`Use this as the artifact name: "${intent.name}"`);
+  }
   if (priorSource && priorError) {
     userParts.push(
       `YOUR PREVIOUS ATTEMPT FAILED TO COMPILE. Fix it.\n\n--- PREVIOUS SOURCE ---\n${priorSource}\n\n--- COMPILER DIAGNOSTICS ---\n${priorError}\n\nReturn the COMPLETE corrected file, not a patch.`
@@ -496,6 +573,11 @@ export async function generateAndValidate(spec, emit = () => {}) {
   const context = await buildLiveContext(intent);
   if (context.resolved.length) emit({ type: 'resolved', resolved: context.resolved });
 
+  // Invariant (d): identity follows the request, not the model's chosen name.
+  const fingerprint = specFingerprint(spec);
+  const existing = await findSourceByFingerprint(fingerprint);
+  if (existing) emit({ type: 'regenerating', file: existing.file, note: 'Updating the artifact this request already deployed.' });
+
   let source = null;
   let file = null;
   let lastDiagnostics = null;
@@ -507,14 +589,17 @@ export async function generateAndValidate(spec, emit = () => {}) {
     source = await generate(spec, {
       intent,
       context,
+      existingSource: existing?.source,
       priorSource: attempt > 1 ? source : undefined,
       priorError: attempt > 1 ? lastDiagnostics : undefined,
     });
+    source = stampSource(source, fingerprint);
 
     const artifacts = parseArtifacts(source);
-    const name = intent.name || artifacts[0]?.name || 'Generated Flow';
-    // Invariant (d): deterministic filename, so regeneration overwrites in place.
-    const nextFile = sourcePath(name);
+    const name = artifacts.find((a) => a.kind === 'flow')?.name || artifacts[0]?.name || intent.name || 'Generated Flow';
+    // Reuse this request's existing file when it has one, so regeneration
+    // overwrites in place instead of creating a second artifact family.
+    const nextFile = existing ? path.join(FLOWS_DIR, existing.file) : sourcePath(name);
     if (file && file !== nextFile) { await fsp.rm(file, { force: true }); }
     file = nextFile;
 
@@ -651,7 +736,10 @@ export async function createLiveFlow(spec, emit = () => {}) {
   const isRecordTriggered = String(gen.intent?.trigger_kind || '').startsWith('record');
   if (isRecordTriggered) {
     const vr = await generateVerification(
-      { spec, source: gen.source, context: gen.context, flowName: gen.name },
+      {
+        spec, source: gen.source, context: gen.context, flowName: gen.name,
+        promisedEffects: gen.intent?.promised_effects || [],
+      },
       emit
     );
     if (vr.ok) {
@@ -672,7 +760,9 @@ export async function createLiveFlow(spec, emit = () => {}) {
 
   // No terminal 'done' here — the caller (route) emits it with the full result,
   // and emitting a bare one first would give consumers two terminal events.
+  // Same ordering discipline as removeManaged: dep first, verdict last.
   return {
+    ...dep,
     ok: true,
     name: gen.name,
     file: path.basename(gen.file),
@@ -680,7 +770,6 @@ export async function createLiveFlow(spec, emit = () => {}) {
     attempts: gen.attempts,
     source: gen.source,
     verification,
-    ...dep,
   };
 }
 
@@ -752,14 +841,17 @@ export async function removeManaged(name, emit = () => {}) {
     if (hits.length) stillThere.push(a.name);
   }
 
+  // `dep` carries its own ok:true for the install. It must be spread FIRST so
+  // the removal verdict below wins — spreading it last silently reported a
+  // successful delete for an artifact that was still on the instance.
   return {
+    ...dep,
     ok: stillThere.length === 0,
     removed: artifacts.map((a) => a.name),
     stillPresent: stillThere,
     message: stillThere.length
       ? `Install completed but ${stillThere.join(', ')} is still present on the instance.`
       : `Removed ${artifacts.map((a) => a.name).join(', ')} from the instance.`,
-    ...dep,
   };
 }
 
@@ -868,19 +960,25 @@ RULES:
 1. setup.payload MUST satisfy the flow's own trigger condition — read the condition out of the source and mirror it exactly, using real sys_ids and real numeric choice VALUES from the live context.
 2. Every assertion must test an effect the REQUEST PROMISED (a field the flow writes, a record the flow creates, a note the flow adds).
 3. FORBIDDEN: asserting a field that setup.payload itself sets. That is trivially true and proves nothing about the flow. If the request promises "set assigned_to when empty", then setup.payload must NOT set assigned_to, and the assertion checks assigned_to afterwards.
+3b. COVER EVERY PROMISE: produce one assertion for EACH observable effect listed under PROMISED EFFECTS below. If three effects are promised, the spec needs three assertions. Asserting fewer than the request promises is incomplete and will be rejected.
 4. Use "display" for reference fields and choice fields (a person's name, a group's name); use "value" for raw strings, numbers and journal text.
 5. For journal fields (work_notes, comments) assert the distinctive text the flow writes — a substring match is applied.
 6. In byQuery you may use the token {{setup.sys_id}}, which is replaced with the created record's sys_id. Use it to find records the flow created (e.g. "parent={{setup.sys_id}}").
 7. cleanup MUST include the setup record ({ "bySetupRecord": true }) plus every record the flow creates.
-8. Keep setup.payload minimal: only what the trigger condition requires, plus a short_description so the record is identifiable.`;
+8. Keep setup.payload minimal: only what the trigger condition requires, plus a short_description so the record is identifiable.
+9. DERIVED FIELDS — critical. On task tables (incident, problem, change_request, sc_task) "priority" is CALCULATED from "impact" and "urgency". Writing priority directly is silently overwritten on insert: {"priority":"1"} lands as 4 - Low. To create a P1 record set {"impact":"1","urgency":"1"} and do NOT set priority at all. The same applies to any field the platform computes — set the inputs, not the result.
+10. setup.payload must make the trigger condition TRUE after the platform's own rules run, not merely look like it. If the trigger tests a calculated field, drive it through the fields it is calculated from.`;
 
 /** Ask the model for a verification spec for a freshly generated flow. */
-async function generateVerifySpec({ spec, source, context, flowName, priorErrors }) {
+async function generateVerifySpec({ spec, source, context, flowName, promisedEffects, priorErrors }) {
   const parts = [
     `AUTOMATION REQUEST (the promises to verify):\n${spec}`,
     `FLOW NAME: ${flowName}`,
     `COMPILED FLUENT SOURCE:\n${source}`,
   ];
+  if (promisedEffects?.length) {
+    parts.push(`PROMISED EFFECTS — one assertion each, ${promisedEffects.length} in total:\n${promisedEffects.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}`);
+  }
   if (context?.text) parts.push(`--- LIVE INSTANCE CONTEXT ---\n${context.text}`);
   if (priorErrors?.length) {
     parts.push(`YOUR PREVIOUS VERIFICATION SPEC WAS REJECTED:\n${priorErrors.map((e) => `- ${e}`).join('\n')}\n\nReturn a corrected COMPLETE spec.`);
@@ -901,7 +999,7 @@ async function generateVerifySpec({ spec, source, context, flowName, priorErrors
  * HERE rather than trusted to the prompt: an assertion that reads a field the
  * setup payload already wrote would pass no matter what the flow does.
  */
-export function validateVerifySpec(v) {
+export function validateVerifySpec(v, { promisedEffects = [] } = {}) {
   const errors = [];
   if (!v || typeof v !== 'object') return { ok: false, errors: ['Not a JSON object.'] };
 
@@ -916,6 +1014,14 @@ export function validateVerifySpec(v) {
   if (!Array.isArray(v.assert) || v.assert.length === 0) {
     errors.push('assert must contain at least one assertion.');
   } else {
+    // Every promised effect needs its own assertion, or the run proves only
+    // part of what the request asked for while reporting a clean pass.
+    if (promisedEffects.length > 1 && v.assert.length < promisedEffects.length) {
+      errors.push(
+        `The request promises ${promisedEffects.length} observable effects but only ${v.assert.length} assertion(s) were written. ` +
+        `Add one assertion per promised effect: ${promisedEffects.map((e, i) => `(${i + 1}) ${e}`).join('; ')}.`
+      );
+    }
     v.assert.forEach((a, i) => {
       const at = `assert[${i}]`;
       if (!a?.field) errors.push(`${at}.field is required.`);
@@ -950,7 +1056,7 @@ async function generateVerification(args, emit = () => {}) {
     emit({ type: 'verify_spec_attempt', attempt, of: 3 });
     const candidate = await generateVerifySpec({ ...args, priorErrors });
     if (!candidate) { priorErrors = ['Response was not valid JSON.']; continue; }
-    const check = validateVerifySpec(candidate);
+    const check = validateVerifySpec(candidate, { promisedEffects: args.promisedEffects || [] });
     if (check.ok) return { ok: true, spec: candidate, attempts: attempt };
     priorErrors = check.errors;
     emit({ type: 'verify_spec_rejected', attempt, errors: check.errors });
