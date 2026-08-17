@@ -8,6 +8,7 @@ declare global {
                     add_work_note: {
                         table: 'sys_hub_action_instance_v2'
                         id: '10c0ec9dcf0c486ab1e40f73c0edbe8d'
+                        deleted: true
                     }
                     auto_triage_incident_flow: {
                         table: 'sys_hub_flow'
@@ -81,10 +82,12 @@ declare global {
                     escalate_high_priority_problem: {
                         table: 'sys_hub_flow'
                         id: '7b3b6c461a9a47d3be625bc2b168ccb4'
+                        deleted: true
                     }
                     flag_high_risk_change_flow: {
                         table: 'sys_hub_flow'
                         id: 'bb2a09da78684982b31daf9a0edf3cff'
+                        deleted: true
                     }
                     flag_high_risk_change_trigger: {
                         table: 'sys_hub_trigger_instance_v2'
@@ -94,14 +97,17 @@ declare global {
                     flag_high_risk_trigger: {
                         table: 'sys_hub_trigger_instance_v2'
                         id: '63969ce6be924657b40ec4ea81df9652'
+                        deleted: true
                     }
                     log: {
                         table: 'sys_hub_action_instance_v2'
                         id: '7161dff12b824dc4bd962ff85a46711e'
+                        deleted: true
                     }
                     log_change_number: {
                         table: 'sys_hub_action_instance_v2'
                         id: '382415adc84a4365bcd57a5259be5f3f'
+                        deleted: true
                     }
                     nm_has_manager_email: {
                         table: 'sys_hub_flow_logic_instance_v2'
@@ -182,10 +188,12 @@ declare global {
                     trigger: {
                         table: 'sys_hub_trigger_instance_v2'
                         id: '2c078fbb556a44f7af14716d8909515e'
+                        deleted: true
                     }
                     update: {
                         table: 'sys_hub_action_instance_v2'
                         id: '52f496cb8c114c5ab66ac7c6c86fec58'
+                        deleted: true
                     }
                 }
                 composite: [
