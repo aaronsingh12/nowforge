@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { flows, designFlowBlueprint, blueprintToBusinessRule } from '../servicenow/flows.js';
-import { capability, createLiveFlow, listManaged, removeManaged } from '../servicenow/fluent.js';
+import { capability, createLiveFlow, listManaged, removeManaged, smokeRun } from '../servicenow/fluent.js';
 
 export const flowsRouter = Router();
 
@@ -44,6 +44,20 @@ flowsRouter.post('/live', async (req, res) => {
     clearInterval(keepAlive);
     res.end();
   }
+});
+
+/**
+ * POST /api/flows/live/smoke { table, values, wait_ms }
+ * Explicitly fires a flow by creating (and then deleting) a matching record.
+ * Never invoked as part of a deploy — the caller has to ask for it.
+ */
+flowsRouter.post('/live/smoke', async (req, res, next) => {
+  try {
+    const { table, values, wait_ms } = req.body || {};
+    if (!table || !values) return res.status(400).json({ message: 'table and values are required' });
+    const result = await smokeRun({ table, values, waitMs: wait_ms || 45000 });
+    res.status(result.ok ? 200 : 422).json(result);
+  } catch (err) { next(err); }
 });
 
 flowsRouter.delete('/live/:name', async (req, res, next) => {

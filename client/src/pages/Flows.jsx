@@ -1,5 +1,235 @@
 import { useEffect, useState } from 'react';
-import { api, val, disp } from '../api.js';
+import { api, sse, val, disp } from '../api.js';
+
+/** Green when live authoring is ready; otherwise the exact commands to fix it. */
+function CapabilityBanner({ cap }) {
+  if (!cap) return null;
+  if (cap.ok) {
+    return (
+      <div className="note" style={{ borderLeftColor: 'var(--verdigris)' }}>
+        <b>Live flow authoring ready.</b>{' '}
+        ServiceNow SDK {cap.cli?.version} · credential <span className="mono">{cap.auth?.alias}</span>
+        {cap.auth?.host ? <> → <span className="mono">{cap.auth.host}</span></> : null}
+        {' '}· scope <span className="mono">{cap.workspace?.scope}</span>
+        {cap.auth?.matchesNowForgeInstance === false && (
+          <div style={{ marginTop: 6, color: 'var(--amber, #b8860b)' }}>
+            Warning: the SDK credential points at a different instance than NowForge is connected to.
+            Flows would deploy to <span className="mono">{cap.auth.host}</span>.
+          </div>
+        )}
+        {cap.lastInstall && (
+          <div style={{ marginTop: 6, fontSize: 12, color: 'var(--muted)' }}>
+            Last install {cap.lastInstall.ok ? 'succeeded' : 'failed'}
+            {cap.lastInstall.activation ? ` — flows activated ${cap.lastInstall.activation}` : ''}
+            {cap.lastInstall.at ? ` (${new Date(cap.lastInstall.at).toLocaleString()})` : ''}
+          </div>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="note warn">
+      <b>Live flow authoring unavailable.</b> NowForge falls back to blueprint + Business Rule until this is fixed.
+      {cap.cli && !cap.cli.present && <div style={{ marginTop: 4 }}>ServiceNow SDK not found.</div>}
+      {cap.auth?.error && <div style={{ marginTop: 4 }}>{cap.auth.error}</div>}
+      {cap.workspace?.error && <div style={{ marginTop: 4 }}>{cap.workspace.error}</div>}
+      {cap.fixes?.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          {cap.fixes.map((f, i) => (
+            <div key={i} style={{ marginBottom: 6 }}>
+              <div style={{ fontSize: 12.5 }}>{f.problem}</div>
+              <pre className="mono" style={{ margin: '2px 0 0', fontSize: 11.5, whiteSpace: 'pre-wrap' }}>{f.command}</pre>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const PROGRESS_LABEL = {
+  generating: 'Reading the request…',
+  intent: 'Intent extracted',
+  resolved: 'Resolved references on the instance',
+  attempt: 'Generating Fluent TypeScript',
+  building: 'Compiling (offline — the instance is untouched)',
+  built: 'Compiled cleanly',
+  build_failed: 'Compile failed — feeding diagnostics back',
+  deploying: 'Installing on the instance',
+  verifying: 'Reading the result back',
+  done: 'Done',
+};
+
+function progressLine(e) {
+  const base = PROGRESS_LABEL[e.type] || e.type;
+  if (e.type === 'attempt') return `${base} (attempt ${e.attempt}/${e.of})`;
+  if (e.type === 'building') return `${base} — ${e.file}`;
+  if (e.type === 'intent') return `${base}: ${e.intent?.kind} on ${e.intent?.trigger_table || 'n/a'}`;
+  if (e.type === 'resolved') {
+    return `${base}: ${e.resolved.map((r) => `${r.search}→${r.matches[0]?.sys_id?.slice(0, 8)}…`).join(', ')}`;
+  }
+  if (e.type === 'build_failed') return `${base} (attempt ${e.attempt})`;
+  return base;
+}
+
+/** Spec in → streamed build log → result card. */
+function LiveBuild({ capOk, seedSpec, onDeployed }) {
+  const [spec, setSpec] = useState('');
+  const [events, setEvents] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState(null);
+  const [failure, setFailure] = useState(null);
+
+  useEffect(() => { if (seedSpec) setSpec(seedSpec); }, [seedSpec]);
+
+  const run = async () => {
+    setRunning(true); setEvents([]); setResult(null); setFailure(null);
+    try {
+      await sse('/flows/live', { spec }, (e) => {
+        if (e.type === 'done' && e.result) { setResult(e.result); onDeployed?.(); }
+        else if (e.type === 'error') setFailure(e);
+        else setEvents((prev) => [...prev, e]);
+      });
+    } catch (e) {
+      setFailure({ message: e.message });
+    } finally { setRunning(false); }
+  };
+
+  return (
+    <div className="card">
+      <div className="card-title">Live build — deploy a real flow</div>
+      <textarea
+        className="textarea"
+        placeholder="e.g. When a P1 incident is created for the Network group, notify the group manager and add a work note…"
+        value={spec}
+        onChange={(e) => setSpec(e.target.value)}
+      />
+      <div className="row" style={{ marginTop: 8 }}>
+        <button className="btn amber" onClick={run} disabled={running || !spec.trim() || !capOk}>
+          {running ? 'Building…' : 'Generate & deploy'}
+        </button>
+        {!capOk && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>Unavailable — see the banner above.</span>}
+      </div>
+
+      {events.length > 0 && (
+        <div className="card" style={{ marginTop: 12, background: 'transparent' }}>
+          {events.map((e, i) => (
+            <div key={i} style={{ fontSize: 12.5, padding: '2px 0' }}>
+              <span className="mono" style={{ color: 'var(--muted)' }}>›</span> {progressLine(e)}
+              {e.type === 'build_failed' && (
+                <pre className="mono" style={{ fontSize: 11, whiteSpace: 'pre-wrap', color: 'var(--muted)', margin: '4px 0 0' }}>
+                  {String(e.diagnostics || '').slice(0, 900)}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {result && (
+        <div className="note" style={{ marginTop: 12, borderLeftColor: 'var(--verdigris)' }}>
+          <div className="row">
+            <b>{result.name}</b>
+            <span className={`badge ${result.verified?.type === 'subflow' ? 'blue' : ''}`}>{result.verified?.type || 'flow'}</span>
+            {result.verified?.active && <span className="badge green">active</span>}
+          </div>
+          <div style={{ fontSize: 12.5, marginTop: 6 }}>
+            Compiled on attempt {result.attempts} · flows activated {result.activation} ·
+            {' '}{result.verified?.triggers ?? 0} trigger, {result.verified?.actions ?? 0} actions, {result.verified?.logic ?? 0} logic
+          </div>
+          <div className="mono" style={{ fontSize: 11, marginTop: 4 }}>sys_id {result.verified?.sys_id}</div>
+          {result.verified?.link && (
+            <a className="btn sm" style={{ marginTop: 8, display: 'inline-block' }} href={result.verified.link} target="_blank" rel="noreferrer">
+              Open in ServiceNow
+            </a>
+          )}
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>{result.shippedNote}</p>
+          {result.rollbackUrl && (
+            <a className="mono" style={{ fontSize: 11 }} href={result.rollbackUrl} target="_blank" rel="noreferrer">rollback this install</a>
+          )}
+        </div>
+      )}
+
+      {failure && (
+        <div className="note warn" style={{ marginTop: 12 }}>
+          <b>{failure.stage === 'capability' ? 'Live authoring unavailable' : 'Build failed'}</b>
+          <div style={{ fontSize: 12.5, marginTop: 4 }}>{failure.message}</div>
+          {failure.attempts && <div style={{ fontSize: 12.5 }}>Attempts: {failure.attempts}</div>}
+          {failure.diagnostics && (
+            <pre className="mono" style={{ fontSize: 11, whiteSpace: 'pre-wrap', marginTop: 6 }}>
+              {String(failure.diagnostics).slice(0, 1500)}
+            </pre>
+          )}
+          {failure.cleanedUp && (
+            <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+              The candidate source was removed; nothing was deployed to the instance.
+            </div>
+          )}
+          {failure.hint && <p className="note" style={{ marginTop: 8 }}>{failure.hint}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** NowForge-managed Fluent sources and their live state. */
+function ManagedArtifacts({ reloadKey, onChanged }) {
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+
+  const load = () => api.get('/flows/live').then(setData).catch((e) => setError(e.message));
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [reloadKey]);
+
+  const remove = async (name) => {
+    if (!window.confirm(`Delete "${name}" from the instance?\n\nIts Fluent source is removed and the app reinstalled, which deletes the record on the instance.`)) return;
+    setBusy(name); setError('');
+    try {
+      await api.del(`/flows/live/${encodeURIComponent(name)}`);
+      await load();
+      onChanged?.();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(''); }
+  };
+
+  if (!data) return null;
+  return (
+    <div className="card">
+      <div className="card-title">NowForge-managed artifacts</div>
+      {data.managed.length === 0 && <div className="empty">Nothing managed yet — build one above.</div>}
+      {data.managed.length > 0 && (
+        <table className="table">
+          <thead><tr><th>Name</th><th>Kind</th><th>On instance</th><th>Source file</th><th /></tr></thead>
+          <tbody>
+            {data.managed.map((m) => (
+              <tr key={m.file + m.name}>
+                <td>{m.name}</td>
+                <td><span className={`badge ${m.kind === 'subflow' ? 'blue' : ''}`}>{m.kind}</span></td>
+                <td>
+                  {m.live
+                    ? <span className={`badge ${m.live.active ? 'green' : ''}`}>{m.live.active ? 'active' : 'inactive'}</span>
+                    : <span className="badge red">not found</span>}
+                </td>
+                <td className="mono" style={{ fontSize: 11 }}>{m.file}</td>
+                <td>
+                  <button className="btn sm" onClick={() => remove(m.name)} disabled={busy === m.name}>
+                    {busy === m.name ? 'Removing…' : 'Delete'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {data.staged?.length > 0 && (
+        <p className="note" style={{ marginTop: 10 }}>
+          Staged (build-verified, deliberately not deployed): <span className="mono">{data.staged.join(', ')}</span>
+        </p>
+      )}
+      {error && <p className="error-text">{error}</p>}
+    </div>
+  );
+}
 
 function KV({ record, keys }) {
   const rows = keys.filter((k) => disp(record, k));
@@ -16,7 +246,7 @@ function KV({ record, keys }) {
   );
 }
 
-function Blueprint({ bp }) {
+function Blueprint({ bp, capOk, onDeploy }) {
   const [ruleResult, setRuleResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -46,9 +276,14 @@ function Blueprint({ bp }) {
         <h3 style={{ fontSize: 15 }}>{bp.name}</h3>
         <div className="row">
           <button className="btn sm" onClick={download}>Download JSON</button>
+          {capOk && (
+            <button className="btn primary sm" onClick={() => onDeploy?.(bp)}>
+              Deploy as real flow
+            </button>
+          )}
           {recordTriggered && (
             <button className="btn amber sm" onClick={createRule} disabled={busy}>
-              {busy ? 'Creating…' : 'Create Business Rule fallback'}
+              {busy ? 'Creating…' : 'Business Rule fallback'}
             </button>
           )}
         </div>
@@ -130,6 +365,29 @@ export default function Flows() {
   const [bpError, setBpError] = useState('');
   const [designing, setDesigning] = useState(false);
   const [error, setError] = useState('');
+  const [cap, setCap] = useState(null);
+  const [seedSpec, setSeedSpec] = useState('');
+  const [managedKey, setManagedKey] = useState(0);
+
+  useEffect(() => {
+    api.get('/flows/live/capability').then(setCap).catch(() => setCap({ ok: false, fixes: [] }));
+  }, []);
+
+  /** Blueprint → live build: flatten the design into a spec and scroll it into view. */
+  const deployBlueprint = (b) => {
+    const t = b.trigger || {};
+    const lines = [
+      `Create an automation named "${b.name}".`,
+      b.description ? `Purpose: ${b.description}` : null,
+      t.type ? `Trigger: ${t.type}${t.table ? ` on the ${t.table} table` : ''}${t.condition_plain ? ` when ${t.condition_plain}` : ''}.` : null,
+      t.condition_encoded_query ? `Trigger condition (encoded query): ${t.condition_encoded_query}` : null,
+      t.schedule ? `Schedule: ${t.schedule}` : null,
+      'Steps:',
+      ...(b.steps || []).map((s, i) => `  ${s.order ?? i + 1}. [${s.kind}] ${s.summary}${s.flow_designer_action ? ` (action: ${s.flow_designer_action})` : ''}`),
+    ].filter(Boolean);
+    setSeedSpec(lines.join('\n'));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   const load = () =>
     api.get(`/flows?search=${encodeURIComponent(search)}&type=${typeFilter}`)
@@ -169,11 +427,19 @@ export default function Flows() {
 
   return (
     <div className="stack">
-      <div className="note warn">
-        ServiceNow exposes no public API for authoring Flow Designer flows — definitions are compiled snapshots.
-        NowForge reads flows fully, and for new automations the AI designer produces an exact build spec; record-triggered
-        specs can be materialized as a classic Business Rule (created inactive). Direct flow writes are deliberately not shipped.
+      <div className="note">
+        Flows are authored through ServiceNow's own SDK (Fluent): NowForge generates TypeScript, compiles it
+        offline — so nothing reaches the instance unless it compiles — then installs it and reads the result back.
+        There is still no REST API for writing <span className="mono">sys_hub_*</span> directly, and NowForge never
+        attempts it. Blueprint and the inactive Business Rule remain the fallback tier for environments where the
+        SDK cannot run.
       </div>
+
+      <CapabilityBanner cap={cap} />
+
+      <LiveBuild capOk={Boolean(cap?.ok)} seedSpec={seedSpec} onDeployed={() => { setManagedKey((k) => k + 1); load(); }} />
+
+      <ManagedArtifacts reloadKey={managedKey} onChanged={() => load()} />
 
       <div className="card">
         <div className="spread">
@@ -188,7 +454,7 @@ export default function Flows() {
               {designing ? 'Designing…' : 'Generate blueprint'}
             </button>
             {bpError && <p className="error-text">{bpError}</p>}
-            {bp && <Blueprint bp={bp} />}
+            {bp && <Blueprint bp={bp} capOk={Boolean(cap?.ok)} onDeploy={deployBlueprint} />}
           </div>
         )}
       </div>
