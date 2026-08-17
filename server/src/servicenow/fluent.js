@@ -664,7 +664,8 @@ export async function listManaged() {
       out.push({ file: f, name: a.name, kind: a.kind, live });
     }
   }
-  return { managed: out, staged: await fsp.readdir(STAGED_DIR).catch(() => []) };
+  const staged = await fsp.readdir(STAGED_DIR).catch(() => []);
+  return { managed: out, staged: staged.filter((f) => f.endsWith('.now.ts')) };
 }
 
 /**

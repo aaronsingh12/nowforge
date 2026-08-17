@@ -2,16 +2,34 @@ import { Router } from 'express';
 import { getSettings, saveSettings, publicSettings } from '../config/store.js';
 import { testConnection, resetAuthCache } from '../servicenow/client.js';
 import { getSchema, referenceLookup, tableLookup, clearSchemaCaches, getTableHierarchy } from '../servicenow/schema.js';
+import { capability } from '../servicenow/fluent.js';
 
 export const systemRouter = Router();
 
-systemRouter.get('/health', (_req, res) => {
+systemRouter.get('/health', async (_req, res) => {
   const s = getSettings();
+  let liveAuthoring = { ok: false, error: null };
+  try {
+    const cap = await capability();
+    liveAuthoring = {
+      ok: cap.ok,
+      cliVersion: cap.cli.version,
+      authAlias: cap.auth.alias,
+      authVerified: cap.auth.verified,
+      scope: cap.workspace.scope,
+      managedSources: cap.workspace.sources.length,
+      lastInstall: cap.lastInstall,
+      fixes: cap.fixes,
+    };
+  } catch (err) {
+    liveAuthoring = { ok: false, error: err.message };
+  }
   res.json({
     ok: true,
     connected: Boolean(s.connection.instanceUrl && s.connection.username),
     instanceUrl: s.connection.instanceUrl || null,
     llmProvider: s.llm.provider,
+    liveAuthoring,
   });
 });
 
