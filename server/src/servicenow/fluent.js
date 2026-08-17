@@ -8,6 +8,7 @@ import { getSettings } from '../config/store.js';
 import { chatOnce } from '../agent/providers/index.js';
 import { getSchema, referenceLookup } from './schema.js';
 import { flows } from './flows.js';
+import { table } from './client.js';
 
 const pexec = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -710,7 +711,63 @@ export async function removeManaged(name, emit = () => {}) {
   };
 }
 
+/**
+ * Optional smoke run: create a record that should match a flow's trigger, wait
+ * for an execution context, then delete the record again.
+ *
+ * This writes real data to the instance, so it is NEVER run automatically as
+ * part of a deploy — the UI exposes it as an explicit button and the agent must
+ * request it as its own approved tool call.
+ */
+export async function smokeRun({ table: tableName, values, waitMs = 45_000 }, emit = () => {}) {
+  if (!tableName || !values || typeof values !== 'object') {
+    return { ok: false, message: 'table and values are required for a smoke run.' };
+  }
+
+  emit({ type: 'smoke_creating', table: tableName });
+  const created = await table.create(tableName, values);
+  const sysId = created.sys_id?.value ?? created.sys_id;
+  const label = created.number?.value ?? created.name?.value ?? sysId;
+
+  const deadline = Date.now() + waitMs;
+  let executions = [];
+  try {
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000));
+      executions = await table.query('sys_flow_context', {
+        query: `source_record=${sysId}`,
+        fields: 'sys_id,name,state,sys_created_on',
+        limit: 10,
+      });
+      if (executions.length) break;
+      emit({ type: 'smoke_waiting', elapsedMs: waitMs - (deadline - Date.now()) });
+    }
+
+    // Give in-flight actions a moment to land before reading the record back.
+    if (executions.length) await new Promise((r) => setTimeout(r, 4000));
+    const after = await table.get(tableName, sysId);
+
+    emit({ type: 'smoke_cleanup' });
+    return {
+      ok: executions.length > 0,
+      record: { sys_id: sysId, label },
+      executions: executions.map((e) => ({
+        name: e.name?.display_value ?? e.name,
+        state: e.state?.display_value ?? e.state,
+        created: e.sys_created_on?.value ?? e.sys_created_on,
+      })),
+      recordAfter: after,
+      message: executions.length
+        ? `Flow executed: ${executions.length} execution context(s) for ${label}.`
+        : `No execution context appeared within ${Math.round(waitMs / 1000)}s for ${label}. The trigger condition may not match this record.`,
+    };
+  } finally {
+    // The test record is always removed, even if polling threw.
+    await table.remove(tableName, sysId).catch(() => {});
+  }
+}
+
 export const fluent = {
   capability, createLiveFlow, generateAndValidate, deploy,
-  listManaged, removeManaged, slugify, parseArtifacts,
+  listManaged, removeManaged, smokeRun, slugify, parseArtifacts,
 };

@@ -2,6 +2,7 @@ import { table, testConnection } from '../servicenow/client.js';
 import { getSchema, referenceLookup, tableLookup } from '../servicenow/schema.js';
 import { catalog } from '../servicenow/catalog.js';
 import { flows, designFlowBlueprint } from '../servicenow/flows.js';
+import { capability, createLiveFlow, listManaged, removeManaged, smokeRun } from '../servicenow/fluent.js';
 
 /**
  * Tool registry — the agent's hands.
@@ -223,7 +224,7 @@ export const TOOLS = [
   {
     name: 'design_flow_blueprint',
     description:
-      'Design a Flow Designer blueprint from a plain-language automation request: trigger, exact actions to pick, configs, reference fields, and a test plan. There is no public API to author flows directly, so this returns a precise build spec; record-triggered blueprints can then be materialized as a classic Business Rule via create_record on sys_script (with approval).',
+      'DESIGN STEP. Turn a plain-language automation request into a precise flow blueprint: trigger, exact actions, configs, reference fields, and a test plan. Use this to think through and show the design before building. To actually build it on the instance, pass the blueprint to create_flow_live.',
     mutating: false,
     inputSchema: {
       type: 'object',
@@ -231,6 +232,72 @@ export const TOOLS = [
       required: ['description'],
     },
     execute: ({ description }) => designFlowBlueprint(description),
+  },
+  {
+    name: 'flow_authoring_capability',
+    description:
+      'Check whether live Flow Designer authoring is available: ServiceNow SDK present, credentials stored, workspace healthy. Call this before promising to build a real flow. If ok is false, the returned fixes[] carry the exact commands, and the Business Rule fallback becomes the only option.',
+    mutating: false,
+    inputSchema: {
+      type: 'object',
+      properties: { deep: { type: 'boolean', description: 'Also run an authenticated probe against the instance (slower, ~8s)' } },
+      required: [],
+    },
+    execute: ({ deep }) => capability({ deep: Boolean(deep) }),
+  },
+  {
+    name: 'create_flow_live',
+    description:
+      'BUILD STEP. Create a REAL, active Flow Designer flow on the instance from a plain-language description or a blueprint from design_flow_blueprint. Generates Fluent TypeScript, compiles it offline (nothing reaches the instance unless it compiles), installs it, and reads the result back. Returns the flow name, sys_id, type and link. Requires user approval. Note: installing deploys the whole managed application, so the response lists every artifact shipped.',
+    mutating: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        description: { type: 'string', description: 'Plain-language automation request' },
+        blueprint: { type: 'object', description: 'A blueprint object previously returned by design_flow_blueprint' },
+      },
+      required: [],
+    },
+    execute: async ({ description, blueprint }) => {
+      const spec = description || (blueprint ? JSON.stringify(blueprint, null, 1) : null);
+      if (!spec) throw new Error('Provide either description or blueprint.');
+      return createLiveFlow(spec);
+    },
+  },
+  {
+    name: 'list_live_flows',
+    description: 'List the flows and subflows NowForge manages as Fluent source, with their current state on the instance.',
+    mutating: false,
+    inputSchema: { type: 'object', properties: {}, required: [] },
+    execute: () => listManaged(),
+  },
+  {
+    name: 'delete_live_flow',
+    description:
+      'Delete a NowForge-managed flow by name: removes its Fluent source, reinstalls, and confirms it is gone from the instance. Destructive — confirm with the user in conversation first. Requires user approval.',
+    mutating: true,
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: 'Exact flow/subflow name' } },
+      required: ['name'],
+    },
+    execute: ({ name }) => removeManaged(name),
+  },
+  {
+    name: 'smoke_test_flow',
+    description:
+      'Optionally verify a deployed record-triggered flow by creating a test record that matches its trigger, waiting for a sys_flow_context execution, then deleting the test record. This writes real data, is NEVER part of a deploy, and needs its own approval. Resolve any reference values to sys_ids with lookup_reference first.',
+    mutating: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: { type: 'string', description: 'Table to create the test record on, e.g. incident' },
+        values: { type: 'object', description: 'Field values chosen to satisfy the flow trigger condition' },
+        wait_ms: { type: 'number', description: 'How long to wait for an execution (default 45000)' },
+      },
+      required: ['table', 'values'],
+    },
+    execute: ({ table: t, values, wait_ms }) => smokeRun({ table: t, values, waitMs: wait_ms || 45000 }),
   },
 ];
 
