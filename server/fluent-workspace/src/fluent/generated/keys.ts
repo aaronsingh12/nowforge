@@ -12,38 +12,47 @@ declare global {
                     daily_p1_digest_flow: {
                         table: 'sys_hub_flow'
                         id: 'b2f18c963fd244f6a02895a7a6359536'
+                        deleted: true
                     }
                     dpd_any_found: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '0cb679e794b2426190e6e12134d295c5'
+                        deleted: true
                     }
                     dpd_each: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '440ea76341dc427393923d9fbf62ea5c'
+                        deleted: true
                     }
                     dpd_email: {
                         table: 'sys_hub_action_instance_v2'
                         id: '69243c878a7c4623ab70a0ba1011d58a'
+                        deleted: true
                     }
                     dpd_log_each: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'c91600547a1040f4884355698b172d27'
+                        deleted: true
                     }
                     dpd_log_none: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'e77eed075dbe40c98848afad5ce15f87'
+                        deleted: true
                     }
                     dpd_lookup: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'e20f71c8d6804fb89b64b3553610ad58'
+                        deleted: true
                     }
                     dpd_none: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: 'f78977d00e334a91a17951ce4c8b597e'
+                        deleted: true
                     }
                     dpd_trigger: {
                         table: 'sys_hub_trigger_instance_v2'
                         id: 'f08c35b8fb92486194178b5f8be6caab'
+                        deleted: true
                     }
                     nm_has_manager_email: {
                         table: 'sys_hub_flow_logic_instance_v2'
