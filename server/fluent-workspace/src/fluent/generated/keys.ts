@@ -5,6 +5,30 @@ declare global {
         namespace Internal {
             interface Keys extends KeysRegistry {
                 explicit: {
+                    add_work_note: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '10c0ec9dcf0c486ab1e40f73c0edbe8d'
+                    }
+                    auto_triage_incident_flow: {
+                        table: 'sys_hub_flow'
+                        id: '749b892b8b4444048c0711c1b519c8ba'
+                        deleted: true
+                    }
+                    auto_triage_incident_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: 'b43a85896a4c4ff583395e7345731051'
+                        deleted: true
+                    }
+                    auto_triage_log: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '200ab7ad805f49c1958f129d94f119e8'
+                        deleted: true
+                    }
+                    auto_triage_update: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'cab695f1675a41a0b54d7f238621dab6'
+                        deleted: true
+                    }
                     bom_json: {
                         table: 'sys_module'
                         id: '39e89ebd1f99428e9dab343b4b3f0248'
@@ -53,6 +77,31 @@ declare global {
                         table: 'sys_hub_trigger_instance_v2'
                         id: 'f08c35b8fb92486194178b5f8be6caab'
                         deleted: true
+                    }
+                    escalate_high_priority_problem: {
+                        table: 'sys_hub_flow'
+                        id: '7b3b6c461a9a47d3be625bc2b168ccb4'
+                    }
+                    flag_high_risk_change_flow: {
+                        table: 'sys_hub_flow'
+                        id: 'bb2a09da78684982b31daf9a0edf3cff'
+                    }
+                    flag_high_risk_change_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '8cb9aee2efe343bea65269d4fab78bfb'
+                        deleted: true
+                    }
+                    flag_high_risk_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '63969ce6be924657b40ec4ea81df9652'
+                    }
+                    log: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '7161dff12b824dc4bd962ff85a46711e'
+                    }
+                    log_change_number: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '382415adc84a4365bcd57a5259be5f3f'
                     }
                     nm_has_manager_email: {
                         table: 'sys_hub_flow_logic_instance_v2'
@@ -129,6 +178,14 @@ declare global {
                     smoke_test_trigger: {
                         table: 'sys_hub_trigger_instance_v2'
                         id: '061486ac8eda4cc6aa85be20b0eeb565'
+                    }
+                    trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '2c078fbb556a44f7af14716d8909515e'
+                    }
+                    update: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '52f496cb8c114c5ab66ac7c6c86fec58'
                     }
                 }
                 composite: [

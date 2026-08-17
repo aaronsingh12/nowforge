@@ -163,10 +163,16 @@ now-sdk install
 OAuth variant (preferred for production): `SN_SDK_AUTH_TYPE=oauth` with
 `SN_SDK_OAUTH_CLIENT_ID` / `SN_SDK_OAUTH_CLIENT_SECRET`.
 
-**Phase 2 consequence:** NowForge's server can drive the SDK using the *same* PDI credentials
-it already keeps in `server/.env`, by exporting these five variables into the child process —
-no interactive step, no second credential store. Falling back to the stored alias when the env
-vars are absent gives a good default.
+**What Phase 2 actually shipped:** the server drives the SDK through the **stored alias** (a),
+not the env vars. The alias already exists on this machine, works non-interactively, and keeps
+the instance password out of the Node process entirely — NowForge never handles it. Mechanism
+(b) remains the documented path for CI, where no credential store is present.
+
+Note the two credential stores are independent: the SDK's alias store is separate from
+NowForge's `server/data/settings.json`, so they can point at different instances.
+`capability()` compares the alias host against the configured instance URL and the UI warns on
+a mismatch, since flows would otherwise deploy somewhere other than the instance being read.
+(There is no `.env` anywhere in this project — see §9.)
 
 ---
 
