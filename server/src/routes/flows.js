@@ -5,7 +5,11 @@ export const flowsRouter = Router();
 
 flowsRouter.get('/', async (req, res, next) => {
   try {
-    res.json(await flows.list({ search: req.query.search, activeOnly: req.query.active === 'true' }));
+    res.json(await flows.list({
+      search: req.query.search,
+      activeOnly: req.query.active === 'true',
+      type: req.query.type || 'all',
+    }));
   } catch (err) { next(err); }
 });
 

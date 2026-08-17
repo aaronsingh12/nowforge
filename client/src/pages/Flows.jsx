@@ -121,6 +121,7 @@ function Blueprint({ bp }) {
 export default function Flows() {
   const [rows, setRows] = useState([]);
   const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState('all');
   const [detail, setDetail] = useState(null);
   const [execs, setExecs] = useState([]);
   const [designOpen, setDesignOpen] = useState(false);
@@ -130,8 +131,11 @@ export default function Flows() {
   const [designing, setDesigning] = useState(false);
   const [error, setError] = useState('');
 
-  const load = () => api.get(`/flows?search=${encodeURIComponent(search)}`).then(setRows).catch((e) => setError(e.message));
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  const load = () =>
+    api.get(`/flows?search=${encodeURIComponent(search)}&type=${typeFilter}`)
+      .then(setRows)
+      .catch((e) => setError(e.message));
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [typeFilter]);
 
   const open = async (r) => {
     setError('');
@@ -191,24 +195,30 @@ export default function Flows() {
 
       <div className="split">
         <div className="card">
-          <div className="card-title">Flows on instance</div>
+          <div className="card-title">Flows &amp; subflows on instance</div>
           <div className="row" style={{ marginBottom: 10 }}>
-            <input className="input" placeholder="Search flows…" value={search}
+            <input className="input" placeholder="Search…" value={search}
               onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && load()} />
+            <select className="input" style={{ maxWidth: 130 }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+              <option value="all">All types</option>
+              <option value="flow">Flows</option>
+              <option value="subflow">Subflows</option>
+            </select>
           </div>
           <table className="table">
-            <thead><tr><th>Name</th><th>Status</th><th>Active</th></tr></thead>
+            <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Active</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={val(r, 'sys_id')} className={`click ${detail && val(detail.flow, 'sys_id') === val(r, 'sys_id') ? 'selected' : ''}`} onClick={() => open(r)}>
                   <td>{disp(r, 'name')}</td>
+                  <td><span className={`badge ${val(r, 'type') === 'subflow' ? 'blue' : ''}`}>{val(r, 'type') || 'flow'}</span></td>
                   <td><span className="badge">{disp(r, 'status') || '—'}</span></td>
                   <td><span className={`badge ${val(r, 'active') === 'true' ? 'green' : ''}`}>{val(r, 'active') === 'true' ? 'on' : 'off'}</span></td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {rows.length === 0 && <div className="empty">No flows found (or not connected).</div>}
+          {rows.length === 0 && <div className="empty">No flows or subflows found (or not connected).</div>}
           {error && <p className="error-text">{error}</p>}
         </div>
 
@@ -218,7 +228,12 @@ export default function Flows() {
           ) : (
             <>
               <div className="spread">
-                <h3 style={{ fontSize: 16 }}>{disp(detail.flow, 'name')}</h3>
+                <div className="row">
+                  <h3 style={{ fontSize: 16, margin: 0 }}>{disp(detail.flow, 'name')}</h3>
+                  <span className={`badge ${val(detail.flow, 'type') === 'subflow' ? 'blue' : ''}`}>
+                    {val(detail.flow, 'type') || 'flow'}
+                  </span>
+                </div>
                 <button className="btn sm" onClick={toggleActive}>
                   {val(detail.flow, 'active') === 'true' ? 'Deactivate' : 'Activate'}
                 </button>
@@ -226,22 +241,41 @@ export default function Flows() {
               <p style={{ color: 'var(--muted)' }}>{disp(detail.flow, 'description') || 'No description.'}</p>
               <KV record={detail.flow} keys={['status', 'sys_scope', 'sys_created_by', 'sys_updated_on']} />
 
+              {detail.notes?.length > 0 && detail.notes.map((n, i) => (
+                <p className="note" key={i} style={{ marginTop: 8 }}>{n}</p>
+              ))}
+
               <div className="card-title" style={{ marginTop: 14 }}>Trigger{detail.triggers.length !== 1 ? 's' : ''}</div>
-              {detail.triggers.length === 0 && <div className="empty">No trigger instances found.</div>}
+              {detail.triggers.length === 0 && <div className="empty">No trigger instances.</div>}
               {detail.triggers.map((t) => (
                 <div key={val(t, 'sys_id')} style={{ marginBottom: 8 }}>
-                  <KV record={t} keys={['trigger_type', 'table', 'condition', 'active', 'sys_class_name']} />
+                  <div className="row" style={{ marginBottom: 4 }}>
+                    <span className="badge green">{disp(t, 'trigger_type') || 'trigger'}</span>
+                    {disp(t, 'name') && <span className="badge">{disp(t, 'name')}</span>}
+                  </div>
+                  {disp(t, 'comment') && <p style={{ margin: '2px 0 6px', fontSize: 12.5, color: 'var(--muted)' }}>{disp(t, 'comment')}</p>}
+                  {t.config && Object.keys(t.config).length > 0 && (
+                    <dl className="kv">
+                      {Object.entries(t.config).map(([k, v]) => (
+                        <div key={k} style={{ display: 'contents' }}>
+                          <dt>{k}</dt>
+                          <dd className={k === 'condition' || k === 'table' ? 'mono' : ''}>{String(v)}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
                 </div>
               ))}
 
               <div className="card-title" style={{ marginTop: 14 }}>Actions ({detail.actions.length})</div>
+              {detail.actions.length === 0 && <div className="empty">No action instances.</div>}
               {detail.actions.map((a) => (
                 <div className="step-row" key={val(a, 'sys_id')}>
                   <div className="step-num">{disp(a, 'order') || '·'}</div>
                   <div>
                     <div className="row">
                       <span className="badge blue">{disp(a, 'action_type') || 'action'}</span>
-                      {val(a, 'active') !== 'true' && <span className="badge red">inactive</span>}
+                      {val(a, 'active') === 'false' && <span className="badge red">inactive</span>}
                     </div>
                     {disp(a, 'comment') && <p style={{ margin: '4px 0 0', fontSize: 12.5, color: 'var(--muted)' }}>{disp(a, 'comment')}</p>}
                   </div>
@@ -254,10 +288,19 @@ export default function Flows() {
                   {detail.logic.map((l) => (
                     <div className="step-row" key={val(l, 'sys_id')}>
                       <div className="step-num">{disp(l, 'order') || '·'}</div>
-                      <div><span className="badge amber">{disp(l, 'logic_definition') || 'logic'}</span></div>
+                      <div>
+                        <span className="badge amber">{disp(l, 'logic_definition') || 'logic'}</span>
+                        {disp(l, 'comment') && <p style={{ margin: '4px 0 0', fontSize: 12.5, color: 'var(--muted)' }}>{disp(l, 'comment')}</p>}
+                      </div>
                     </div>
                   ))}
                 </>
+              )}
+
+              {detail.sourceTables && (
+                <p className="mono" style={{ marginTop: 12, fontSize: 11, color: 'var(--muted)' }}>
+                  read from {detail.sourceTables.family} tables · {detail.sourceTables.triggers} · {detail.sourceTables.actions} · {detail.sourceTables.logic}
+                </p>
               )}
 
               <div className="card-title" style={{ marginTop: 14 }}>Recent executions</div>
