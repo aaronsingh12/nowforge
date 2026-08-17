@@ -62,7 +62,20 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
     try { input = JSON.parse(tc.function?.arguments || '{}'); } catch { /* keep {} */ }
     return { id: tc.id, name: tc.function?.name, input };
   });
-  return { text: msg.content || '', toolCalls, stopReason: choice?.finish_reason };
+  const text = msg.content || '';
+  // Reasoning models (gpt-oss, o-series, deepseek-r1...) spend the max_tokens
+  // budget on hidden reasoning tokens before emitting any content. When the
+  // budget runs out first the API still answers 200 with an empty string, which
+  // would otherwise surface as "the model returned nothing" much further down.
+  if (!text && !toolCalls.length && choice?.finish_reason === 'length') {
+    const reasoned = typeof msg.reasoning === 'string' && msg.reasoning.length > 0;
+    throw new Error(
+      `${provider} returned no content: the max_tokens budget (${maxTokens}) was exhausted before any output was produced` +
+      (reasoned ? ' — the model spent it on reasoning tokens.' : '.') +
+      ' Raise max_tokens, or pick a non-reasoning model in Settings.'
+    );
+  }
+  return { text, toolCalls, stopReason: choice?.finish_reason };
 }
 
 export const openAiDefaults = DEFAULTS;
