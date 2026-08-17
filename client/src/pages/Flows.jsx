@@ -73,8 +73,9 @@ function progressLine(e) {
 }
 
 /** Spec in → streamed build log → result card. */
-function LiveBuild({ capOk, seedSpec, onDeployed }) {
+function LiveBuild({ capOk, seedSpec, managed = [], onDeployed }) {
   const [spec, setSpec] = useState('');
+  const [updates, setUpdates] = useState('');
   const [events, setEvents] = useState([]);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
@@ -85,7 +86,7 @@ function LiveBuild({ capOk, seedSpec, onDeployed }) {
   const run = async () => {
     setRunning(true); setEvents([]); setResult(null); setFailure(null);
     try {
-      await sse('/flows/live', { spec }, (e) => {
+      await sse('/flows/live', { spec, updates: updates || undefined }, (e) => {
         if (e.type === 'done' && e.result) { setResult(e.result); onDeployed?.(); }
         else if (e.type === 'error') setFailure(e);
         else setEvents((prev) => [...prev, e]);
@@ -106,10 +107,23 @@ function LiveBuild({ capOk, seedSpec, onDeployed }) {
       />
       <div className="row" style={{ marginTop: 8 }}>
         <button className="btn amber" onClick={run} disabled={running || !spec.trim() || !capOk}>
-          {running ? 'Building…' : 'Generate & deploy'}
+          {running ? 'Building…' : updates ? 'Regenerate & deploy' : 'Generate & deploy'}
         </button>
+        {managed.filter((m) => m.kind === 'flow').length > 0 && (
+          <select className="input" style={{ maxWidth: 260 }} value={updates} onChange={(e) => setUpdates(e.target.value)} disabled={running}>
+            <option value="">Create a new flow</option>
+            {managed.filter((m) => m.kind === 'flow').map((m) => (
+              <option key={m.name} value={m.name}>Update “{m.name}” in place</option>
+            ))}
+          </select>
+        )}
         {!capOk && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>Unavailable — see the banner above.</span>}
       </div>
+      {updates && (
+        <p style={{ fontSize: 12, color: 'var(--muted)', margin: '6px 0 0' }}>
+          Editing an existing flow: it keeps its sys_id and history rather than becoming a second flow.
+        </p>
+      )}
 
       {events.length > 0 && (
         <div className="card" style={{ marginTop: 12, background: 'transparent' }}>
@@ -474,10 +488,14 @@ export default function Flows() {
   const [cap, setCap] = useState(null);
   const [seedSpec, setSeedSpec] = useState('');
   const [managedKey, setManagedKey] = useState(0);
+  const [managed, setManaged] = useState([]);
 
   useEffect(() => {
     api.get('/flows/live/capability').then(setCap).catch(() => setCap({ ok: false, fixes: [] }));
   }, []);
+  useEffect(() => {
+    api.get('/flows/live').then((d) => setManaged(d.managed || [])).catch(() => setManaged([]));
+  }, [managedKey]);
 
   /** Blueprint → live build: flatten the design into a spec and scroll it into view. */
   const deployBlueprint = (b) => {
@@ -543,7 +561,12 @@ export default function Flows() {
 
       <CapabilityBanner cap={cap} />
 
-      <LiveBuild capOk={Boolean(cap?.ok)} seedSpec={seedSpec} onDeployed={() => { setManagedKey((k) => k + 1); load(); }} />
+      <LiveBuild
+        capOk={Boolean(cap?.ok)}
+        seedSpec={seedSpec}
+        managed={managed}
+        onDeployed={() => { setManagedKey((k) => k + 1); load(); }}
+      />
 
       <ManagedArtifacts reloadKey={managedKey} onChanged={() => load()} />
 

@@ -378,7 +378,7 @@ export async function capability({ deep = false, force = false } = {}) {
 
 const INTENT_SYSTEM = `You extract structured intent from a ServiceNow automation request. Respond with ONLY a JSON object, no prose, no markdown fences:
 {
-  "name": "short human name for the automation",
+  "name": "short human-readable name in Title Case, e.g. \"Escalate P1 Network Incidents\" — never snake_case, never an identifier",
   "kind": "flow" | "subflow" | "flow+subflow",
   "trigger_kind": "record_created" | "record_updated" | "record_created_or_updated" | "scheduled" | "none",
   "trigger_table": "servicenow table name, or null for scheduled/subflow",

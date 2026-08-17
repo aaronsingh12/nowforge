@@ -397,6 +397,21 @@ declare global {
                         table: 'sys_hub_trigger_instance_v2'
                         id: '061486ac8eda4cc6aa85be20b0eeb565'
                     }
+                    triage_high_urgency_incident_flow: {
+                        table: 'sys_hub_flow'
+                        id: '24be7886e275450a932af7601cb8d420'
+                        deleted: true
+                    }
+                    triage_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '45e24dbc3ebf43309204fcd21bbe1e72'
+                        deleted: true
+                    }
+                    triage_update_incident: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'b366a53ac8e34fdfaa972f7a0139c1c7'
+                        deleted: true
+                    }
                     trigger: {
                         table: 'sys_hub_trigger_instance_v2'
                         id: '2c078fbb556a44f7af14716d8909515e'

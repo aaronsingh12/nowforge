@@ -71,6 +71,7 @@ Four tabs covering the catalog stack top to bottom:
 ### Flows
 - **Read everything:** flows *and subflows* from `sys_hub_flow`, trigger instances, ordered action instances, logic blocks, and execution history from `sys_flow_context`. Activate/deactivate with one click. Trigger configuration (table, condition, run-in) is decoded from the platform's compressed `trigger_inputs` blob, because current releases keep none of it in columns.
 - **Live build (the real thing):** type an automation in plain language → NowForge generates Fluent TypeScript, compiles it **offline**, installs it, and reads the result back. You get an active flow with its sys_id and a link, or a readable compile error and nothing on the instance.
+- **Semantic verification:** press **Verify** and NowForge fires the flow on a real record, asserts the effects your sentence promised, and deletes the test data. Compiling proves a flow is well-formed; this proves it is *correct*. See [docs/demo.md](docs/demo.md) for a five-minute walkthrough.
 - **Design with AI:** describe an automation → a precise blueprint (trigger, exact actions, configs, reference fields, test plan). Download it, or hit **Deploy as real flow** to feed it straight into the live pipeline.
 - **Classic fallback:** where the SDK can't run, record-triggered blueprints still become an equivalent **Business Rule** (`sys_script`), always created **inactive** for review.
 
@@ -95,7 +96,14 @@ plain-language spec
         ├─► now-sdk install        serialized; deploys the WHOLE managed app and
         │                          auto-activates flows
         │
-        └─► read back via flows.detail()  ──► {sys_id, type, active, link, counts}
+        ├─► read back via flows.detail()  ──► {sys_id, type, active, link, counts}
+        │
+        └─► VERIFY (never automatic — its own button, its own approval)
+              setup   create a record matching the flow's own trigger
+              wait    poll sys_flow_context until the execution settles
+              assert  check the effects the request promised
+              resume  for approvals: patch the approval, wait, assert again
+              cleanup always, in a finally
 ```
 
 Two properties worth knowing:
@@ -105,16 +113,38 @@ Two properties worth knowing:
 
 #### Capability matrix
 
-| Capability | Live SDK authoring | Blueprint | Business Rule fallback |
-|---|---|---|---|
-| Creates a real, active Flow Designer flow | **yes** | no (a build spec) | no (a `sys_script` record) |
-| Subflows with typed inputs/outputs | **yes** | described only | no |
-| Record, scheduled, and application triggers | **yes** | described only | record triggers only |
-| Flow logic (if / else / forEach / try) | **yes** | described only | hand-written script |
-| Approvals, notifications, catalog actions | **yes** | described only | partial |
-| Validated before touching the instance | **yes** (offline compile) | n/a | no |
-| Runs with no SDK installed | no | **yes** | **yes** |
-| Created active | **yes** (auto-activated) | n/a | no — always inactive |
+Three tiers. **LIVE (verified)** means it was exercised end-to-end against a real PDI and proven by a real execution — not by the deploy log.
+
+**Tier 1 — LIVE, semantically verified**
+
+| Capability | Evidence |
+|---|---|
+| Flows and subflows from one plain-language spec | flow + subflow generated into one source, 3/3 activated |
+| Record triggers (created) with encoded conditions | decoded trigger read back: `priority=1^assignment_group.name=Network^assigned_toISEMPTY` |
+| Scheduled triggers (daily, with timezone) | stored `01:30 UTC` verified as `07:00` IST |
+| Flow logic — if / else, forEach | present in read-back on every UC |
+| Actions exercised: Look Up Record(s), Update Record, Send Email, Log, **Ask For Approval** | across UC1–UC4 |
+| Subflow invocation with typed I/O + `waitForCompletion` | UC1 calls UC2; downstream steps land |
+| **Approvals, including the approve-and-continue path** | approval raised for the right approver by identity, patched to approved, flow resumed to COMPLETE, post-approval effect asserted |
+| In-place update (same spec, or edited spec via `updates`) | same `sys_id` across repeated and modified deploys |
+| Delete | read-back returns 0 rows |
+| Failure containment | 3 attempts, candidate deleted, instance snapshot **identical** |
+
+**What semantic verification does and does not cover.** It creates a record matching the flow's own trigger, waits for the execution to settle, asserts the effects the request promised, and always deletes its test data. It **catches**: the flow never firing, firing then erroring, writing the wrong value, writing nothing, an approval routed to the wrong person. It **cannot catch**: an effect nobody asserted; a trigger condition wrong in the same direction as the setup payload (both derived from one misreading); anything timing-dependent past the wait window; and for scheduled flows, whether the schedule *fires* — there is no supported manual-execute path, so those are verified by schedule metadata only, and the result says so.
+
+**Tier 2 — LIVE, metadata-verified only**
+
+| Capability | Why |
+|---|---|
+| Scheduled flows | cannot be fired on demand: no CLI run command, and `sn_fd.FlowAPI` is server-side script only. Verified by decoded schedule metadata with an explicit caveat. |
+
+**Tier 3 — BLUEPRINT / Business Rule fallback**
+
+| Capability | Status |
+|---|---|
+| Editing pre-existing global or third-party flows | **out of scope** — NowForge only manages artifacts inside its own scoped app |
+| Anything when the SDK cannot run | blueprint + inactive `sys_script`, with the capability banner printing the exact fix commands |
+| Application triggers (inbound email, SLA, catalog) | supported by the SDK and documented in the cheatsheet, but **not exercised here** — treat as unproven until verified |
 
 There is still **no supported REST API for writing `sys_hub_*` directly**, and NowForge never attempts it. Live authoring works because it drives ServiceNow's own toolchain.
 
@@ -135,8 +165,8 @@ This is the part most homegrown tools skimp on:
 Modeled on Claude Code / opencode:
 
 - **Session loop** — provider-agnostic agent iterations (max 15/turn) with a neutral message format translated per provider.
-- **Tool registry** — 20 tools (`server/src/agent/tools.js`): schema inspection, reference/table lookup, generic record CRUD, incident + catalog composites, flow reading, blueprint design, and live flow authoring (`create_flow_live`, `delete_live_flow`, `smoke_test_flow`, `list_live_flows`, `flow_authoring_capability`). Each tool declares `mutating`.
-- **Flow authoring tiers** — the prompt makes the order explicit: `design_flow_blueprint` designs, `create_flow_live` builds, and the Business Rule fallback is reserved for environments where capability reports `ok: false`. Firing a flow to verify it (`smoke_test_flow`) writes real data, so it is never automatic — it needs its own approval.
+- **Tool registry** — 21 tools (`server/src/agent/tools.js`): schema inspection, reference/table lookup, generic record CRUD, incident + catalog composites, flow reading, blueprint design, and live flow authoring (`create_flow_live`, `verify_flow_live`, `delete_live_flow`, `smoke_test_flow`, `list_live_flows`, `flow_authoring_capability`). Each tool declares `mutating`.
+- **Flow authoring tiers** — the prompt makes the order explicit: `design_flow_blueprint` designs, `create_flow_live` builds, and the Business Rule fallback is reserved for environments where capability reports `ok: false`. Verifying a flow (`verify_flow_live`) writes real records, so it is a *separate* mutating tool with its own approval and is never automatic after a deploy.
 - **Permission gate** — mutating calls pause the loop, stream an `approval_required` event, and wait (5-min timeout) for your Approve/Reject. Rejections are fed back to the model as tool errors. Auto-approve is opt-in.
 - **BYO provider** — one adapter for Anthropic's Messages API, one OpenAI-compatible adapter covering OpenAI and Ollama (same wire format). Add a provider by writing one file.
 - **Streaming** — SSE over the POST body: `meta`, `assistant_text`, `tool_use`, `approval_required`, `tool_result`, `done`.
@@ -149,8 +179,9 @@ Modeled on Claude Code / opencode:
 /api/catalog     meta · catalogs · categories · items CRUD + deep view · variables · variable-sets (+variables, attach) · order-guides (+items) · record-producers
 /api/flows       list (flows + subflows, type filter) · :id detail · executions · :id/active
                  design · blueprint-to-rule
-                 live (POST, SSE) · live (GET managed) · live/capability · live/smoke
-                 live/:name (DELETE)
+                 live (POST, SSE — accepts `updates` to edit in place)
+                 live (GET managed) · live/capability
+                 live/verify (POST, SSE) · live/smoke · live/:name (DELETE)
 /api/agent       info · chat (SSE) · approve
 ```
 
@@ -164,7 +195,8 @@ Modeled on Claude Code / opencode:
 ## Roadmap
 
 - **Done — flow authoring for real:** ServiceNow SDK (Fluent) codegen with offline compile validation, serialized install, read-back verification, and an approval-gated agent tool.
-- **Next:** re-generate the reference use cases entirely through the codegen path, deploy the scheduled digest flow, and run the idempotency battery. Then ATF test triggering after builds and the OAuth refresh flow.
+- **Done — semantic verification:** flows are proven by firing them on a real record and asserting the promised effects, including the approve-and-continue path for approvals. Reference use cases (record-triggered flow + subflow, scheduled digest, approval flow) all regenerated through codegen and verified live; idempotency battery green.
+- **Next:** exercise application triggers (inbound email, SLA, catalog) so they can leave the unproven tier; ATF test triggering after builds; OAuth refresh flow.
 - **Later — productize:** multi-instance workspaces, update-set capture around agent sessions ("everything the agent did in this session" as one exportable set), audit log, packaging/licensing for consultancies.
 
 ## Notes from building this
@@ -175,3 +207,6 @@ Things that cost real time and are documented in `docs/fluent-research.md`:
 - Modern releases store flow parts in the **`_v2`** tables. The legacy tables still exist and return zero rows, so reading them makes every modern flow look empty.
 - Choice fields must be handed to the model as `value=label` pairs. Passing bare values produced a flow that fired on *Low* risk for a spec that asked for *High*, because `risk=4` means Low on this instance — and it compiled and installed perfectly.
 - Reasoning models (gpt-oss, o-series) bill hidden reasoning tokens against `max_tokens` and return HTTP 200 with empty content when the budget runs out. NowForge now raises a specific error instead of reporting "the model returned nothing".
+- `priority` on task tables is **calculated** from `impact` and `urgency`. Writing `{"priority":"1"}` is silently stored as *4 - Low*, so a verification setup that sets priority directly never matches a `priority=1` trigger. Drive calculated fields through their inputs.
+- Schedule times are stored in **UTC**: `Time({hours:7}, 'Asia/Kolkata')` persists as `01:30`. Asserting the local wall-clock time against the stored value fails a perfectly correct flow.
+- Identity cannot come from an LLM-chosen name. The same spec produced "…Incidents" and then "…Incident", which silently created a duplicate flow *and* a duplicate subflow. Identity now derives from the request itself.

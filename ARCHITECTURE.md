@@ -21,7 +21,8 @@ server (Node 22 + Express :4000)
   │                  blueprint → Business Rule fallback (created inactive)
   │     fluent.js    LIVE AUTHORING: capability probe, LLM codegen against live
   │                  schema, offline compile validation w/ retry, serialized
-  │                  install, read-back, managed list/remove, opt-in smoke run
+  │                  install, read-back, managed list/remove, opt-in smoke run,
+  │                  SEMANTIC VERIFICATION (setup/wait/assert/resume/cleanup)
   ├── agent/
   │     orchestrator.js  session store, agent loop (≤15 iters/turn), approval gate
   │                      (mutating tools await user decision, 5-min timeout), SSE events
@@ -39,11 +40,39 @@ server (Node 22 + Express :4000)
         │   build (offline)  ·  install (whole app)  ·  auth --list  ·  query
         ▼
   server/fluent-workspace/   scope x_2196302_nwforge, app "NowForge Flows"
-        ├── src/fluent/flows/*.now.ts   managed sources — anything here SHIPS on install
-        ├── src/fluent/generated/keys.ts  Now.ID → sys_id map (identity; commit it)
-        └── staged/                     build-verified, deliberately NOT deployed
-                                        (outside fluentDir, so the build never scans it)
+        ├── src/fluent/flows/*.now.ts      managed sources — anything here SHIPS on install
+        ├── src/fluent/flows/*.verify.json semantic verification specs (build ignores them)
+        ├── src/fluent/generated/keys.ts   Now.ID → sys_id map (identity; commit it)
+        └── staged/                        build-verified, deliberately NOT deployed
+                                           (outside fluentDir, so the build never scans it)
 ```
+
+## Verification pipeline
+
+```
+verify(name)
+   │  <slug>.verify.json
+   ├─► setup    create a record satisfying the flow's OWN trigger condition
+   │              (calculated fields driven through their inputs: impact+urgency,
+   │               never priority directly — the platform overwrites it)
+   ├─► wait     poll sys_flow_context for THIS flow's execution
+   │              COMPLETE → assertable
+   │              WAITING/PAUSED → assertable (approval flows stop here)
+   │              ERROR/CANCELLED → fail with the state
+   │              timeout → fail with the last observed state, never a hang
+   ├─► assert   journal fields read from sys_journal_field and compared by
+   │              containment; everything else compared exactly
+   ├─► resume   approvals only: patch the approval, wait again, assert again
+   └─► cleanup  ALWAYS, in a finally — a failed assertion leaves no test data
+```
+
+Two rules are enforced in code rather than asked of the model, because both
+would otherwise produce a confident green tick that proves nothing:
+
+| Rule | Failure it prevents |
+|---|---|
+| An assertion may not read a field `setup.payload` itself wrote | passes regardless of what the flow does |
+| Assertions must cover every `promised_effect` from intent extraction | proves half the request while reporting a clean pass |
 
 ## Live authoring pipeline
 
@@ -66,7 +95,8 @@ Invariants enforced in `fluent.js`, all load-bearing because installs are whole-
 | a | only build-validated sources may sit in `src/fluent` at install time | anything there ships |
 | b | a candidate that never compiles is deleted and the workspace rebuilt | keeps `src/` and `keys.ts` clean after a failure |
 | c | every build/install goes through one serialized queue | concurrent runs would race on `dist/` and `keys.ts` |
-| d | one file per artifact family, deterministic slug name | regeneration overwrites in place, so `Now.ID` keeps sys_ids stable instead of duplicating |
+| d | identity follows the **request**, not the model's chosen name | the same spec named its flow "…Incidents" then "…Incident", creating a duplicate. Sources carry a spec fingerprint; an edited request names its target via `updates`; the deployed source is fed back so names and `Now.ID` keys survive verbatim — those strings are what keys.ts is keyed on |
+| e | `deploy()` builds before installing | `install` ships `dist/`, so deploying without building silently installs a stale package — a restored source once reported 3/3 while never reaching the instance |
 
 ## Claude Code concept mapping
 
