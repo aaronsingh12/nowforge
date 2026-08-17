@@ -304,9 +304,11 @@ Built and installed from `server/fluent-workspace`, then read back off the insta
 - Both UC files compiled clean on the **first** `now-sdk build` — the syntax in the cheatsheet
   is build-verified, not guessed.
 
-**Note on duplicate rows:** querying `sys_hub_action_instance_v2` returns action instances in
-pairs (order 1,1,3,3,5,5). This is expected — Flow Designer keeps a published *snapshot*
-alongside the master record. Deduplicate on the master when NowForge reports step counts.
+**Note on duplicate rows (corrected in Phase 2):** querying action instances by
+`flow.name=<name>` returns them in pairs (order 1,1,3,3,5,5), because Flow Designer keeps a
+published *snapshot* record carrying the same name as the master. Querying by
+`flow=<sys_id>` returns each step exactly once, so `detail(sysId)` is unaffected and needs no
+deduplication.
 
 ### Execution proof ✅
 
@@ -359,3 +361,110 @@ creates subflows, so the list needs to include them (and label the type).
 | UC3 built but not deployed | `daily-p1-digest.now.ts` is build-verified and sits in the workspace, deliberately **not installed** — Phase 3 owns its deployment. The next `now-sdk install` will deploy it. |
 | Serialized deploys | `build` writes to a shared `dist/`, so concurrent builds in one workspace would race. Phase 2's queue must serialize (already planned). |
 | UC4 approvals | `askForApproval` + `wfa.approvalRules()` are fully documented and appear usable; not yet built. |
+
+---
+
+## 10. Phase 2 findings (codegen pipeline)
+
+Everything here was measured while wiring `server/src/servicenow/fluent.js`.
+
+### Build exclusion is by location, not configuration ✅
+
+There is **no build-level exclude glob**. `now-sdk build` scans `fluentDir` (default
+`src/fluent`) for `.now.ts` files; the config's `excludeFilePatterns` applies to
+`now-sdk transform` only. So `server/fluent-workspace/staged/`, sitting outside the scanned
+tree, is excluded by construction — verified by rebuilding and watching
+`sys_hub_flow_b2f18c96….xml` disappear from `dist/app/update/`.
+
+### Removing a source is a pending DELETE ✅
+
+The build records removals in `keys.ts` as `deleted: true` while **retaining the sys_id**:
+
+```typescript
+daily_p1_digest_flow: { table: 'sys_hub_flow', id: 'b2f18c96…', deleted: true }
+```
+
+The next `install` deletes that record from the instance, and restoring the source later
+reuses the same identity. This is the mechanism behind `removeManaged()` — confirmed live:
+deleting "Auto triage incident" removed it, and an independent read-back returned zero rows.
+
+### Cost of the CLI, and what actually proves auth
+
+Every `now-sdk` invocation pays ~5s of start-up:
+
+| Command | Time | Contacts instance? |
+|---|---|---|
+| `now-sdk --version` | ~5s | no |
+| `now-sdk auth --list` | ~5.5s | **no** — reads the local credential store |
+| `now-sdk install --info` | ~2.3s | prints a URL only; not an auth proof |
+| `now-sdk query sys_user -f sys_id --limit 1` | ~8.5s | **yes** — the cheapest real proof |
+
+So `capability()` is shallow by default (version + stored credentials, ~6s, cached 30s) and
+takes `deep: true` to run the authenticated query. `auth --list` proving a credential *exists*
+is not the same as proving it still *works* — the API reports `verified: 'stored' | 'live' | 'failed'`
+so callers can tell which claim they have.
+
+Parsing gotcha: every CLI line is prefixed `[now-sdk] …`, so a naive `\[([^\]]+)\]` block regex
+matches the log prefix as a credential alias. An alias header is a bracketed token **alone on
+its line**, and a block with no `host =` is a log line.
+
+### Windows cannot `execFile` the CLI
+
+`now-sdk` is a `.cmd` shim: `execFile('now-sdk')` → `ENOENT`, `execFile('now-sdk.cmd')` →
+`EINVAL` (Node ≥20 refuses batch files without `shell: true`). Rather than enable a shell,
+the service spawns `node <sdk>/bin/index.js` and passes **only fixed literal arguments** —
+no injection surface. Anything needing user-supplied values (read-back by name) goes through
+the REST client instead.
+
+### Compile diagnostics are good enough to self-repair
+
+Failure output is precise and machine-usable:
+
+```
+[now-sdk] ERROR: src/fluent/flows/x.now.ts:27:33 - error TS2551: Property 'deleteMultipleRecords'
+  does not exist on type '{ ... }'. Did you mean 'updateMultipleRecords'?
+[now-sdk] ERROR: Found 2 diagnostic error(s) while building the project.
+```
+
+Exit code 1, ANSI colour codes present (strip before prompting). Feeding this back verbatim
+is what drives the retry loop. An intentionally-invalid spec burned all 3 attempts, then the
+candidate was deleted and the workspace rebuilt: `src/` returned to its exact prior file list,
+`keys.ts` gained no orphaned keys, and every artifact on the instance kept its original
+`sys_updated_on`.
+
+### The failure mode that compiles cleanly ⚠️
+
+The sharpest lesson of this phase: **a semantically wrong flow is still a valid flow.**
+
+"when a change request is created with risk set to High" generated `condition: 'risk=4'`. It
+compiled, installed, and activated — but on this instance `risk` is High=2, Moderate=3,
+**Low=4**, so the flow was built to fire on Low risk. Nothing in the toolchain can catch this;
+only reading the choice list can.
+
+Cause was the prompt, not the model: the live-context block emitted `risk (integer) [2|3|4]`,
+values with no labels. It now emits `choices[2=High, 3=Moderate, 4=Low]` and instructs the
+model to use the numeric value and never assume a conventional ordering. Re-running the same
+spec produced `risk=2`, verified by read-back — and reused the same sys_id, confirming
+deterministic filenames plus `Now.ID` update in place rather than duplicating.
+
+Generalisation: any instance-specific encoding (choice values, catalog variable type codes,
+state models) must be *given* to the model, never inferred.
+
+### Reasoning models silently truncate
+
+Not an SDK issue, but it blocks codegen. `gpt-oss` bills hidden reasoning tokens against
+`max_tokens` and returns **HTTP 200 with empty `content`** and `finish_reason: 'length'` when
+the budget is exhausted:
+
+```json
+{ "message": { "content": "", "reasoning": "The user request: …" }, "finish_reason": "length" }
+```
+
+At `max_tokens: 40` content was empty; at 400 the same prompt answered correctly. The adapter
+now raises a specific error instead of returning an empty string, and codegen budgets are
+sized for reasoning models (intent 3000, generation 12000).
+
+### Nothing was blocked
+
+No SDK limitation prevented any Phase 2 requirement. Live authoring, subflows, offline
+validation, idempotent redeploy, and deletion all work through supported commands.

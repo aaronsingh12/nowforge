@@ -2,7 +2,7 @@
 
 Connect a ServiceNow PDI and build on it two ways: through clean module UIs, or by telling an AI agent what you want and approving each change it proposes. Bring your own model — Anthropic, OpenAI, or fully-local Ollama. No Now Assist SKUs required.
 
-**Phase 1 scope (this build):** PDI connection · Incident Management (full CRUD) · Catalog Management (items, all variable types with choices, variable sets, order guides, record producers) · Flow Designer (full read, executions, activate, AI blueprint design + classic fallback authoring) · deep reference-field/table handling everywhere · agentic chat with a human approval gate on every mutation.
+**Scope (this build):** PDI connection · Incident Management (full CRUD) · Catalog Management (items, all variable types with choices, variable sets, order guides, record producers) · Flow Designer (full read, executions, activate, **live authoring of real flows and subflows via the ServiceNow SDK**, AI blueprint design + classic fallback) · deep reference-field/table handling everywhere · agentic chat with a human approval gate on every mutation.
 
 ---
 
@@ -30,6 +30,29 @@ Open http://localhost:5173 and then:
 
 Credentials live only in `server/data/settings.json` on your machine (gitignored).
 
+### Enabling live flow authoring (optional)
+
+Everything above works without this. To let NowForge build *real* flows, install ServiceNow's SDK and give it a credential:
+
+```bash
+# 1. the CLI (Node 18+)
+npm i -g @servicenow/sdk
+
+# 2. one stored credential — piping the password keeps it non-interactive
+echo "$SN_PASSWORD" | now-sdk auth --add https://devXXXXXX.service-now.com \
+    --type basic --alias nowforge --username admin --password-stdin
+
+# 3. workspace dependencies + instance type definitions
+npm install --prefix server/fluent-workspace
+cd server/fluent-workspace && now-sdk dependencies
+```
+
+The Flows page shows a green banner when this is ready, and the exact fix commands when it isn't. `GET /api/flows/live/capability` returns the same detail (add `?deep=true` to actually round-trip the instance instead of just reading the local credential store).
+
+**On credentials:** the SDK keeps its own credential store, addressed by alias — it does **not** read `server/data/settings.json`, and there is no `.env` anywhere in this project. For CI, skip the stored alias and export `SN_SDK_NODE_ENV=SN_SDK_CI_INSTALL`, `SN_SDK_AUTH_TYPE`, `SN_SDK_INSTANCE_URL`, `SN_SDK_USER`, `SN_SDK_USER_PWD` (or the OAuth pair) instead. Note that `keys.ts` — despite living under a docs page called "keys file" — is a **sys_id map, not credentials**; commit it.
+
+Because the SDK and NowForge authenticate separately, they can point at different instances. The capability banner warns you when they do, since flows would deploy somewhere other than the instance you're reading.
+
 ---
 
 ## The three modules
@@ -46,11 +69,54 @@ Four tabs covering the catalog stack top to bottom:
 - **Record producers** — create `sc_cat_item_producer` with a target-table picker and mapping script. Producers are catalog items, so their variables are managed from the Items tab.
 
 ### Flows
-- **Read everything:** flows from `sys_hub_flow`, trigger instances, ordered action instances, logic blocks, and execution history from `sys_flow_context`. Activate/deactivate with one click.
-- **Design with AI:** describe an automation in plain language → the model returns a precise blueprint (trigger, exact Flow Designer actions to pick, configs, reference fields involved, test plan). Download it as JSON or hand it to a junior admin.
-- **Classic fallback:** record-triggered blueprints can be materialized as an equivalent **Business Rule** (`sys_script`) — generated script, correct table/when/conditions, always created **inactive** for review.
+- **Read everything:** flows *and subflows* from `sys_hub_flow`, trigger instances, ordered action instances, logic blocks, and execution history from `sys_flow_context`. Activate/deactivate with one click. Trigger configuration (table, condition, run-in) is decoded from the platform's compressed `trigger_inputs` blob, because current releases keep none of it in columns.
+- **Live build (the real thing):** type an automation in plain language → NowForge generates Fluent TypeScript, compiles it **offline**, installs it, and reads the result back. You get an active flow with its sys_id and a link, or a readable compile error and nothing on the instance.
+- **Design with AI:** describe an automation → a precise blueprint (trigger, exact actions, configs, reference fields, test plan). Download it, or hit **Deploy as real flow** to feed it straight into the live pipeline.
+- **Classic fallback:** where the SDK can't run, record-triggered blueprints still become an equivalent **Business Rule** (`sys_script`), always created **inactive** for review.
 
-**Why no direct flow creation?** ServiceNow exposes no supported public API for authoring Flow Designer flows — definitions are compiled, serialized snapshots in `sys_hub_*` tables, and raw inserts produce broken, upgrade-fragile artifacts. NowForge refuses to ship broken writes. Authoring is a pluggable strategy interface (`server/src/servicenow/flows.js`): blueprint + classic fallback ship today; update-set XML templating and the ServiceNow SDK (Fluent) route are Phase 2 evaluations.
+#### How live authoring works
+
+```
+plain-language spec
+        │
+        ├─► extract intent ─────────────► trigger table, artifact kind, proper nouns
+        │
+        ├─► LIVE CONTEXT from the instance
+        │     getSchema(table)      real field names, types, reference targets,
+        │                           and choice VALUE=LABEL pairs
+        │     referenceLookup(name) real sys_ids for every named group/user/category
+        │
+        ├─► LLM ──► Fluent TypeScript          (cheatsheet + hard rules in the prompt)
+        │
+        ├─► now-sdk build          OFFLINE. Compile errors never reach the instance.
+        │     └─ on failure: feed the compiler's own diagnostics back, retry (max 3),
+        │        then delete the candidate and rebuild so src/ stays clean
+        │
+        ├─► now-sdk install        serialized; deploys the WHOLE managed app and
+        │                          auto-activates flows
+        │
+        └─► read back via flows.detail()  ──► {sys_id, type, active, link, counts}
+```
+
+Two properties worth knowing:
+
+- **`now-sdk install` deploys the entire managed application**, not one file. Every response lists what shipped. A build-verified source you *don't* want deployed goes in `server/fluent-workspace/staged/`, outside the scanned `fluentDir`.
+- **Identity is stable.** Each artifact gets a deterministic filename and a `Now.ID` key recorded in `keys.ts`, so regenerating the same spec updates the same record instead of creating a duplicate. Deleting a managed flow removes its source — which is the SDK's own deletion mechanism — reinstalls, and confirms absence by read-back.
+
+#### Capability matrix
+
+| Capability | Live SDK authoring | Blueprint | Business Rule fallback |
+|---|---|---|---|
+| Creates a real, active Flow Designer flow | **yes** | no (a build spec) | no (a `sys_script` record) |
+| Subflows with typed inputs/outputs | **yes** | described only | no |
+| Record, scheduled, and application triggers | **yes** | described only | record triggers only |
+| Flow logic (if / else / forEach / try) | **yes** | described only | hand-written script |
+| Approvals, notifications, catalog actions | **yes** | described only | partial |
+| Validated before touching the instance | **yes** (offline compile) | n/a | no |
+| Runs with no SDK installed | no | **yes** | **yes** |
+| Created active | **yes** (auto-activated) | n/a | no — always inactive |
+
+There is still **no supported REST API for writing `sys_hub_*` directly**, and NowForge never attempts it. Live authoring works because it drives ServiceNow's own toolchain.
 
 ---
 
@@ -69,7 +135,8 @@ This is the part most homegrown tools skimp on:
 Modeled on Claude Code / opencode:
 
 - **Session loop** — provider-agnostic agent iterations (max 15/turn) with a neutral message format translated per provider.
-- **Tool registry** — 15 tools (`server/src/agent/tools.js`): schema inspection, reference/table lookup, generic record CRUD, incident + catalog composites, flow reading, blueprint design. Each tool declares `mutating`.
+- **Tool registry** — 20 tools (`server/src/agent/tools.js`): schema inspection, reference/table lookup, generic record CRUD, incident + catalog composites, flow reading, blueprint design, and live flow authoring (`create_flow_live`, `delete_live_flow`, `smoke_test_flow`, `list_live_flows`, `flow_authoring_capability`). Each tool declares `mutating`.
+- **Flow authoring tiers** — the prompt makes the order explicit: `design_flow_blueprint` designs, `create_flow_live` builds, and the Business Rule fallback is reserved for environments where capability reports `ok: false`. Firing a flow to verify it (`smoke_test_flow`) writes real data, so it is never automatic — it needs its own approval.
 - **Permission gate** — mutating calls pause the loop, stream an `approval_required` event, and wait (5-min timeout) for your Approve/Reject. Rejections are fed back to the model as tool errors. Auto-approve is opt-in.
 - **BYO provider** — one adapter for Anthropic's Messages API, one OpenAI-compatible adapter covering OpenAI and Ollama (same wire format). Add a provider by writing one file.
 - **Streaming** — SSE over the POST body: `meta`, `assistant_text`, `tool_use`, `approval_required`, `tool_result`, `done`.
@@ -80,7 +147,10 @@ Modeled on Claude Code / opencode:
 /api/system      health · settings · connection/test · schema/:table · hierarchy/:table · reference/:table · tables
 /api/incidents   list+filters · stats · get · create · update · delete
 /api/catalog     meta · catalogs · categories · items CRUD + deep view · variables · variable-sets (+variables, attach) · order-guides (+items) · record-producers
-/api/flows       list · :id detail · executions · :id/active · design · blueprint-to-rule
+/api/flows       list (flows + subflows, type filter) · :id detail · executions · :id/active
+                 design · blueprint-to-rule
+                 live (POST, SSE) · live (GET managed) · live/capability · live/smoke
+                 live/:name (DELETE)
 /api/agent       info · chat (SSE) · approve
 ```
 
@@ -93,5 +163,15 @@ Modeled on Claude Code / opencode:
 
 ## Roadmap
 
-- **Phase 2 — flow authoring for real:** update-set XML templating (known-good flow skeletons imported via `sys_remote_update_set`), ServiceNow SDK / Fluent evaluation, ATF test triggering after builds, OAuth refresh flow.
-- **Phase 3 — productize:** multi-instance workspaces, update-set capture around agent sessions ("everything the agent did in this session" as one exportable set), audit log, packaging/licensing for consultancies.
+- **Done — flow authoring for real:** ServiceNow SDK (Fluent) codegen with offline compile validation, serialized install, read-back verification, and an approval-gated agent tool.
+- **Next:** re-generate the reference use cases entirely through the codegen path, deploy the scheduled digest flow, and run the idempotency battery. Then ATF test triggering after builds and the OAuth refresh flow.
+- **Later — productize:** multi-instance workspaces, update-set capture around agent sessions ("everything the agent did in this session" as one exportable set), audit log, packaging/licensing for consultancies.
+
+## Notes from building this
+
+Things that cost real time and are documented in `docs/fluent-research.md`:
+
+- The published SDK CLI page lists **kebab-case flags that don't exist** (`--frozen-keys`, `--app-name`). The shipped CLI is camelCase. `now-sdk explain <topic>` is the reliable reference — it bundles better docs than the website.
+- Modern releases store flow parts in the **`_v2`** tables. The legacy tables still exist and return zero rows, so reading them makes every modern flow look empty.
+- Choice fields must be handed to the model as `value=label` pairs. Passing bare values produced a flow that fired on *Low* risk for a spec that asked for *High*, because `risk=4` means Low on this instance — and it compiled and installed perfectly.
+- Reasoning models (gpt-oss, o-series) bill hidden reasoning tokens against `max_tokens` and return HTTP 200 with empty content when the budget runs out. NowForge now raises a specific error instead of reporting "the model returned nothing".
