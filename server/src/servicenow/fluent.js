@@ -964,7 +964,15 @@ You are given the automation request, the compiled Fluent source of the flow, an
                  "field": "<field name>",
                  "expect": { "value": "<raw value>" } | { "display": "<display value>" },
                  "note": "<what promise of the request this proves>" } ],
-  "cleanup": [ { "table": "<table>", "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" } } ]
+  "cleanup": [ { "table": "<table>", "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" } } ],
+
+  // ONLY for flows that pause (Ask For Approval, Wait For Condition). Omit otherwise.
+  "resume":            { "table": "sysapproval_approver",
+                         "locate": { "byQuery": "document_id={{setup.sys_id}}" },
+                         "patch": { "state": "approved" },
+                         "waitSec": 90,
+                         "note": "approve the request so the flow continues" },
+  "assertAfterResume": [ { ...same shape as an assert... } ]
 }
 
 RULES:
@@ -978,7 +986,12 @@ RULES:
 7. cleanup MUST include the setup record ({ "bySetupRecord": true }) plus every record the flow creates.
 8. Keep setup.payload minimal: only what the trigger condition requires, plus a short_description so the record is identifiable.
 9. DERIVED FIELDS — critical. On task tables (incident, problem, change_request, sc_task) "priority" is CALCULATED from "impact" and "urgency". Writing priority directly is silently overwritten on insert: {"priority":"1"} lands as 4 - Low. To create a P1 record set {"impact":"1","urgency":"1"} and do NOT set priority at all. The same applies to any field the platform computes — set the inputs, not the result.
-10. setup.payload must make the trigger condition TRUE after the platform's own rules run, not merely look like it. If the trigger tests a calculated field, drive it through the fields it is calculated from.`;
+10. setup.payload must make the trigger condition TRUE after the platform's own rules run, not merely look like it. If the trigger tests a calculated field, drive it through the fields it is calculated from.
+11. PAUSING FLOWS. If the source contains askForApproval (or any wait), the flow STOPS there and everything after it has not run yet. Split the assertions:
+    - "assert" holds only what is true while paused. For an approval this MUST prove WHO the approval was raised for, not merely that one exists: assert the "approver" field of the sysapproval_approver row (locate by "document_id={{setup.sys_id}}") against the approver's display name from the live context. Asserting only state="requested" is too weak — an approval routed to the wrong person would pass it.
+    - "resume" describes the state change that unblocks it: patch the sysapproval_approver row to {"state":"approved"}.
+    - "assertAfterResume" holds the effects that follow approval (the work note, the field update).
+    Putting a post-approval effect in "assert" is wrong — it has not happened yet and the run will fail a correct flow.`;
 
 /** Ask the model for a verification spec for a freshly generated flow. */
 async function generateVerifySpec({ spec, source, context, flowName, promisedEffects, priorErrors }) {
@@ -1022,14 +1035,26 @@ export function validateVerifySpec(v, { promisedEffects = [] } = {}) {
   }
   if (!v.wait?.flowName) errors.push('wait.flowName is required.');
 
+  const afterResume = Array.isArray(v.assertAfterResume) ? v.assertAfterResume : [];
+  if (v.resume) {
+    if (!v.resume.table) errors.push('resume.table is required.');
+    if (!v.resume.locate?.bySetupRecord && !v.resume.locate?.byQuery) errors.push('resume.locate needs bySetupRecord or byQuery.');
+    if (!v.resume.patch || typeof v.resume.patch !== 'object' || !Object.keys(v.resume.patch).length) {
+      errors.push('resume.patch must be a non-empty object of field/value pairs.');
+    }
+    if (!afterResume.length) errors.push('A resume step needs at least one assertAfterResume entry — otherwise resuming proves nothing.');
+  }
+
   if (!Array.isArray(v.assert) || v.assert.length === 0) {
     errors.push('assert must contain at least one assertion.');
   } else {
     // Every promised effect needs its own assertion, or the run proves only
     // part of what the request asked for while reporting a clean pass.
-    if (promisedEffects.length > 1 && v.assert.length < promisedEffects.length) {
+    // Post-resume assertions count toward coverage.
+    const totalAssertions = v.assert.length + afterResume.length;
+    if (promisedEffects.length > 1 && totalAssertions < promisedEffects.length) {
       errors.push(
-        `The request promises ${promisedEffects.length} observable effects but only ${v.assert.length} assertion(s) were written. ` +
+        `The request promises ${promisedEffects.length} observable effects but only ${totalAssertions} assertion(s) were written. ` +
         `Add one assertion per promised effect: ${promisedEffects.map((e, i) => `(${i + 1}) ${e}`).join('; ')}.`
       );
     }
@@ -1214,20 +1239,57 @@ export async function verify(name, emit = () => {}) {
     await new Promise((r) => setTimeout(r, 4000));
 
     // --- assert ---
-    for (const a of spec.assert) {
-      const target = await locate(a.locate, a.table, { setupSysId });
-      if (!target) {
-        assertions.push({ pass: false, table: a.table, field: a.field, note: a.note, reason: 'No record matched the locator.' });
-        emit({ type: 'verify_assert', pass: false, field: a.field, reason: 'no record matched' });
-        continue;
+    const runAssertions = async (list, phase) => {
+      for (const a of list) {
+        const target = await locate(a.locate, a.table, { setupSysId });
+        if (!target) {
+          assertions.push({ phase, pass: false, table: a.table, field: a.field, note: a.note, reason: 'No record matched the locator.' });
+          emit({ type: 'verify_assert', phase, pass: false, field: a.field, reason: 'no record matched' });
+          continue;
+        }
+        const actual = await readFieldValue(a.table, target, a.field);
+        const cmp = compare(actual, a.expect);
+        assertions.push({
+          phase, pass: cmp.pass, table: a.table, field: a.field, note: a.note,
+          expected: cmp.want, actual: cmp.got, mode: cmp.mode, sys_id: target,
+        });
+        emit({ type: 'verify_assert', phase, pass: cmp.pass, field: a.field, expected: cmp.want, actual: cmp.got });
       }
-      const actual = await readFieldValue(a.table, target, a.field);
-      const cmp = compare(actual, a.expect);
-      assertions.push({
-        pass: cmp.pass, table: a.table, field: a.field, note: a.note,
-        expected: cmp.want, actual: cmp.got, mode: cmp.mode, sys_id: target,
-      });
-      emit({ type: 'verify_assert', pass: cmp.pass, field: a.field, expected: cmp.want, actual: cmp.got });
+    };
+    await runAssertions(spec.assert, 'paused');
+
+    // --- resume: unblock an approval/wait, then assert what follows ---
+    if (spec.resume && Array.isArray(spec.assertAfterResume) && spec.assertAfterResume.length) {
+      const rTable = spec.resume.table;
+      const rId = await locate(spec.resume.locate, rTable, { setupSysId });
+      if (!rId) {
+        assertions.push({ phase: 'resume', pass: false, table: rTable, field: '(resume)', note: spec.resume.note, reason: 'No record matched the resume locator — nothing to unblock.' });
+        emit({ type: 'verify_resume', pass: false, reason: 'no record matched' });
+      } else {
+        emit({ type: 'verify_resume', table: rTable, patch: spec.resume.patch, sys_id: rId });
+        await table.update(rTable, rId, spec.resume.patch);
+        // Not added to `created`: the runner did not create this row, and the
+        // spec's own cleanup entry is responsible for removing it.
+
+        // Wait for the flow to move past the pause.
+        const rWait = Math.min(Math.max(Number(spec.resume.waitSec) || 90, 15), 300);
+        const rDeadline = Date.now() + rWait * 1000;
+        while (Date.now() < rDeadline) {
+          await new Promise((r) => setTimeout(r, 3000));
+          const ctxs = await table.query('sys_flow_context', {
+            query: `source_record=${setupSysId}`, fields: 'sys_id,name,state', limit: 10,
+          });
+          const mine = ctxs.find((c) => norm(c.name?.display_value ?? c.name) === norm(spec.wait.flowName)) || ctxs[0];
+          const st = mine?.state?.value ?? mine?.state;
+          if (st) {
+            execution = { ...execution, state: st };
+            emit({ type: 'verify_execution', phase: 'resumed', state: st });
+            if ([...TERMINAL_OK, ...TERMINAL_BAD].includes(st)) break;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 4000));
+        await runAssertions(spec.assertAfterResume, 'resumed');
+      }
     }
 
     const passed = assertions.filter((x) => x.pass).length;

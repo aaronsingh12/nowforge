@@ -1,0 +1,64 @@
+{
+  "setup": {
+    "table": "change_request",
+    "payload": {
+      "short_description": "High risk test change",
+      "risk": "2"
+    }
+  },
+  "wait": {
+    "flowName": "High Risk Change Approval",
+    "timeoutSec": 90
+  },
+  "assert": [
+    {
+      "table": "sysapproval_approver",
+      "locate": {
+        "byQuery": "document_id={{setup.sys_id}}"
+      },
+      "field": "approver",
+      "expect": {
+        "display": "Bow Ruggeri"
+      },
+      "note": "approval is raised to the manager of the Network group"
+    }
+  ],
+  "resume": {
+    "table": "sysapproval_approver",
+    "locate": {
+      "byQuery": "document_id={{setup.sys_id}}"
+    },
+    "patch": {
+      "state": "approved"
+    },
+    "waitSec": 90,
+    "note": "approve the request so the flow continues"
+  },
+  "assertAfterResume": [
+    {
+      "table": "change_request",
+      "locate": {
+        "bySetupRecord": true
+      },
+      "field": "work_notes",
+      "expect": {
+        "value": "NowForge: change approved by the Network manager"
+      },
+      "note": "adds a work note after approval"
+    }
+  ],
+  "cleanup": [
+    {
+      "table": "sysapproval_approver",
+      "locate": {
+        "byQuery": "document_id={{setup.sys_id}}"
+      }
+    },
+    {
+      "table": "change_request",
+      "locate": {
+        "bySetupRecord": true
+      }
+    }
+  ]
+}

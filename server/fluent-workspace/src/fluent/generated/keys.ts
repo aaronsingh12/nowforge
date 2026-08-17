@@ -201,6 +201,30 @@ declare global {
                         id: '63969ce6be924657b40ec4ea81df9652'
                         deleted: true
                     }
+                    high_risk_change_approval_ask: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '7a2a72661556428c8ac096f3e93bfc83'
+                    }
+                    high_risk_change_approval_flow_main: {
+                        table: 'sys_hub_flow'
+                        id: 'ccfaa494903b47ba9b494675c466a681'
+                    }
+                    high_risk_change_approval_if_approved: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '58b763ae55e34382903fcc5007bcfbf2'
+                    }
+                    high_risk_change_approval_lookup_network: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'a6d6da08d3fd47a7a6907471c8255724'
+                    }
+                    high_risk_change_approval_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: 'c2eeb5012b01434ea1c92c36d4e24723'
+                    }
+                    high_risk_change_approval_update_note: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '85a7c398dfc34ec68575e54754c2328f'
+                    }
                     if_unassigned: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '2adf0780a1654dbfb4c7ab9d55eec34a'
