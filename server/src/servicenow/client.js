@@ -79,6 +79,21 @@ async function snowFetch(pathname, { method = 'GET', body, params } = {}) {
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { /* HTML error pages etc. */ }
   if (!res.ok) {
+    // "User is not authenticated" is true but useless — it names no instance and
+    // suggests no next step. Auth failures get a message you can act on.
+    if (res.status === 401 || res.status === 403) {
+      const who = c.username || '(no username set)';
+      const causes = [
+        'the password is wrong, or has extra characters that came along with a paste',
+        'the PDI is hibernating — wake it at developer.servicenow.com, then retry',
+        `the user "${who}" lacks REST access on this instance`,
+      ];
+      throw new SnowError(
+        `${url.host} rejected the credentials for "${who}" (${res.status}). Most likely: ${causes.join('; ')}.`,
+        res.status,
+        json?.error?.detail || text.slice(0, 500)
+      );
+    }
     const msg = json?.error?.message || `ServiceNow request failed (${res.status} ${res.statusText})`;
     throw new SnowError(msg, res.status, json?.error?.detail || text.slice(0, 500));
   }

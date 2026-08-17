@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getSettings, saveSettings, publicSettings } from '../config/store.js';
+import { getSettings, saveSettings, publicSettings, clearConnection } from '../config/store.js';
 import { testConnection, resetAuthCache } from '../servicenow/client.js';
 import { getSchema, referenceLookup, tableLookup, clearSchemaCaches, getTableHierarchy } from '../servicenow/schema.js';
 import { capability } from '../servicenow/fluent.js';
@@ -38,7 +38,6 @@ systemRouter.get('/settings', (_req, res) => res.json(publicSettings()));
 systemRouter.post('/settings', (req, res) => {
   const { connection, llm, agent } = req.body || {};
   // Don't wipe stored secrets when the client sends blanks for untouched fields.
-  const cur = getSettings();
   if (connection) {
     if (connection.password === '') delete connection.password;
     if (connection.clientSecret === '') delete connection.clientSecret;
@@ -47,7 +46,14 @@ systemRouter.post('/settings', (req, res) => {
   saveSettings({ connection, llm, agent });
   if (connection) { resetAuthCache(); clearSchemaCaches(); }
   res.json(publicSettings());
-  void cur;
+});
+
+/** Unbind the instance: clears the stored credentials and every cached derivative. */
+systemRouter.post('/connection/disconnect', (_req, res) => {
+  clearConnection();
+  resetAuthCache();
+  clearSchemaCaches();
+  res.json({ ok: true, ...publicSettings() });
 });
 
 systemRouter.post('/connection/test', async (_req, res, next) => {

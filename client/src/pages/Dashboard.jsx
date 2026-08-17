@@ -24,6 +24,7 @@ export default function Dashboard() {
     try {
       const s = await api.post('/system/settings', { connection: conn });
       setSaved(s);
+      setConn((c) => ({ ...c, password: '', clientSecret: '' })); // stored; stop holding it in the form
       setTest(null);
     } catch (e) { setError(e.message); }
   };
@@ -37,6 +38,20 @@ export default function Dashboard() {
     } catch (e) { setError(e.message); }
     finally { setTesting(false); }
   };
+
+  const disconnect = async () => {
+    if (!window.confirm('Disconnect from this instance?\n\nThe stored username and password are cleared. Nothing on the ServiceNow instance is changed.')) return;
+    setError(''); setTest(null);
+    try {
+      const s = await api.post('/system/connection/disconnect');
+      setSaved(s);
+      setConn({ instanceUrl: '', authType: 'basic', username: '', password: '', clientId: '', clientSecret: '' });
+      setStats(null);
+    } catch (e) { setError(e.message); }
+  };
+
+  const warnings = saved?.connection?.warnings || [];
+  const connected = Boolean(saved?.connection?.instanceUrl && saved?.connection?.hasPassword);
 
   return (
     <div className="stack">
@@ -81,7 +96,24 @@ export default function Dashboard() {
           <div className="row">
             <button className="btn primary" onClick={save}>Save connection</button>
             <button className="btn" onClick={runTest} disabled={testing}>{testing ? 'Testing…' : 'Test connection'}</button>
+            {connected && (
+              <button className="btn amber" onClick={disconnect} style={{ marginLeft: 'auto' }}>Log out</button>
+            )}
           </div>
+
+          {warnings.length > 0 && (
+            <div className="note warn" style={{ marginTop: 10 }}>
+              <b>Check the saved credentials.</b>
+              <ul style={{ margin: '6px 0 0', paddingLeft: 18, fontSize: 12.5 }}>
+                {warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+              <p style={{ fontSize: 12, color: 'var(--muted)', margin: '6px 0 0' }}>
+                Re-enter the password and save — leading and trailing spaces are stripped automatically, but
+                spaces in the middle are kept, because they might be real.
+              </p>
+            </div>
+          )}
+
           {test && <p className="ok-text">Connected. Sample user: <span className="mono">{test.sampleUser || 'n/a'}</span>{test.build ? <> · build <span className="mono">{test.build}</span></> : null}</p>}
           {error && <p className="error-text">{error}</p>}
         </div>

@@ -48,13 +48,60 @@ export function getSettings() {
   return load();
 }
 
+/**
+ * Credentials arrive by paste, and pastes bring passengers. A stored password
+ * once carried four embedded spaces — a password plus trailing text copied from
+ * the same line — which produced nothing but "User is not authenticated" with
+ * no clue why. Trim the obvious damage, and report what we cannot safely fix.
+ */
+const TRIMMED_FIELDS = ['instanceUrl', 'username', 'password', 'clientId', 'clientSecret'];
+
+function sanitizeConnection(conn) {
+  const out = { ...conn };
+  for (const f of TRIMMED_FIELDS) {
+    if (typeof out[f] === 'string') out[f] = out[f].trim();
+  }
+  if (typeof out.instanceUrl === 'string') out.instanceUrl = out.instanceUrl.replace(/\/+$/, '');
+  return out;
+}
+
+/** Non-fatal problems worth showing the user rather than silently storing. */
+export function credentialWarnings(conn) {
+  const warnings = [];
+  const check = (label, value) => {
+    if (typeof value !== 'string' || !value) return;
+    if (/\s/.test(value)) {
+      warnings.push(`${label} contains a space. Passwords rarely do — check you didn't paste extra text along with it.`);
+    } else if (/[^\x21-\x7e]/.test(value)) {
+      warnings.push(`${label} contains a non-standard character (a smart quote or non-breaking space often sneaks in when copying from a web page).`);
+    }
+  };
+  check('The password', conn.password);
+  check('The client secret', conn.clientSecret);
+  if (conn.username && /\s/.test(conn.username)) warnings.push('The username contains a space.');
+  if (conn.instanceUrl && !/^https?:\/\//i.test(conn.instanceUrl)) {
+    warnings.push('The instance URL should start with https://');
+  }
+  return warnings;
+}
+
 export function saveSettings(patch) {
   const cur = load();
   const next = {
-    connection: { ...cur.connection, ...(patch.connection || {}) },
+    connection: sanitizeConnection({ ...cur.connection, ...(patch.connection || {}) }),
     llm: { ...cur.llm, ...(patch.llm || {}) },
     agent: { ...cur.agent, ...(patch.agent || {}) },
   };
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(FILE, JSON.stringify(next, null, 2));
+  cache = next;
+  return next;
+}
+
+/** Clears the bound instance and its secrets. The LLM settings are unrelated and stay. */
+export function clearConnection() {
+  const cur = load();
+  const next = { ...cur, connection: { ...DEFAULTS.connection } };
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(FILE, JSON.stringify(next, null, 2));
   cache = next;
@@ -72,6 +119,8 @@ export function publicSettings() {
       hasPassword: Boolean(s.connection.password),
       clientId: s.connection.clientId,
       hasClientSecret: Boolean(s.connection.clientSecret),
+      // Surfaced so an already-saved bad credential is visible without a probe.
+      warnings: credentialWarnings(s.connection),
     },
     llm: {
       provider: s.llm.provider,
