@@ -51,6 +51,10 @@ instance.
 
 ## Current contents
 
-| File | Status |
-|---|---|
-| `daily-p1-digest.now.ts` | UC3. Build-verified, never installed. **Phase 3 restores it** to `src/fluent/flows/` and deploys it through the codegen pipeline. |
+Empty — nothing is staged right now.
+
+`daily-p1-digest.now.ts` (UC3) lived here through Phase 2 and was restored to
+`src/fluent/flows/` in Phase 3. Restoring it reused the sys_id that `keys.ts`
+had retained alongside `deleted: true`
+(`b2f18c963fd244f6a02895a7a6359536`), confirming that staging and restoring an
+artifact preserves its identity rather than creating a new record.

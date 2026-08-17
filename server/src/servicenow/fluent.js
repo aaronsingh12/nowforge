@@ -655,6 +655,17 @@ function parseInstall(result) {
  * names every artifact the deploy touched — not just the requested one.
  */
 export async function deploy(name, emit = () => {}) {
+  // `install` ships whatever is in dist/, which is only as fresh as the last
+  // build. Deploying without building silently installs a stale package — a
+  // restored source file appeared to deploy 3/3 while never reaching the
+  // instance at all. Building here makes invariant (a) hold for every caller,
+  // not just the ones that remember.
+  emit({ type: 'building' });
+  const pre = await build();
+  if (!pre.ok) {
+    return { ok: false, message: 'Build failed; nothing was installed.', diagnostics: extractDiagnostics(pre) };
+  }
+
   emit({ type: 'deploying' });
   const res = await serialize(() => runSdk(['install'], INSTALL_TIMEOUT_MS));
   const parsed = parseInstall(res);
@@ -1281,6 +1292,21 @@ export async function verifySchedule(name, expected = {}) {
     }
   }
 
+  // Schedule times are stored in UTC: Time({hours:7}, 'Asia/Kolkata') is
+  // persisted as 01:30. Comparing against the local wall-clock time the request
+  // asked for would fail a perfectly correct flow, so callers pass the local
+  // time plus its offset and the check does the conversion.
+  let localTime = null;
+  if (expected.localTime && expected.utcOffsetMinutes != null && cfg.time) {
+    const hhmm = String(cfg.time).match(/(\d{2}):(\d{2})/);
+    if (hhmm) {
+      const utcMinutes = Number(hhmm[1]) * 60 + Number(hhmm[2]);
+      const local = ((utcMinutes + expected.utcOffsetMinutes) % 1440 + 1440) % 1440;
+      localTime = `${String(Math.floor(local / 60)).padStart(2, '0')}:${String(local % 60).padStart(2, '0')}`;
+      add(`schedule fires at ${expected.localTime} local`, localTime === expected.localTime, `${localTime} local (${hhmm[0]} UTC)`, expected.localTime);
+    }
+  }
+
   const passed = checks.filter((c) => c.pass).length;
   return {
     ok: passed === checks.length,
@@ -1288,6 +1314,7 @@ export async function verifySchedule(name, expected = {}) {
     sys_id: sysId,
     triggerType,
     config: cfg,
+    localTime,
     checks,
     summary: `${passed}/${checks.length} metadata checks passed`,
     caveat: 'Metadata only — no supported manual-execute path exists for scheduled flows, so this proves the schedule is configured, not that it fired.',
