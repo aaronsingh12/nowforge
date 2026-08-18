@@ -532,3 +532,125 @@ is what makes approval flows verifiable at all.
 Measured during the Step 0 clean-up: deleting two flows advanced `sys_updated_on` on **all
 three** surviving artifacts, because `install` redeploys the entire application. Idempotency
 must therefore be measured as *same sys_id, no new rows* — never as *timestamps unchanged*.
+
+---
+
+## 12. Phase 4 — the duplicate-identity failure class ⚠️
+
+A live codegen run failed **all 3 build attempts** with an SDK abort that never appeared before:
+
+```
+Record sys_hub_flow_logic_instance_v2.3f6799c741524cc3afadf8bbd2a3e52d is defined 2 times in the project
+Record sys_hub_action_instance_v2.10c0ec9dcf0c486ab1e40f73c0edbe8d   is defined 2 times in the project
+```
+
+The offline build gate held exactly as designed: **zero instance mutation**, three attempts, then
+a stop-and-ask. Nothing was deployed. What follows is the diagnosis.
+
+### The mechanism: `$id` keys are a PROJECT-GLOBAL namespace
+
+This is the part that was never written down. `$id: Now.ID['add_work_note']` does **not** mean
+"an element called add_work_note inside this flow". `keys.ts` is a **flat, project-wide map**:
+
+```typescript
+add_work_note:        { table: 'sys_hub_action_instance_v2',      id: '10c0ec9dcf0c486ab1e40f73c0edbe8d' }
+if_priority_critical: { table: 'sys_hub_flow_logic_instance_v2',  id: '3f6799c741524cc3afadf8bbd2a3e52d' }
+```
+
+One key → one sys_id, for the whole application. So when a *second* flow declares
+`Now.ID['add_work_note']`, it does not get a fresh record — it resolves to **the same sys_id as
+the first flow's action**, and the build aborts because one record is now claimed by two flows.
+
+`HARD RULE 2` told the model the $id must be *"unique within the file"*. That is the bug in one
+line: **the constraint is project-wide, and the rule said file-wide.**
+
+### Evidence — Step 1a, source inventory
+
+`ls server/fluent-workspace/src/fluent/flows/` at diagnosis time (8 sources, 5 verify specs):
+
+| source | tracked | `.verify.json` | note |
+|---|---|---|---|
+| `daily-p1-digest.now.ts` | yes | — | scheduled; verified by metadata |
+| `demo-incident-flow.now.ts` | **no** | **missing** | ⚠️ see below |
+| `demo-incident-priority-notification.now.ts` | no | yes | |
+| `escalate-network-p1-incident.now.ts` | yes | yes | |
+| `handle-high-priority-incident.now.ts` | no | yes | last good deploy, 10:51 |
+| `high-risk-change-approval.now.ts` | yes | yes | |
+| `notify-p1-incident-assignment-group-manager.now.ts` | no | yes | |
+| `smoke-test.now.ts` | yes | — | |
+
+**No candidate from the failed run survived** — invariant (b) held. The `flows/` directory mtime
+is `11:03:06` with no file carrying that mtime, which is the signature of a create-then-delete:
+the candidate was written and swept. `keys.ts` was rewritten at `11:03:13` by the cleanup build.
+
+`demo-incident-flow.now.ts` is a **hygiene smell but not the cause**: it is a real deployed
+artifact (it owns flow `ba6a8fa5…` on the instance) that was never committed and never got a
+verification spec. It is unmanaged, not stray.
+
+### Evidence — Step 1b, the two definition sites
+
+```
+$ grep -rn "3f6799c7\|10c0ec9d" server/fluent-workspace/
+src/fluent/generated/keys.ts:14   id: '10c0ec9dcf0c486ab1e40f73c0edbe8d'   ← key add_work_note
+src/fluent/generated/keys.ts:390  id: '3f6799c741524cc3afadf8bbd2a3e52d'   ← key if_priority_critical
+```
+
+The raw sys_ids appear **only** in `keys.ts` — sources never write them, they write the *key*.
+Resolving each key to its declaring source:
+
+```
+$ grep -rn "add_work_note\|if_priority_critical" src/
+escalate-network-p1-incident.now.ts:110   { $id: Now.ID['add_work_note'] }         → 10c0ec9d…
+demo-incident-flow.now.ts:32              $id: Now.ID['if_priority_critical'],     → 3f6799c7…
+```
+
+And `dist/` proves both sys_ids were already **owned by deployed flows** before the failed run:
+
+```
+dist/app/update/sys_hub_flow_55a03b37….xml:61   <sys_id>10c0ec9dcf0c486ab1e40f73c0edbe8d</sys_id>
+dist/app/update/sys_hub_flow_ba6a8fa5….xml:123  <sys_id>3f6799c741524cc3afadf8bbd2a3e52d</sys_id>
+```
+
+### Diagnosed class: **CLASS C**
+
+Both duplicated sys_ids **already existed in previously deployed artifacts** (`Escalate Network
+P1 Incident` and `Demo Incident Flow`). The failing candidate declared `add_work_note` and
+`if_priority_critical` a *second* time, and each collided with a different existing flow.
+
+- Not **CLASS A**: the collisions are candidate-vs-existing, not two `$id`s inside one file.
+  Cross-checking all 60 `Now.ID` keys across the 8 surviving sources reports **zero** duplicates.
+- Not **CLASS B**: no stray candidate from a prior failure was involved. The second definition
+  site in each pair is a legitimately deployed artifact, not a leftover.
+
+### Why the model reached for those two keys
+
+The spec under generation said *"add a work note on the incident"* and *"If the incident's
+priority is Critical"*. The model named its elements **semantically** — `add_work_note`,
+`if_priority_critical` — which is exactly what a sensible author does, and exactly what
+collides, because two different flows that both add a work note converge on the same name.
+
+The cheatsheet makes this worse rather than better: it is fed into every codegen prompt as
+"authoritative, build-verified" and its examples use **the live keys of deployed sources
+verbatim** — `notify_manager_subflow`, `nm_lookup_task`, `nm_send_email`, `nm_outputs_sent`,
+plus bare keys like `log`, `note`, `set`, `t`, `step`, `guard`. Any of those copied into a new
+flow reproduces this failure immediately. Semantic convergence and example-copying are the same
+defect: **a key that is not freshly minted is a live sys_id belonging to someone else.**
+
+### Rejected fix: timestamp-suffixed keys
+
+The runtime agent proposed suffixing keys with a timestamp. **Rejected.** That guarantees a
+different key on every regeneration, which is precisely the Phase 3 identity defect in §6:
+`Now.ID` stability is what makes redeploy *update in place* instead of duplicating. A spec that
+regenerates must keep its sys_ids. Random or time-based identity is never the answer here —
+uniqueness has to come from a **namespace**, not from entropy.
+
+### Fix: three guards (see §13)
+
+1. **Pre-build static validation** of every candidate — duplicate `$id` within the candidate, or
+   collision with any other project source, is rejected *before* `now-sdk build`, with a precise
+   retry diagnostic naming the key and both definition sites.
+2. **Retry hygiene invariant** — every attempt for one request targets the same
+   fingerprint-derived filename, never the model's chosen flow name; `src/` is swept before each
+   request and *asserted* back to its pre-request state after a failure.
+3. **Context sanitation** — `$id` keys in any source fed back into the prompt are neutralised
+   (names kept), and the cheatsheet carries a HARD RULE with the mint format.
