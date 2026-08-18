@@ -28,13 +28,17 @@ function toAnthropicMessages(history) {
   return out;
 }
 
-export async function chat({ apiKey, model, system, history, tools, maxTokens = 4096 }) {
+export async function chat({ apiKey, model, system, history, tools, maxTokens = 4096, decoding }) {
   const body = {
     model: model || DEFAULT_MODEL,
     max_tokens: maxTokens,
     system,
     messages: toAnthropicMessages(history),
   };
+  // A1 passthrough. This API has a temperature and no seed, so the seed is
+  // dropped here rather than silently pretended at — `DECODING_SENT` records
+  // that, so a caller can report what it actually got.
+  if (decoding?.temperature !== undefined) body.temperature = decoding.temperature;
   if (tools?.length) {
     body.tools = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
   }

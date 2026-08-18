@@ -58,6 +58,20 @@ const PROGRESS_LABEL = {
   deploying: 'Installing on the instance',
   verifying: 'Reading the result back',
   done: 'Done',
+  // Model-proofing floor (A2–A5). Every one of these is a correction the
+  // pipeline made to the model's output, so none of them is allowed to be
+  // silent — a rewritten name in particular changes what the instance matches.
+  identity_pinned: 'Flow identity pinned',
+  identity_rewritten: 'Renamed flow corrected back to its pinned identity',
+  promised_literals: 'Exact text the request demands',
+  literals_rejected: 'Rejected — promised text missing from the source',
+  trigger_strategy_rejected: 'Rejected — trigger strategy would misfire',
+  identity_rejected: 'Rejected — duplicate element identity',
+  verify_spec_attempt: 'Writing a verification spec',
+  verify_spec_rejected: 'Verification spec rejected — adding measured evidence',
+  verify_spec_stalled: 'Verification stopped — a retry would have repeated itself',
+  verify_spec_ready: 'Verification spec ready',
+  verify_spec_failed: 'No valid verification spec could be produced',
 };
 
 function progressLine(e) {
@@ -69,6 +83,19 @@ function progressLine(e) {
     return `${base}: ${e.resolved.map((r) => `${r.search}→${r.matches[0]?.sys_id?.slice(0, 8)}…`).join(', ')}`;
   }
   if (e.type === 'build_failed') return `${base} (attempt ${e.attempt})`;
+  if (e.type === 'identity_pinned') return `${base}: ${e.pins.map((p) => `${p.kind} “${p.name}”`).join(', ')}`;
+  if (e.type === 'identity_rewritten') {
+    return `${base}: ${e.rewrites.map((r) => `“${r.from}” → “${r.to}”`).join(', ')}`;
+  }
+  if (e.type === 'promised_literals') return `${base}: ${e.literals.map((l) => JSON.stringify(l)).join(', ')}`;
+  if (e.type === 'literals_rejected') return `${base} (attempt ${e.attempt}): ${e.missing.map((l) => JSON.stringify(l)).join(', ')}`;
+  if (e.type === 'trigger_strategy_rejected') return `${base} (attempt ${e.attempt}): ${e.strategy ? `is '${e.strategy}'` : 'not set'}`;
+  if (e.type === 'identity_rejected') return `${base} (attempt ${e.attempt})`;
+  if (e.type === 'verify_spec_attempt') return `${base} (attempt ${e.attempt}/${e.of})`;
+  if (e.type === 'verify_spec_rejected') {
+    return `${base} (attempt ${e.attempt})${e.evidenceAdded ? ` — ${e.evidenceAdded} new field inventory` : ''}`;
+  }
+  if (e.type === 'verify_spec_ready') return `${base}: ${e.assertions} assertion(s) in ${e.attempts} attempt(s)`;
   return base;
 }
 

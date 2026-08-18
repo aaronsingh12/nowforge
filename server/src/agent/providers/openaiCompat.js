@@ -33,7 +33,7 @@ function toOpenAiMessages(system, history) {
   return out;
 }
 
-export async function chat({ provider, apiKey, baseUrl, model, system, history, tools, maxTokens = 4096 }) {
+export async function chat({ provider, apiKey, baseUrl, model, system, history, tools, maxTokens = 4096, decoding }) {
   const d = DEFAULTS[provider] || DEFAULTS.openai;
   const url = `${(baseUrl || d.baseUrl).replace(/\/$/, '')}/chat/completions`;
   const body = {
@@ -41,6 +41,11 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
     max_tokens: maxTokens,
     messages: toOpenAiMessages(system, history),
   };
+  // A1 passthrough. Both knobs exist on this wire format, so both are sent.
+  // Whether the backend HONOURS them is a separate question with a measured
+  // answer — see agent/decoding.js. Nothing here may assume it did.
+  if (decoding?.temperature !== undefined) body.temperature = decoding.temperature;
+  if (decoding?.seed !== undefined) body.seed = decoding.seed;
   if (tools?.length) {
     body.tools = tools.map((t) => ({
       type: 'function',

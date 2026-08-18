@@ -7,6 +7,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getSettings } from '../config/store.js';
 import { chatOnce } from '../agent/providers/index.js';
+import { codegenDecoding } from '../agent/decoding.js';
+import {
+  findArtifactNames,
+  pinArtifactNames,
+  groundLiterals,
+  checkPromisedLiterals,
+  lintTriggerStrategy,
+  RetryLedger,
+} from './codegen-guards.js';
 import { getSchema, referenceLookup } from './schema.js';
 import { flows } from './flows.js';
 import { table } from './client.js';
@@ -23,6 +32,10 @@ const STATE_FILE = path.join(SERVER_ROOT, 'data/fluent-state.json');
 const CHEATSHEET = path.join(REPO_ROOT, 'docs/fluent-flow-cheatsheet.md');
 
 const MAX_ATTEMPTS = 3;
+// Raised from 3 to 4 for the Test 1 Step 1 resume (docs/fluent-research.md §20).
+// A budget is only worth raising because A5 guarantees each attempt asks a
+// DIFFERENT question; four identical re-asks would just cost four times as much.
+const MAX_VERIFY_ATTEMPTS = 4;
 const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
 const INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
 const QUICK_TIMEOUT_MS = 2 * 60 * 1000;
@@ -627,20 +640,22 @@ const INTENT_SYSTEM = `You extract structured intent from a ServiceNow automatio
   "trigger_kind": "record_created" | "record_updated" | "record_created_or_updated" | "scheduled" | "none",
   "trigger_table": "servicenow table name, or null for scheduled/subflow",
   "lookups": [ { "table": "sys_user_group|sys_user|sc_category|cmdb_ci|...", "name": "the exact proper noun from the request" } ],
-  "promised_effects": [ "each distinct OBSERVABLE change the request promises" ]
+  "promised_effects": [ "each distinct OBSERVABLE change the request promises" ],
+  "promised_literals": [ "each exact string the request demands the flow WRITE, copied character for character" ]
 }
 "lookups" must list every proper noun the request names that has to become a real record reference (groups, people, categories, CIs). Use [] if there are none.
+"promised_literals" lists only text the flow must reproduce VERBATIM in a value it writes — a prefix, a work-note wording, an email subject. Copy each one exactly as the request spells it, including spacing and punctuation, and ONLY if the request quotes or dictates the literal text. A choice LABEL the flow matches on ("On Hold"), a table or field name, and a paraphrase of behaviour are NOT promised literals. Use [] when the request dictates no exact text.
 "promised_effects" lists only effects that can be OBSERVED on a record afterwards — a field set, a note added, a record created. One entry per distinct effect. Sending an email is NOT observable on a record; looking something up is not an effect. Example: "adds an escalation work note to the incident", "sets assigned_to to the group manager".`;
 
-async function extractIntent(spec) {
+async function extractIntent(spec, decoding) {
   // Budgets are deliberately generous: reasoning models bill hidden reasoning
   // tokens against max_tokens, so a tight budget yields an empty completion.
-  const raw = await chatOnce({ system: INTENT_SYSTEM, user: spec, maxTokens: 3000 });
+  const raw = await chatOnce({ system: INTENT_SYSTEM, user: spec, maxTokens: 3000, decoding });
   const cleaned = raw.replace(/```json|```/g, '').trim();
   try { return JSON.parse(cleaned); } catch {
     const m = cleaned.match(/\{[\s\S]*\}/);
     if (m) { try { return JSON.parse(m[0]); } catch { /* fall through */ } }
-    return { name: null, kind: 'flow', trigger_kind: 'record_created', trigger_table: null, lookups: [] };
+    return { name: null, kind: 'flow', trigger_kind: 'record_created', trigger_table: null, lookups: [], promised_literals: [] };
   }
 }
 
@@ -804,7 +819,7 @@ async function readCheatsheet() {
  * Generate one Fluent source file from a plain-language spec.
  * `priorError` carries build diagnostics back into the prompt on a retry.
  */
-export async function generate(spec, { intent, context, priorSource, priorError, existingSource } = {}) {
+export async function generate(spec, { intent, context, priorSource, priorError, existingSource, decoding, ledger } = {}) {
   // Guard 3: the model never sees a live Now.ID key. Every source fed back into
   // the prompt is neutralised through ONE shared map, so the same record keeps
   // the same placeholder across the deployed source and the retry source, and
@@ -858,7 +873,13 @@ export async function generate(spec, { intent, context, priorSource, priorError,
   }
   userParts.push('Return only the TypeScript source.');
 
-  const raw = await chatOnce({ system, user: userParts.join('\n\n'), maxTokens: 12000 });
+  // A5: a retry that repeats the previous question cannot produce a different
+  // answer. The ledger refuses to send one, loudly, rather than burning an
+  // attempt re-asking a question that has already been answered.
+  const user = userParts.join('\n\n');
+  ledger?.record(user);
+
+  const raw = await chatOnce({ system, user, maxTokens: 12000, decoding });
   return restoreIds(extractSource(raw), idMap);
 }
 
@@ -907,8 +928,18 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
   }
   const preRequest = await snapshotSources();
 
-  const intent = await extractIntent(spec);
+  // Identity of the REQUEST, needed before the first model call: A1 derives its
+  // seed from it, so intent extraction is asked for the same sample every time.
+  const fingerprint = specFingerprint(spec);
+
+  const intent = await extractIntent(spec, codegenDecoding(fingerprint, 0));
   emit({ type: 'intent', intent });
+
+  // A3: only literals the request itself spells out are enforceable. The intent
+  // extractor is the same weak model this guard polices, so its list is
+  // intersected with the spec text — it can narrow the guard, never invent it.
+  const promisedLiterals = groundLiterals(spec, intent?.promised_literals || []);
+  if (promisedLiterals.length) emit({ type: 'promised_literals', literals: promisedLiterals });
 
   const context = await buildLiveContext(intent);
   if (context.resolved.length) emit({ type: 'resolved', resolved: context.resolved });
@@ -921,7 +952,6 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
   //                           `updates`, because a changed spec fingerprints
   //                           differently and would otherwise create a second
   //                           artifact rather than updating the first.
-  const fingerprint = specFingerprint(spec);
   let existing = null;
   if (updates) {
     const target = sourcePath(updates);
@@ -943,6 +973,26 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
   // The model's chosen flow name never selects the file it is written to.
   const targetFile = existing ? path.join(FLOWS_DIR, existing.file) : candidatePath(fingerprint);
 
+  // A2 — flow identity is pinned ONCE per request, then enforced mechanically.
+  //
+  // The platform matches artifacts by NAME, so a rename is not cosmetic: it
+  // creates a second flow instead of updating the first. Measured across six
+  // live runs of one spec, this model produced a different name every time
+  // ("...Vendor Issues", "...Vendor Incidents", "...Vendor Incident"), and the
+  // HARD RULE asking it not to had no effect. So the name is not requested — it
+  // is imposed on the output, and every correction is reported.
+  //
+  // On a regeneration the pin is the DEPLOYED name (the string the instance is
+  // already matching on). On a new request it is the intent name, which is
+  // extracted once and therefore stable across this request's attempts.
+  const pins = existing
+    ? findArtifactNames(existing.source).map(({ kind, name }) => ({ kind, name }))
+    : (intent?.name ? [{ kind: intent.kind === 'subflow' ? 'subflow' : 'flow', name: intent.name }] : []);
+  if (pins.length) emit({ type: 'identity_pinned', pins });
+
+  // A5 — refuses to send a retry that repeats an earlier prompt verbatim.
+  const ledger = new RetryLedger('codegen');
+
   let source = null;
   let lastDiagnostics = null;
   const attempts = [];
@@ -956,11 +1006,46 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
       existingSource: existing?.source,
       priorSource: attempt > 1 ? source : undefined,
       priorError: attempt > 1 ? lastDiagnostics : undefined,
+      // A1: same request, same attempt, same sample requested. Whether the
+      // backend honours it is measured and reported, never assumed.
+      decoding: codegenDecoding(fingerprint, attempt),
+      ledger,
     });
     source = stampSource(source, fingerprint);
 
+    // A2: impose the pinned name before anything else reads it — the filename,
+    // the install read-back and the verification spec all key off this string.
+    const pinned = pinArtifactNames(source, pins);
+    source = pinned.source;
+    if (pinned.rewrites.length) {
+      emit({ type: 'identity_rewritten', attempt, rewrites: pinned.rewrites });
+    }
+
     const artifacts = parseArtifacts(source);
     const name = artifacts.find((a) => a.kind === 'flow')?.name || artifacts[0]?.name || intent.name || 'Generated Flow';
+
+    // Pre-build static gate. All three checks run TOGETHER and their diagnostics
+    // are fed back as one message: rejecting on the first problem only would
+    // spend an attempt per defect, and the budget is 3.
+    const staticErrors = [];
+    const stages = [];
+
+    // A3 — text the request dictates verbatim must survive into the source.
+    const litCheck = checkPromisedLiterals(source, promisedLiterals);
+    if (!litCheck.ok) {
+      staticErrors.push(litCheck.diagnostic);
+      stages.push('literals');
+      emit({ type: 'literals_rejected', attempt, missing: litCheck.missing });
+    }
+
+    // A4 — an updated trigger without an explicit strategy inherits `once`,
+    // which fires once EVER per record. Nothing downstream can observe it.
+    const trigCheck = lintTriggerStrategy(source, spec);
+    if (!trigCheck.ok) {
+      staticErrors.push(trigCheck.diagnostic);
+      stages.push('trigger_strategy');
+      emit({ type: 'trigger_strategy_rejected', attempt, errors: trigCheck.errors, strategy: trigCheck.strategy });
+    }
 
     // Guard 1: reject duplicate identity BEFORE the SDK runs. The SDK's own
     // abort names a sys_id the model never wrote; this names the key and both
@@ -968,9 +1053,14 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
     const others = await readProjectSources({ except: path.basename(targetFile) });
     const idCheck = validateCandidateIds(source, others, { file: path.basename(targetFile) });
     if (!idCheck.ok) {
-      lastDiagnostics = idCheck.diagnostic;
-      attempts.push({ attempt, stage: 'identity', diagnostics: lastDiagnostics });
+      staticErrors.push(idCheck.diagnostic);
+      stages.push('identity');
       emit({ type: 'identity_rejected', attempt, errors: idCheck.errors });
+    }
+
+    if (staticErrors.length) {
+      lastDiagnostics = staticErrors.join('\n');
+      attempts.push({ attempt, stage: stages.join('+'), diagnostics: lastDiagnostics });
       continue; // never written to src/, never built
     }
 
@@ -1413,7 +1503,7 @@ RULES:
     Putting a post-approval effect in "assert" is wrong — it has not happened yet and the run will fail a correct flow.`;
 
 /** Ask the model for a verification spec for a freshly generated flow. */
-async function generateVerifySpec({ spec, source, context, flowName, promisedEffects, priorErrors }) {
+async function generateVerifySpec({ spec, source, context, flowName, promisedEffects, priorErrors, evidence, decoding, ledger }) {
   const parts = [
     `AUTOMATION REQUEST (the promises to verify):\n${spec}`,
     `FLOW NAME: ${flowName}`,
@@ -1426,9 +1516,20 @@ async function generateVerifySpec({ spec, source, context, flowName, promisedEff
   if (priorErrors?.length) {
     parts.push(`YOUR PREVIOUS VERIFICATION SPEC WAS REJECTED:\n${priorErrors.map((e) => `- ${e}`).join('\n')}\n\nReturn a corrected COMPLETE spec.`);
   }
+  // A5: every retry carries strictly more MEASURED evidence than the last —
+  // the actual field inventory of the tables the rejected spec named. Without
+  // it, "that field does not exist" is an assertion the model is free to
+  // disbelieve, and it did: three attempts running, it re-sent the same
+  // impossible locator (docs/fluent-research.md §14).
+  if (evidence?.length) {
+    parts.push(`--- MEASURED INSTANCE EVIDENCE (read off the live schema, authoritative) ---\n${evidence.join('\n\n')}`);
+  }
   parts.push('Return only the JSON object.');
 
-  const raw = await chatOnce({ system: VERIFY_SYSTEM, user: parts.join('\n\n'), maxTokens: 6000 });
+  const user = parts.join('\n\n');
+  ledger?.record(user);
+
+  const raw = await chatOnce({ system: VERIFY_SYSTEM, user, maxTokens: 6000, decoding });
   const cleaned = String(raw || '').replace(/```json|```/g, '').trim();
   try { return JSON.parse(cleaned); } catch {
     const m = cleaned.match(/\{[\s\S]*\}/);
@@ -1631,22 +1732,113 @@ export async function checkVerifySpecFields(v, { schemaFor = getSchema } = {}) {
   return { ok: errors.length === 0, errors };
 }
 
+/**
+ * A5 — turn a field-check rejection into MEASURED evidence.
+ *
+ * Telling the model "problem does not exist on incident" is a claim it can and
+ * did ignore for three attempts running. Handing it the instance's actual
+ * reference-field inventory is not a claim — it is the table, and it makes the
+ * absence checkable rather than assertable. This is the difference between a
+ * retry and a re-ask.
+ *
+ * `schemaFor` is injectable purely so the offline test can drive it.
+ */
+export async function buildRejectionEvidence(v, { schemaFor = getSchema } = {}) {
+  const parts = [];
+  const tables = new Set();
+  for (const list of [v?.assert, v?.assertAfterResume]) {
+    if (Array.isArray(list)) for (const a of list) if (a?.table) tables.add(a.table);
+  }
+
+  for (const t of tables) {
+    let schema;
+    try { schema = await schemaFor(t); } catch { continue; }
+    const known = new Set(schema.fields.map((f) => f.name));
+
+    // Every name this spec used on this table — asserted fields and the fields
+    // its locators constrain on, which are equally capable of a false green.
+    const named = new Set();
+    for (const list of [v?.assert, v?.assertAfterResume]) {
+      if (!Array.isArray(list)) continue;
+      for (const a of list) {
+        if (a?.table !== t) continue;
+        if (a.field) named.add(a.field);
+        for (const root of queryFieldRoots(a?.locate?.byQuery)) named.add(root);
+      }
+    }
+    const missing = [...named].filter((n) => !known.has(n));
+    if (!missing.length) continue;
+
+    const refs = schema.fields.filter((f) => f.reference).map((f) => `  ${f.name} -> ${f.reference}`);
+    parts.push(
+      `FIELD INVENTORY for "${t}", read off this instance's dictionary.\n` +
+        `Names your spec used that DO NOT EXIST on ${t}: ${missing.join(', ')}.\n` +
+        (refs.length
+          ? `Every reference field that DOES exist on ${t}, with the table it points at:\n${refs.join('\n')}\n`
+          : `${t} has no reference fields at all.\n`) +
+        `If the promise you are trying to prove would have to be stored in one of the missing names, ` +
+        `then this instance has NOWHERE to store it and the effect does not happen here. Do not retry it ` +
+        `under a different spelling, and do NOT move it into the locator: ServiceNow silently drops a ` +
+        `condition naming an unknown field, so that locator matches whether or not the effect occurred ` +
+        `and reports a false green — certifying the absence of a bug rather than merely missing it. ` +
+        `Drop that assertion and prove the promises this instance CAN store.`
+    );
+  }
+  return parts;
+}
+
 /** Generate a verification spec, rejecting and regenerating invalid ones. */
 async function generateVerification(args, emit = () => {}) {
   let priorErrors = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    emit({ type: 'verify_spec_attempt', attempt, of: 3 });
-    const candidate = await generateVerifySpec({ ...args, priorErrors });
-    if (!candidate) { priorErrors = ['Response was not valid JSON.']; continue; }
+  // A5: evidence only ever grows, so attempt N+1 is asked a strictly
+  // better-informed question than attempt N.
+  const evidence = [];
+  const ledger = new RetryLedger('verification spec');
+  const fingerprint = specFingerprint(`verify::${args.flowName}::${args.spec}`);
+
+  for (let attempt = 1; attempt <= MAX_VERIFY_ATTEMPTS; attempt++) {
+    emit({ type: 'verify_spec_attempt', attempt, of: MAX_VERIFY_ATTEMPTS });
+
+    let candidate;
+    try {
+      candidate = await generateVerifySpec({
+        ...args,
+        priorErrors,
+        evidence,
+        decoding: codegenDecoding(fingerprint, attempt),
+        ledger,
+      });
+    } catch (err) {
+      // The ledger refused an identical re-ask. That is our defect, not the
+      // model's, and it is reported as one rather than silently costing an
+      // attempt — house rule: loud failures, never silent fallbacks.
+      emit({ type: 'verify_spec_stalled', attempt, message: err.message });
+      return { ok: false, errors: [...(priorErrors || []), err.message], attempts: attempt, stalled: true };
+    }
+
+    if (!candidate) {
+      priorErrors = ['Response was not valid JSON.'];
+      emit({ type: 'verify_spec_rejected', attempt, errors: priorErrors });
+      continue;
+    }
     const check = validateVerifySpec(candidate, { promisedEffects: args.promisedEffects || [] });
     const fieldCheck = check.ok ? await checkVerifySpecFields(candidate) : { ok: true, errors: [] };
     if (check.ok && fieldCheck.ok) return { ok: true, spec: candidate, attempts: attempt };
     priorErrors = [...check.errors, ...fieldCheck.errors];
+
+    let added = 0;
+    if (!fieldCheck.ok) {
+      for (const block of await buildRejectionEvidence(candidate)) {
+        if (evidence.includes(block)) continue;
+        evidence.push(block);
+        added += 1;
+      }
+    }
     // Report every reason, not just the structural ones: a spec rejected only
     // by the field check would otherwise stream "rejected" with an empty list.
-    emit({ type: 'verify_spec_rejected', attempt, errors: priorErrors });
+    emit({ type: 'verify_spec_rejected', attempt, errors: priorErrors, evidenceAdded: added });
   }
-  return { ok: false, errors: priorErrors, attempts: 3 };
+  return { ok: false, errors: priorErrors, attempts: MAX_VERIFY_ATTEMPTS };
 }
 
 /**

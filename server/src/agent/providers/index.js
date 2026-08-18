@@ -1,4 +1,5 @@
 import { getSettings } from '../../config/store.js';
+import { DECODING_SENT, decodingReality } from '../decoding.js';
 import * as anthropic from './anthropic.js';
 import * as openaiCompat from './openaiCompat.js';
 
@@ -9,15 +10,21 @@ export function providerInfo() {
     (llm.provider === 'anthropic'
       ? anthropic.anthropicDefaults.model
       : (openaiCompat.openAiDefaults[llm.provider]?.model || openaiCompat.openAiDefaults.openai.model));
-  return { provider: llm.provider, model };
+  return {
+    provider: llm.provider,
+    model,
+    // A1: what determinism this provider actually offers, stated rather than
+    // assumed. The UI shows it so a non-reproducible backend is visible.
+    decoding: { sends: DECODING_SENT[llm.provider] || null, reality: decodingReality(llm.provider) },
+  };
 }
 
 /** Full agent turn with tool support. history uses the neutral format (see orchestrator). */
-export async function chatTurn({ system, history, tools, maxTokens }) {
+export async function chatTurn({ system, history, tools, maxTokens, decoding }) {
   const { llm } = getSettings();
   if (llm.provider === 'anthropic') {
     if (!llm.apiKey) throw new Error('Anthropic API key not set. Add it in Settings.');
-    return anthropic.chat({ apiKey: llm.apiKey, model: llm.model, system, history, tools, maxTokens });
+    return anthropic.chat({ apiKey: llm.apiKey, model: llm.model, system, history, tools, maxTokens, decoding });
   }
   if (llm.provider === 'openai' || llm.provider === 'ollama') {
     if (llm.provider === 'openai' && !llm.apiKey) throw new Error('OpenAI API key not set. Add it in Settings.');
@@ -30,18 +37,20 @@ export async function chatTurn({ system, history, tools, maxTokens }) {
       history,
       tools,
       maxTokens,
+      decoding,
     });
   }
   throw new Error(`Unknown LLM provider: ${llm.provider}`);
 }
 
 /** One-shot text completion (no tools) — used by the flow blueprint designer. */
-export async function chatOnce({ system, user, maxTokens = 2048 }) {
+export async function chatOnce({ system, user, maxTokens = 2048, decoding }) {
   const res = await chatTurn({
     system,
     history: [{ role: 'user', text: user }],
     tools: [],
     maxTokens,
+    decoding,
   });
   return res.text;
 }
