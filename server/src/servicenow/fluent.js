@@ -17,6 +17,7 @@ import {
   RetryLedger,
 } from './codegen-guards.js';
 import { getSchema, referenceLookup } from './schema.js';
+import { queryFieldRoots } from './conditions.js';
 import { factBlock } from '../memory/facts.js';
 import { flows } from './flows.js';
 import { table } from './client.js';
@@ -1732,18 +1733,14 @@ export function validateVerifySpec(v, { promisedEffects = [], verifiedExcuses = 
  * strictly worse than no assertion, because it silences the gap.
  * ------------------------------------------------------------------ */
 
-/** Root field names a ServiceNow encoded query constrains on. */
-export function queryFieldRoots(query) {
-  const text = String(query || '').replace(/\{\{[^}]*\}\}/g, 'x');
-  const roots = new Set();
-  for (const clause of text.split(/\^(?:OR|NQ)?/i)) {
-    const c = clause.trim();
-    if (!c || /^ORDERBY/i.test(c)) continue;
-    const m = c.match(/^([a-z][a-z0-9_]*)(?:\.[a-z0-9_.]+)?\s*(ISNOTEMPTY|ISEMPTY|ANYTHING|STARTSWITH|ENDSWITH|NOTLIKE|LIKE|NOTIN|IN|!=|>=|<=|=|>|<)/i);
-    if (m) roots.add(m[1]);
-  }
-  return [...roots];
-}
+/**
+ * Root field names a ServiceNow encoded query constrains on.
+ *
+ * The implementation moved to conditions.js when Track B needed the same check
+ * for SLA start/stop conditions — one parser, not two. Re-exported here so
+ * every existing caller and the guard suite keep their import.
+ */
+export { queryFieldRoots };
 
 /**
  * Every field an assertion reads, and every field its locator constrains on,
