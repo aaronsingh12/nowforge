@@ -47,6 +47,11 @@ declare global {
                         table: 'sys_module'
                         id: '39e89ebd1f99428e9dab343b4b3f0248'
                     }
+                    c1probe_policy: {
+                        table: 'catalog_ui_policy'
+                        id: '668aba2fbb5948d286aa6ee4ba2c69d2'
+                        deleted: true
+                    }
                     call_notify_manager: {
                         table: 'sys_hub_sub_flow_instance_v2'
                         id: '022121081c3f41808cdd6805658b2298'
@@ -91,6 +96,10 @@ declare global {
                         table: 'sys_hub_action_instance_v2'
                         id: '09deaba3814c475a983d37a050ad85ea'
                         deleted: true
+                    }
+                    cuip_5a17b5d5_hide_justification_unless_approval_is_needed: {
+                        table: 'catalog_ui_policy'
+                        id: '2f01bb49e4db4edba8bc3410972a718b'
                     }
                     daily_p1_digest_flow: {
                         table: 'sys_hub_flow'
@@ -724,6 +733,15 @@ declare global {
                         }
                     },
                     {
+                        table: 'catalog_ui_policy_action'
+                        id: '07e6893ffd63417cbe4761b1106d9e1f'
+                        deleted: true
+                        key: {
+                            ui_policy: '668aba2fbb5948d286aa6ee4ba2c69d2'
+                            catalog_variable: 'IO:IO:3617b5d583bacf10b939cc65eeaad3f5'
+                        }
+                    },
+                    {
                         table: 'sys_documentation'
                         id: '0ae44e86ea154e55b763bbb3db25caef'
                         deleted: true
@@ -892,6 +910,14 @@ declare global {
                             name: 'var__m_sys_hub_flow_input_5f71545a40184eda9b64654f7da65aa7'
                             element: 'taskTable'
                             language: 'en'
+                        }
+                    },
+                    {
+                        table: 'catalog_ui_policy_action'
+                        id: 'f18bec18711946c3a3bd55564de9b40d'
+                        key: {
+                            ui_policy: '2f01bb49e4db4edba8bc3410972a718b'
+                            catalog_variable: 'IO:3617b5d583bacf10b939cc65eeaad3f5'
                         }
                     },
                     {

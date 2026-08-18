@@ -1,4 +1,5 @@
 import { table } from './client.js';
+import { getSchema } from './schema.js';
 
 /**
  * Service Catalog domain. Everything here is plain Table API — these artifacts
@@ -14,10 +15,19 @@ import { table } from './client.js';
  *   io_set_item             m2m: variable set <-> catalog item
  */
 
-// Canonical variable type codes for item_option_new.type.
-// NOTE: verify against your instance release via the generic schema explorer if
-// a type renders oddly — codes are stable across recent releases but not sacred.
-export const VARIABLE_TYPES = [
+/**
+ * Fallback variable type codes for item_option_new.type.
+ *
+ * These are a LAST RESORT, not the source of truth. This list was wrong on
+ * dev442675 in exactly the way a hardcoded list goes wrong: it claims 31 is
+ * "Rich Text Label" and 32 is "Attachment", while the instance's own dictionary
+ * says 31 is "Requested For", 32 is "Rich Text Label" and 33 is "Attachment".
+ * A variable created from the stale list gets a silently different type.
+ *
+ * `variableTypes()` reads the real choice list and only falls back to this when
+ * the dictionary cannot be read — and says which one it used.
+ */
+export const VARIABLE_TYPES_FALLBACK = [
   { code: 1, label: 'Yes / No' },
   { code: 2, label: 'Multi Line Text' },
   { code: 3, label: 'Multiple Choice' },
@@ -45,6 +55,30 @@ export const VARIABLE_TYPES = [
   { code: 31, label: 'Rich Text Label' },
   { code: 32, label: 'Attachment' },
 ];
+
+/**
+ * The live choice list off `item_option_new.type`, with the hardcoded list as a
+ * loud fallback. `source` is returned so a caller can say which one it got:
+ * silently serving stale codes is how the wrong variable type ships.
+ */
+export async function variableTypes() {
+  try {
+    const schema = await getSchema('item_option_new');
+    const choices = schema.fields.find((f) => f.name === 'type')?.choices || [];
+    if (choices.length) {
+      return {
+        source: 'instance',
+        types: choices
+          .map((c) => ({ code: Number(c.value), label: c.label }))
+          .filter((t) => Number.isFinite(t.code))
+          .sort((a, b) => a.code - b.code),
+      };
+    }
+    return { source: 'fallback', reason: 'item_option_new.type has no choice list on this instance', types: VARIABLE_TYPES_FALLBACK };
+  } catch (err) {
+    return { source: 'fallback', reason: `the dictionary could not be read: ${err.message}`, types: VARIABLE_TYPES_FALLBACK };
+  }
+}
 
 const CHOICE_TYPE_CODES = new Set([3, 5, 18, 22]);
 const REFERENCE_TYPE_CODES = new Set([8]);
@@ -164,10 +198,67 @@ export const catalog = {
   updateVariable: (sysId, data) => table.update('item_option_new', sysId, data),
   deleteVariable: (sysId) => table.remove('item_option_new', sysId),
 
-  // ---- Variable sets ----
-  listSetVariables: (setId) =>
-    table.query('item_option_new', { query: `variable_set=${setId}`, orderBy: 'order', limit: 200 }),
+  /**
+   * Reorder variables in one call.
+   *
+   * `order` is what the form renders by, and it is an integer field — two
+   * variables sharing a value render in an order the platform picks, which
+   * looks like the reorder silently failing. So the whole list is renumbered
+   * from a clean 100-step sequence rather than the moved pair being swapped,
+   * and every row is read back.
+   */
+  async reorderVariables(ids) {
+    const results = [];
+    let order = 100;
+    for (const sysId of ids) {
+      const want = String(order);
+      await table.update('item_option_new', sysId, { order: want });
+      const back = await table.get('item_option_new', sysId);
+      const got = back?.order?.value ?? back?.order;
+      results.push({ sys_id: sysId, order: want, stored: String(got), ok: String(got) === want });
+      order += 100;
+    }
+    return { ok: results.every((r) => r.ok), variables: results };
+  },
 
+  // ---- Choices on a choice-type variable ----
+  listChoices: (variableId) =>
+    table.query('question_choice', {
+      query: `question=${variableId}^ORDERBYorder`,
+      fields: 'sys_id,text,value,order,inactive',
+      limit: 200,
+      display: 'false',
+    }),
+
+  async createChoice(variableId, { text, value, order, inactive }) {
+    if (!text) throw Object.assign(new Error('A choice needs display text.'), { status: 400 });
+    const existing = await this.listChoices(variableId);
+    const next = existing.length ? Math.max(...existing.map((c) => Number(c.order) || 0)) + 100 : 100;
+    return table.create('question_choice', {
+      question: variableId,
+      text,
+      // `value` is what a UI policy condition compares against, so an empty one
+      // makes the choice unusable in a policy. Derived rather than left blank.
+      value: value || String(text).toLowerCase().replace(/\s+/g, '_'),
+      order: String(order ?? next),
+      inactive: inactive ? 'true' : 'false',
+    }, 'false');
+  },
+
+  updateChoice: (sysId, data) => table.update('question_choice', sysId, data, 'false'),
+  deleteChoice: (sysId) => table.remove('question_choice', sysId),
+
+  // ---- Categories (C-3) ----
+  createCategory: ({ title, sc_catalog, description, parent }) =>
+    table.create('sc_category', {
+      title,
+      sc_catalog: sc_catalog || '',
+      description: description || '',
+      ...(parent ? { parent } : {}),
+      active: 'true',
+    }),
+
+  // ---- Variable sets ----
   listVariableSets: () =>
     table.query('item_option_new_set', { orderByDesc: 'sys_updated_on', limit: 100 }),
 
@@ -206,6 +297,8 @@ export const catalog = {
   listGuideItems: (guideId) =>
     table.query(GUIDE_RULE_TABLE, { query: `guide=${guideId}`, orderBy: 'order', limit: 100 }),
 
+  deleteOrderGuide: (sysId) => table.remove('sc_cat_item_guide', sysId),
+
   addGuideItem: ({ guide, item, order, condition }) =>
     table.create(GUIDE_RULE_TABLE, {
       guide,
@@ -230,6 +323,8 @@ export const catalog = {
       script: script || '// Map producer variables to the target record here.\n// current.short_description = producer.short_description;\n',
       active: 'true',
     }),
+
+  deleteRecordProducer: (sysId) => table.remove('sc_cat_item_producer', sysId),
 
   /**
    * Composite builder used by the AI agent: item + variables + choices in one call.

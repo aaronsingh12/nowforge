@@ -915,6 +915,39 @@ async function build() {
   return serialize(() => runSdk(['build'], BUILD_TIMEOUT_MS));
 }
 
+/* ------------------------------------------------------------------ *
+ * Shared SDK surface
+ *
+ * Flows are no longer the only artifact class that has to be written through
+ * the toolchain rather than the Table API. Catalog UI policy ACTIONS cannot be
+ * written over REST at all on this instance — `sys_ui_policy_action.ui_policy`
+ * carries create and write ACLs granting only the role `nobody`, with
+ * admin_overrides off, and the Table API DROPS a field the caller may not write
+ * instead of refusing the request (fluent-research §23).
+ *
+ * So catalogPolicy.js drives the same CLI, and it must share this module's job
+ * queue: two `now-sdk install` runs at once would each ship a half-built dist/.
+ * ------------------------------------------------------------------ */
+
+/** Compile the whole workspace offline. Nothing reaches the instance. */
+export async function buildWorkspace() {
+  return build();
+}
+
+/** Install the workspace. Serialized against every other build/install. */
+export async function installWorkspace() {
+  return serialize(() => runSdk(['install'], INSTALL_TIMEOUT_MS));
+}
+
+export { extractDiagnostics };
+
+/** Where the managed sources live, so a sibling module does not re-derive them. */
+export const WORKSPACE_DIRS = {
+  workspace: WORKSPACE,
+  flows: FLOWS_DIR,
+  catalog: path.join(WORKSPACE, 'src/fluent/catalog'),
+};
+
 /**
  * Write a candidate into src/ and compile it. Retries with diagnostics fed back
  * to the model — its own identity check first, then the compiler's.
