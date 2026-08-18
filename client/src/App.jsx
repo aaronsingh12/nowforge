@@ -6,6 +6,8 @@ import AgentChat from './pages/AgentChat.jsx';
 import Incidents from './pages/Incidents.jsx';
 import Catalog from './pages/Catalog.jsx';
 import Flows from './pages/Flows.jsx';
+import Sla from './pages/Sla.jsx';
+import Access from './pages/Access.jsx';
 import Settings from './pages/Settings.jsx';
 
 const TITLES = {
@@ -14,6 +16,8 @@ const TITLES = {
   '/incidents': 'Incident Management',
   '/catalog': 'Catalog Management',
   '/flows': 'Flow Designer',
+  '/sla': 'SLA Definitions',
+  '/access': 'Access Control',
   '/settings': 'Settings',
 };
 
@@ -53,6 +57,8 @@ export default function App() {
           <NavLink to="/incidents" className="navlink">Incidents</NavLink>
           <NavLink to="/catalog" className="navlink">Catalog</NavLink>
           <NavLink to="/flows" className="navlink">Flows</NavLink>
+          <NavLink to="/sla" className="navlink">SLA</NavLink>
+          <NavLink to="/access" className="navlink">Access</NavLink>
           <NavLink to="/settings" className="navlink">Settings</NavLink>
           <div className="sidebar-foot">v0.1 · phase 1</div>
         </aside>
@@ -65,6 +71,8 @@ export default function App() {
               <Route path="/incidents" element={<Incidents />} />
               <Route path="/catalog" element={<Catalog />} />
               <Route path="/flows" element={<Flows />} />
+              <Route path="/sla" element={<Sla />} />
+              <Route path="/access" element={<Access />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </div>
