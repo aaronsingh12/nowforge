@@ -8,7 +8,8 @@ const HINTS = {
 };
 
 export default function Settings() {
-  const [llm, setLlm] = useState({ provider: 'anthropic', apiKey: '', baseUrl: '', model: '' });
+  const [llm, setLlm] = useState({ provider: 'anthropic', apiKey: '', baseUrl: '', model: '', embedModel: '' });
+  const [memory, setMemory] = useState(null);
   const [saved, setSaved] = useState(null);
   const [autoApprove, setAutoApprove] = useState(false);
   const [notice, setNotice] = useState('');
@@ -17,9 +18,10 @@ export default function Settings() {
   useEffect(() => {
     api.get('/system/settings').then((s) => {
       setSaved(s);
-      setLlm({ provider: s.llm.provider, apiKey: '', baseUrl: s.llm.baseUrl, model: s.llm.model });
+      setLlm({ provider: s.llm.provider, apiKey: '', baseUrl: s.llm.baseUrl, model: s.llm.model, embedModel: s.llm.embedModel || '' });
       setAutoApprove(s.agent.autoApprove);
     }).catch((e) => setError(e.message));
+    api.get('/agent/memory/status').then(setMemory).catch(() => {});
   }, []);
 
   const hint = HINTS[llm.provider];
@@ -65,6 +67,24 @@ export default function Settings() {
           <input className="input mono" placeholder={hint.model} value={llm.model}
             onChange={(e) => setLlm({ ...llm, model: e.target.value })} />
         </div>
+        <div className="field">
+          <label className="label">
+            Embedding model — semantic recall
+            {memory && (
+              <span className={`badge ${memory.degraded ? 'amber' : 'green'}`} style={{ marginLeft: 8 }}>
+                {memory.degraded ? 'keyword only' : `semantic · ${memory.dim}d`}
+              </span>
+            )}
+          </label>
+          <input className="input mono" placeholder="nomic-embed-text" value={llm.embedModel}
+            onChange={(e) => setLlm({ ...llm, embedModel: e.target.value })} />
+          {memory?.degraded && (
+            <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>
+              Not pulled, so chat search matches words rather than meaning. Fix with{' '}
+              <span className="mono">{memory.command}</span>
+            </span>
+          )}
+        </div>
         <label className="check" style={{ marginBottom: 12 }}>
           <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
           Auto-approve agent mutations (skip the amber gate)
@@ -86,6 +106,11 @@ export default function Settings() {
             Ollama runs fully local: point the base URL at <span className="mono">http://localhost:11434/v1</span> and
             pick a tool-capable model (llama3.1, qwen2.5). No API key, no metering — useful for client environments
             where data cannot leave the machine.
+          </div>
+          <div className="note">
+            Conversations, the instance knowledge ledger and recall embeddings live in one SQLite file at{' '}
+            <span className="mono">server/data/nowforge.db</span> (gitignored). Chats survive a server restart, and
+            the ledger carries what this project has measured about your instance into every new session.
           </div>
           <div className="note warn">
             Auto-approve removes the human gate on create/update/delete. Recommended only on throwaway PDIs.

@@ -1499,3 +1499,221 @@ operation rather than in a probe, and it is why A2 imposes the name instead of a
   that it is text the flow must write. A mislabelled choice label would reject a correct flow.
 - **The spec is proven, not run.** `regenerateVerification` reads schema and calls the model; it
   writes nothing to the instance. Executing the spec is still a separate, approved step.
+
+---
+
+## 21. Memory and sessions (Part A)
+
+The vanishing-chat bug had exactly one cause: history lived in a module-level
+`Map`. Navigating Agent → Settings → Agent lost the transcript, and restarting the
+server lost every conversation that had ever happened. Everything below follows
+from fixing that at the root rather than papering over it in the client.
+
+Offline proof: `server/test/memory.test.js`, 34 cases. Live acceptance runs are
+quoted verbatim below.
+
+### Storage — `node:sqlite`, checked rather than assumed
+
+The choice was made by probing, not by preference:
+
+| need | built-in `node:sqlite` on Node v24.18.0 |
+|---|---|
+| `DatabaseSync` / `StatementSync` | present |
+| BLOB round-trip (`Uint8Array`) | works — required for float32 embeddings |
+| FTS5 virtual tables | available — required for the keyword fallback |
+
+All three hold, so `better-sqlite3` was not needed and the whole storage layer
+is **dependency-free**. That matters specifically here: this is a Windows
+machine with no node-gyp toolchain, so better-sqlite3 would have meant trusting
+a prebuilt binary to match this exact Node ABI.
+
+One file, `server/data/nowforge.db`, gitignored. Migrations are idempotent on
+boot, keyed on `PRAGMA user_version`, each in its own transaction — a
+half-migrated database is worse than one that refuses to open. `migrate()` is
+exported so the offline suite builds its scratch database through the **same**
+code path; copying `sqlite_master` instead fails outright, because FTS5's shadow
+tables (`chunks_fts_data`, …) cannot be created directly.
+
+### A-1 — persistence
+
+`sessions` / `messages` / `tool_events`. `messages.json` stores the neutral
+history entry **verbatim**, so this table does not need migrating every time a
+provider adapter learns a new field.
+
+`tool_events` is deliberately a separate table, not a view over messages. It is
+the record of what was done to the instance and what a human approved, and
+**compaction rewrites messages but must never rewrite it**. There is a test
+asserting exactly that.
+
+### A-2 — the acceptance run, verbatim
+
+Driven through the real HTTP surface the browser uses.
+
+```
+--- turn 1 ---
+tools: lookup_reference
+said : The Hardware group (sys_user_group) has the sys_id: 8a5055c9c61122780043563ef53438e3
+
+--- turn 2: something unrelated in between ---
+said : A ServiceNow subflow is a reusable, modular flow fragment…
+
+--- remount: refetch the transcript exactly as the page does ---
+messages persisted: 6 · tool events: 1 · tokens 175 / 24000
+
+*** server killed (PID 11476, SIGKILL) and cold-restarted ***
+
+transcript identical across the restart: YES   (6 -> 6 messages)
+
+--- turn 3, on the freshly restarted server ---
+tools: (none — answered from memory)
+said : The Hardware group's sys_id is 8a5055c9c61122780043563ef53438e3.
+```
+
+The third turn is the one that matters: **no tool call**. The agent answered
+from persisted history two turns later, across a process death.
+
+The rail rehydrates from the NEUTRAL history rather than a second UI-shaped
+copy, so what is redrawn cannot drift from what the model actually saw.
+Approval cards are deliberately not reconstructed — an approval is a live
+decision on an in-flight turn, and what it gated is visible in the tool card
+beside it.
+
+### A-3 — compaction
+
+Oldest span → structured digest (artifacts + sys_ids, decisions, open threads),
+spliced back as a **system-side note**, last K turns verbatim. The digest prompt
+puts identifiers first and says so plainly, because an identifier cannot be
+reconstructed and is what gets asked for later.
+
+Budget sized at 24k against an advertised 131k window, deliberately. gpt-oss
+bills hidden reasoning tokens against the same budget, and the adapter's
+specific error ("the max_tokens budget was exhausted before any output was
+produced") **must never fire during compaction**: a failed compaction leaves the
+session over budget, so the next turn fails too. That is a loop, not a
+degradation. The estimator uses 3.5 chars/token rather than the usual 4 for the
+same reason — tool results are JSON and tokenise worse than prose, and guessing
+high costs one early compaction while guessing low costs a failed request.
+
+Every failure path is non-destructive: a summariser that throws, or returns an
+empty digest, discards **nothing** and says so. Tested both ways.
+
+Acceptance: a synthetic 100-turn session compacts under budget, and a probe
+about turn 5 is answerable because its sys_id survives into the digest.
+
+### A-4 — the instance knowledge ledger
+
+Seeded from §16 and §19. Everything this project learned the hard way was
+sitting in a document the agent could not read.
+
+Scope is enforced, and it is the part most likely to cause harm if sloppy: SDK
+and platform traps are stored against `*` and apply everywhere, while a fact
+MEASURED on one instance (`problem_id` exists nowhere here) is stored against
+that instance and never leaks to another. A second PDI may well have the field,
+and a confidently-wrong "it does not exist" is precisely the damage this ledger
+exists to prevent.
+
+Read into **both** prompts. The codegen context is the one that matters most —
+`HARD_RULES` has no rule about calculated fields at all.
+
+#### The acceptance demo, and its confound stated plainly
+
+The specified demo — "a brand-new flow's verification setup drives priority via
+impact+urgency without being told" — **passes**, but it does not isolate the
+ledger: `VERIFY_SYSTEM` rule 9 already states the same thing, so a pass there is
+over-determined. Reporting it as proof of the ledger would be dishonest.
+
+The agent system prompt has **no** priority rule, so on that path the ledger is
+the sole carrier. Run live, fresh session:
+
+```
+tools called: get_table_schema
+
+{
+  "short_description": "Test incident for Critical priority",
+  "urgency": "1",   // 1 = High
+  "impact":  "1",   // 1 = High → Priority is calculated as Critical (P1)
+  "category": "inquiry"
+}
+
+Why these fields: urgency = 1 + impact = 1 forces the platform's calculated
+priority = Critical (P1)…
+```
+
+`impact` and `urgency` driven, the word "calculated" used unprompted, and
+`priority` never written. That is the ledger working, on a path where nothing
+else could have supplied it.
+
+Write paths: failed verification assertions, calculated-field discovery during
+`get_table_schema`, and a `remember:` affordance. Re-observing a fact raises its
+confidence; a changed value replaces it and resets provenance, because the old
+evidence no longer supports the new claim.
+
+### A-5 — recall, and a ranking bug the acceptance test caught ⚠️
+
+Embeddings through the same `baseUrl` as chat. Endpoint checked rather than
+guessed: Ollama 0.32.14 exposes **both** `/api/embed` (native, batch `input`)
+and `/v1/embeddings`; the native one is used. They fail differently when a model
+is missing — `{"error": "..."}` vs `{"error": {"message": "..."}}` — so the
+probe reads both shapes.
+
+Float32 blobs in SQLite, brute-force cosine in JS. A dimension mismatch is
+skipped rather than scored, because comparing across embedding models produces a
+number that looks exactly like a real similarity.
+
+**The bug.** The A-5 acceptance query ranked the correct session **last of
+five**:
+
+```
+0.6256  accept-laptop-catalog     <- wrong session winning
+0.4351  (unrelated)
+0.3533  (unrelated)
+0.3058  accept-p1-digest
+0.2467  accept-vendor-hold        <- the right one, dead last
+```
+
+Two causes, both mine:
+
+1. **`Math.abs` on a value whose sign carried the meaning.** SQLite's `bm25()`
+   returns a NEGATIVE score where a better match is *more* negative. Normalising
+   with `1 / (1 + Math.abs(score))` inverted the ordering, so the best match got
+   the lowest number and `searchSessions` — sorting descending — returned the
+   worst first. Negating is the entire conversion.
+2. **No stopword removal.** The acceptance question is five stopwords and three
+   content words; leaving them in let a session match on "we" and "about".
+
+After both fixes, the same query in the same mode:
+
+```
+5.4763  accept-vendor-hold
+1.4074  accept-p1-digest
+```
+
+This is worth recording for a reason beyond the fix: **the offline tests were
+green throughout.** They asserted that search returned hits, that it reported
+its mode, that it degraded loudly — every property except the one that mattered,
+which was the ORDER. Only running the acceptance criterion end to end found it.
+
+#### Both modes, as required
+
+| mode | condition | result |
+|---|---|---|
+| keyword | embedding model absent | `accept-vendor-hold` **5.4763**, next 1.4074 |
+| semantic | `nomic-embed-text`, 768d | `accept-vendor-hold` **0.7897**, next 0.5628 |
+
+The embedding model was pulled to demonstrate the second row (`ollama pull
+nomic-embed-text`, ~274MB, local and free, reversible with `ollama rm`). The
+degraded path is not a fallback that hides — the UI banner and the API both
+report `mode: "keyword"` with the exact pull command, and the agent tool's
+description tells the model to mention the mode if results look thin.
+
+One test lesson: the fallback test originally went through `search()` and
+asserted `mode === 'keyword'`. It **flipped mid-run** when the pull finished. A
+test that changes meaning when someone runs `ollama pull` is testing the
+environment, not the fallback, so it now calls the keyword path directly.
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 14 | **`bm25()` is negative, and more-negative is better** | a relevance sort that returns the *worst* matches first, with plausible-looking scores | Never `Math.abs()` a value whose sign carries meaning. Assert the ORDER in a test, not merely that hits came back |
+| 15 | **A test that branches on the environment silently changes meaning** | a green suite that was asserting something different yesterday | Call the degraded path directly. `ollama pull` finishing mid-run should not alter what a test proves |

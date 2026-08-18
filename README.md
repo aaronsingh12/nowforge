@@ -148,6 +148,36 @@ Three tiers. **LIVE (verified)** means it was exercised end-to-end against a rea
 
 There is still **no supported REST API for writing `sys_hub_*` directly**, and NowForge never attempts it. Live authoring works because it drives ServiceNow's own toolchain.
 
+#### Model-proofing floor (A1–A5)
+
+Every guard answers a failure **measured** against `gpt-oss:120b-cloud`, not a hypothetical one. They do not make a weak model competent; they make it presentable — when it is wrong, the pipeline says so instead of deploying it.
+
+| Guard | The measured failure it answers | Evidence |
+|---|---|---|
+| **A1** deterministic decoding | — | `temperature 0` + a fingerprint-derived seed, passed through per provider. Probed: this backend **ignores `seed`** on both `/v1` and native `/api/chat`, and `temperature 0` is only approximately stable, so no guard may assume reproducibility (§19) |
+| **A2** pinned flow identity | one spec produced a different flow **name** on all six runs; the platform matches artifacts by name, so a rename creates a duplicate | name imposed by string rewrite, located by brace matching so an action's own `name:` cannot be hit; every correction streamed |
+| **A3** promised literals | a regeneration silently dropped the `"Vendor issue: "` prefix — compiled, installed, activated 10/10, wrote the wrong text | literals intersected with the spec text, so the model can only narrow the guard, never invent a requirement |
+| **A4** `trigger_strategy` lint | nothing set it, so the platform default `once` took over — fires **once ever** per record (trap #10) | the least visible defect in the pipeline: build green, install 10/10, single-shot verification **passes**, wrong only the second time |
+| **A5** evidence-fed retries | three verification attempts re-asked the identical question and got the identical bad answer | each rejection attaches the instance's real field inventory; a `RetryLedger` refuses a byte-identical re-ask and names it as *our* defect |
+
+**Test 1 Step 1, resumed and closed** (§20). The §14 failure class is gone: attempt 1 still reached for `^problemISNOTEMPTY`, A5 attached the real reference-field inventory of `incident`, and no attempt in any run went back to it. Three attempts of prose had not moved this model; one dictionary listing moved it immediately.
+
+That surfaced a worse failure that was **ours**: the field check told the model to drop two impossible assertions and the coverage rule rejected it for dropping them — mutually unsatisfiable, unsatisfiable by any model. Fixed with a *verified* escape hatch (`unverifiable`, each excuse checked against the live dictionary or a live read), not a weaker rule. Final run: 2 attempts, 3 assertions + 2 confirmed-unverifiable, covering all 5 promises.
+
+#### Memory and sessions
+
+| Capability | Evidence |
+|---|---|
+| Conversations survive navigation **and** a server restart | server SIGKILLed mid-session; transcript identical across the restart, and the agent answered a sys_id from two turns earlier **with no tool call** (§21) |
+| Compaction into structured digests | synthetic 100-turn session folded under budget; a probe about turn 5 still answerable because its sys_id survived into the digest |
+| Compaction never loses data on failure | a summariser that throws, or returns an empty digest, discards nothing and says so |
+| Tool-event audit trail outlives compaction | asserted: messages are rewritten, `tool_events` are not |
+| Instance knowledge ledger drives behaviour | on the agent path — where the ledger is the **only** carrier of the fact — a P1 payload came back as `impact: 1` + `urgency: 1`, priority never written |
+| Recall in both modes | keyword (no embed model) **5.48** vs 1.41; semantic (`nomic-embed-text`, 768d) **0.79** vs 0.56 — right session first in each |
+| Degraded recall is loud | UI banner + API both report `mode: "keyword"` with the exact `ollama pull` command; never a silent downgrade |
+
+Storage is the built-in **`node:sqlite`** — probed, not assumed: `DatabaseSync`, BLOB round-trip for float32 vectors, and FTS5 are all present on Node 24, so the layer is dependency-free (no node-gyp on this Windows machine). One gitignored file, `server/data/nowforge.db`, with idempotent migrations on boot.
+
 ---
 
 ## Reference-field handling (everywhere)
@@ -164,12 +194,14 @@ This is the part most homegrown tools skimp on:
 
 Modeled on Claude Code / opencode:
 
-- **Session loop** — provider-agnostic agent iterations (max 15/turn) with a neutral message format translated per provider.
-- **Tool registry** — 21 tools (`server/src/agent/tools.js`): schema inspection, reference/table lookup, generic record CRUD, incident + catalog composites, flow reading, blueprint design, and live flow authoring (`create_flow_live`, `verify_flow_live`, `delete_live_flow`, `smoke_test_flow`, `list_live_flows`, `flow_authoring_capability`). Each tool declares `mutating`.
+- **Session loop** — provider-agnostic agent iterations (max 15/turn) with a neutral message format translated per provider. History is **persisted to SQLite** and written through on every append, so a conversation survives navigating away and survives a server restart.
+- **Tool registry** — 24 tools (`server/src/agent/tools.js`): schema inspection, reference/table lookup, generic record CRUD, incident + catalog composites, flow reading, blueprint design, live flow authoring (`create_flow_live`, `verify_flow_live`, `delete_live_flow`, `smoke_test_flow`, `list_live_flows`, `flow_authoring_capability`), and memory (`recall_memory`, `list_instance_facts`, `remember_fact`). Each tool declares `mutating`.
 - **Flow authoring tiers** — the prompt makes the order explicit: `design_flow_blueprint` designs, `create_flow_live` builds, and the Business Rule fallback is reserved for environments where capability reports `ok: false`. Verifying a flow (`verify_flow_live`) writes real records, so it is a *separate* mutating tool with its own approval and is never automatic after a deploy.
 - **Permission gate** — mutating calls pause the loop, stream an `approval_required` event, and wait (5-min timeout) for your Approve/Reject. Rejections are fed back to the model as tool errors. Auto-approve is opt-in.
 - **BYO provider** — one adapter for Anthropic's Messages API, one OpenAI-compatible adapter covering OpenAI and Ollama (same wire format). Add a provider by writing one file.
-- **Streaming** — SSE over the POST body: `meta`, `assistant_text`, `tool_use`, `approval_required`, `tool_result`, `done`.
+- **Streaming** — SSE over the POST body: `meta`, `assistant_text`, `tool_use`, `approval_required`, `tool_result`, `compacted`, `remembered`, `done`.
+- **Model-proofing floor** — five guards (A1–A5) that stop a weak model shipping a wrong artifact: deterministic decoding, pinned flow identity, promised-literal checks, a `trigger_strategy` lint, and retries that must add measured evidence. See the capability matrix and `docs/fluent-research.md` §19–20.
+- **Memory** — sessions, an instance knowledge ledger, compaction, and recall, all in one SQLite file. See below.
 
 ## API map
 
@@ -183,6 +215,10 @@ Modeled on Claude Code / opencode:
                  live (GET managed) · live/capability
                  live/verify (POST, SSE) · live/smoke · live/:name (DELETE)
 /api/agent       info · chat (SSE) · approve
+                 sessions (GET list · POST new) · sessions/:id (GET · PATCH rename · DELETE)
+                 sessions/:id/messages
+                 memory/status · memory/search
+                 facts (GET · POST) · facts/:id (DELETE) · facts/seed
 ```
 
 ## Known caveats
@@ -196,7 +232,9 @@ Modeled on Claude Code / opencode:
 
 - **Done — flow authoring for real:** ServiceNow SDK (Fluent) codegen with offline compile validation, serialized install, read-back verification, and an approval-gated agent tool.
 - **Done — semantic verification:** flows are proven by firing them on a real record and asserting the promised effects, including the approve-and-continue path for approvals. Reference use cases (record-triggered flow + subflow, scheduled digest, approval flow) all regenerated through codegen and verified live; idempotency battery green.
-- **Next:** exercise application triggers (inbound email, SLA, catalog) so they can leave the unproven tier; ATF test triggering after builds; OAuth refresh flow.
+- **Done — the model-proofing floor:** five guards so the pipeline reports a weak model's mistakes instead of deploying them. The one available model (`gpt-oss:120b-cloud`) provably ignores `seed`, so every guard is written to hold under non-deterministic generation; a stronger model stays a pure Settings swap.
+- **Done — memory and sessions:** conversations persist across restarts, compact into structured digests when they outgrow the context budget, and are searchable. A per-instance knowledge ledger carries every trap in `docs/fluent-research.md` into the agent prompt *and* the codegen context.
+- **Next:** exercise application triggers (inbound email, SLA, catalog) so they can leave the unproven tier; ATF test triggering after builds; OAuth refresh flow. Also: the deployed vendor-hold flow still sets no `trigger_strategy` (trap #10) — A4 blocks new flows from shipping that defect but does not retro-fix a deployed one.
 - **Later — productize:** multi-instance workspaces, update-set capture around agent sessions ("everything the agent did in this session" as one exportable set), audit log, packaging/licensing for consultancies.
 
 ## Notes from building this
