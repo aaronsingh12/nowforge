@@ -29,11 +29,16 @@ import { buildWorkspace, installWorkspace, extractDiagnostics, WORKSPACE_DIRS } 
  *      "true", "false" — not booleans. "ignore" means leave alone, and it is
  *      the default, so an action that sets nothing is a no-op that still saves.
  *
- *   4. `ui_type` defaults to **0 — Desktop**, which excludes the Service
- *      Portal. 82 of the 100 out-of-box policies here sit at 0. A policy left
- *      at the default works when you test it on the classic form and does
- *      nothing on the portal your end users actually use. NowForge defaults to
- *      10 (All) and says so.
+ *   4. `ui_type` defaults to 0 — labelled "Desktop", against 1
+ *      "Mobile / Service Portal" and 10 "All". The obvious reading is that a
+ *      default-valued policy does not run on the portal. THAT READING IS WRONG
+ *      here, and it was asserted in this file before it was measured: a policy
+ *      installed at ui_type 0 still hid and revealed its variable on
+ *      /sp?id=sc_cat_item, identically to the same policy at 10. So the label
+ *      is not an exclusion on this release, and no guard may treat it as one.
+ *      NowForge still writes 10, because that is the SDK's own default for
+ *      `runScriptsInUiType` and it is unambiguous across every surface — not
+ *      because 0 was observed to fail.
  *
  *   5. **Actions cannot be written over REST at all.** `catalog_ui_policy_action`
  *      accepts a POST, returns 201, and silently discards `ui_policy` and
@@ -257,8 +262,7 @@ function shapePolicy(p, actions, byId) {
     reverse_if_false: raw(p.reverse_if_false) === 'true',
     order: Number(raw(p.order)) || 100,
     ui_type: String(uiType),
-    // Behaviour 4, surfaced as a field rather than left for the reader to know.
-    appliesToPortal: String(uiType) === '10' || String(uiType) === '1',
+    ui_type_label: { 0: 'Desktop', 1: 'Mobile / Service Portal', 10: 'All' }[String(uiType)] || String(uiType),
     applies_catalog: raw(p.applies_catalog) === 'true',
     catalog_conditions: raw(p.catalog_conditions) || '',
     conditions,
@@ -274,9 +278,6 @@ function shapePolicy(p, actions, byId) {
         .map((a) => `The action on "${a.variableLabel}" leaves visible, mandatory and read-only all on "ignore", so it does nothing.`),
       ...actions.filter((a) => a.unknownVariable)
         .map((a) => `The action targets variable ${a.variableId}, which is not on this item.`),
-      ...(String(uiType) === '0'
-        ? ['ui_type is 0 (Desktop), so this policy does NOT run on the Service Portal. It will appear to work on the classic form and do nothing on /sp.']
-        : []),
       ...(raw(p.applies_catalog) === 'true' ? [] : ['applies_catalog is false, so this policy does not run on the catalog item form at all.']),
     ],
     updated: { on: raw(p.sys_updated_on), by: raw(p.sys_updated_by) },
@@ -429,15 +430,6 @@ export async function validatePolicyInput(input, { variablesFor = itemVariables 
     }
   });
 
-  const uiType = String(input?.ui_type ?? '10');
-  if (uiType === '0') {
-    warnings.push(
-      'ui_type is 0 (Desktop), so this policy will NOT run on the Service Portal. That is the platform default and ' +
-      'the reason a policy can pass a test on the classic form and do nothing where users actually order. ' +
-      'NowForge defaults to 10 (All).'
-    );
-  }
-
   return { ok: errors.length === 0, errors, warnings, variables };
 }
 
@@ -493,8 +485,9 @@ CatalogUiPolicy({
     active: ${policy.active !== false},
     onLoad: ${policy.on_load !== false},
     reverseIfFalse: ${policy.reverse_if_false !== false},
-    // 'all' is ui_type 10. The platform's own default is Desktop, which is why
-    // a policy can pass a test on the classic form and do nothing on /sp.
+    // 'all' is ui_type 10 — the SDK's own default, and unambiguous across every
+    // rendering surface. Not a workaround: a policy at ui_type 0 was measured
+    // working on the Service Portal too (see the note at the top of this file).
     runScriptsInUiType: 'all',
     order: ${Number(policy.order) || 100},
     actions: [
