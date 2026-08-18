@@ -123,7 +123,27 @@ wfa.trigger(triggerType, { $id: Now.ID['t'] }, { /* type-specific params */ })
 | `condition` | encoded query, e.g. `'priority=1^assignment_group.name=Network'` |
 | `run_flow_in` | `'any' \| 'background' \| 'foreground'` — **use `'background'`** |
 | `run_on_extended` | `'true' \| 'false'` — run on child tables |
-| `trigger_strategy` | *(updated / createdOrUpdated only)* `'once' \| 'unique_changes' \| 'every' \| 'always'` — prefer `'unique_changes'` |
+| `trigger_strategy` | *(updated / createdOrUpdated only)* `'once' \| 'unique_changes' \| 'every' \| 'always'` — **always set it explicitly**, see below |
+
+#### ⚠️ `trigger_strategy` defaults to `'once'`, and `'once'` means once EVER
+
+Omitting `trigger_strategy` is **not** neutral. The platform default is `'once'`, and this was
+measured on a live flow: an incident was driven into the trigger condition (fired), moved out of
+it, then moved back in — and the flow **did not run again**. One execution, one record created,
+for the whole lifetime of that incident.
+
+| value | label | fires |
+|---|---|---|
+| `'once'` | Once | **once ever per record** — never again, even after leaving and re-entering the condition |
+| `'unique_changes'` | For each unique change | once per distinct transition into the condition |
+| `'always'` | Only if not currently running | on any matching update, unless an execution is in flight |
+| `'every'` | For every update | on every matching update — creates duplicates if the flow creates records |
+
+A spec phrased *"when a record is **updated to** X"* means a **transition**, so it wants
+`'unique_changes'`. `'once'` silently narrows that to "the first time this record ever hit X",
+and `'every'` widens it to "every save while X is true" — which for a flow that creates a record
+means a new record on every save. Choose deliberately and write it down; do not let the default
+choose for you.
 
 Outputs: `params.trigger.current`, `params.trigger.changed_fields` (updates only),
 `params.trigger.table_name`, `params.trigger.run_start_date_time`.

@@ -1022,3 +1022,100 @@ Each one cost a debugging cycle here.
 | 7 | **Journal fields are invisible to a plain GET** | `work_notes` reads empty on a record that has notes | Read `sys_journal_field` by `element_id` + `element` |
 | 8 | **`now-sdk install` ships the WHOLE application** | one artifact requested, every artifact's `sys_updated_on` moves | Measure idempotency as *same sys_id, no new rows* — never as unchanged timestamps |
 | 9 | **This PDI lacks `problem_id`, `rfc`, `caused_by`** | "the standard field" isn't there | `incident.parent` / `problem.first_reported_by_task` are the available task-to-task links |
+| 10 | **`trigger_strategy` defaults to `once`, and `once` means once EVER** | a record that re-enters the trigger condition is never processed again | Set it explicitly on every updated/createdOrUpdated trigger; `unique_changes` is the per-transition form |
+| 11 | **`sys_hub_trigger_instance_v2` has no `condition`/`table_name` columns** | a field query returns a row of nulls | The config is a gzip+base64 blob in `trigger_inputs`; decode it |
+
+---
+
+## 17. Step 2 — behavioural counter-probes
+
+The verification layer proves *that a promised effect happened*. It cannot prove *that an effect
+happens only when it should*, or *how often*. Both blind spots were probed live against the
+deployed flow, with every test record deleted and the deletion read back.
+
+### The trigger construct, read off the instance
+
+`sys_hub_trigger_instance_v2` stores its config in `trigger_inputs`, a gzip+base64 blob.
+Decoded:
+
+| parameter | value |
+|---|---|
+| `trigger_type` / `trigger_definition` | `record_update` / `Updated` |
+| `table` | `incident` |
+| `condition` | `state=3^hold_reason=4` |
+| `run_flow_in` | `background` |
+| `run_on_extended` | `false` |
+| **`trigger_strategy`** | **`once`** |
+
+So it is a **condition-on-update** trigger, not a changes-to construct. Nothing in the generated
+source set `trigger_strategy` — the SDK left it out and the platform supplied its default.
+
+> Reading this needed a detour: asking `table.query` for `condition`, `table_name`, `type` on
+> `sys_hub_trigger_instance_v2` returned a row of **nulls**, because those columns do not exist —
+> trap #4 (silent `sysparm_fields` drop) catching our own probe. The real columns are `flow`,
+> `trigger_type`, `trigger_definition`, `trigger_inputs`.
+
+### PROBE A — is the Critical branch actually conditional? ✅ **yes**
+
+The probe as specified would have passed **vacuously**: `assigned_to` is set from the Hardware
+group's manager, and that manager is empty, so `assigned_to` ends up empty whether the branch
+runs or not. That is trap #2 applied to our own test. A manager (`Abel Tuter`) was set for the
+duration and restored to empty afterwards, read-back confirmed, which makes the branch observable.
+
+| | priority | assignment_group | assigned_to | `sys_mod_count` |
+|---|---|---|---|---|
+| non-critical | `4 - Low` (impact 3 + urgency 3) | Hardware | **empty** | 0 |
+| critical (control) | `1 - Critical` (impact 1 + urgency 1) | Hardware | **Abel Tuter** | 1 |
+
+The branch fires only for Critical, and the unconditional part (assign to Hardware) runs for
+both. `sys_mod_count` agrees independently: the problem is untouched after insert in the
+non-critical case, updated once in the critical one.
+
+### PROBE B — does an unrelated update re-fire the flow? ✅ **no**
+
+With the incident still On Hold / Awaiting Vendor, an unrelated field (`comments`) was updated.
+Executions stayed at **1**, problems stayed at **1**. **No duplicate-record spam.**
+
+### PROBE B2 — but `once` means once *ever*, not once *per transition* ⚠️
+
+`trigger_strategy: 'once'` needed pinning down, so one incident was driven through a full cycle:
+
+```
+[1] entered condition  (On Hold / Awaiting Vendor)  -> 1 execution, 1 problem
+[2] left the condition (In Progress, no hold reason) -> 1 execution, 1 problem
+[3] RE-ENTERED the condition                         -> 1 execution, 1 problem
+```
+
+**The flow never runs again for that record.** An incident that goes on vendor hold, gets worked,
+and later goes back on vendor hold gets **no second problem** — silently.
+
+That behaviour was never chosen. The SDK exposes the setting and documents its default:
+
+```typescript
+trigger_strategy: Typed<"every" | "once" | "unique_changes" | "always", {
+  label: "Run Trigger", default: "once",
+  hint: "Run Trigger every time the condition matches, or only the first time.",
+  choices: { once: "Once", unique_changes: "For each unique change",
+             always: "Only if not currently running", every: "For every update" } }>
+```
+
+The spec said *"when an incident is **updated to** state On Hold"* — a **transition**, which is
+`'unique_changes'`. The generated flow omitted the parameter, so the platform picked `'once'` and
+narrowed the promise to "the first time this incident ever hits vendor hold".
+
+The cheatsheet already listed `trigger_strategy` and even said "prefer `unique_changes`" — and
+the model omitted it anyway. A parameter listed in a table is easy to skip; a **silent default
+with teeth** is not something the author should be allowed to skip. Both the cheatsheet and
+`HARD_RULES` now state that omitting it is not neutral, what `once` actually costs, and which
+value a "updated TO" phrasing implies.
+
+**Regenerating Test 1 with `trigger_strategy: 'unique_changes'` is the correct follow-up**, and
+is queued behind the provider switch — it needs a generation run.
+
+### What the probes cost, and what that says about the verification layer
+
+Neither of these findings is reachable from a verification spec as the layer is built: both
+require *two* runs of the same flow, or a run that is expected **not** to happen. The
+`.verify.json` shape has one setup, one wait, one set of assertions. Branch conditionality and
+re-fire semantics are structurally outside it. They belong in a separate probe harness, and until
+one exists they are a known, named gap rather than a silent one.

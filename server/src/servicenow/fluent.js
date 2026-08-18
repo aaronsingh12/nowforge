@@ -791,6 +791,7 @@ const HARD_RULES = `HARD RULES — a violation fails the build:
 7. lookUpRecord outputs .Record/.Table; lookUpRecords outputs .Records/.Count — capitalised. createRecord/updateRecord output lowercase .record.
 8. Per-action value keys differ: values (createRecord/updateRecord), field_values (createTask/updateMultipleRecords), fields (createOrUpdateRecord). lookUpRecord(s) take table + conditions.
 9. If the body never reads params, declare the callback () => { — noUnusedParameters is enforced (TS6133). Scheduled flows always use () =>.
+9b. For trigger.record.updated / createdOrUpdated you MUST set trigger_strategy explicitly. Omitting it is not neutral: the platform default 'once' fires once EVER for a record and never again, even after it leaves the condition and re-enters. A request phrased "when a record is updated TO <state>" describes a TRANSITION and wants 'unique_changes'; 'every' fires on every save while the condition holds, which duplicates any record the flow creates.
 10. Exactly one wfa.trigger(...) for a Flow; a Subflow has none and must be exported as \`export const\`, with assignSubflowOutputs on every reachable path.
 11. waitForCompletion belongs in the subflow INPUTS object (3rd arg), not the instance config (2nd arg).
 12. Use the resolved sys_ids given below. If a name was not resolved, match by name in an encoded query — never invent an identifier.`;
