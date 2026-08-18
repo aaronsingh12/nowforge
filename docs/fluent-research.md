@@ -1207,3 +1207,153 @@ should not stay that way.
 | Daily P1 Digest | Flow | ✅ | ❌ scheduled, window not yet hit |
 | NowForge Smoke Test | Flow | ✅ | ❌ no trigger by design |
 | **Demo Incident Flow** | Flow | ✅ | ❌ **should fire on every incident; never does** |
+
+---
+
+## 19. The model-proofing floor (guards A1–A5)
+
+Phase 4 ended with a working pipeline and an honest problem: *the provider is the weak link
+throughout*. Six live runs of one spec produced six different flow names, one regeneration
+silently dropped a promised text prefix, and three verification attempts re-sent the same
+impossible locator. None of those is a bug in NowForge. All of them shipped, or nearly shipped,
+a wrong artifact.
+
+The floor is five guards that make each of those failure classes **structurally unable to reach
+the instance**. They do not make `gpt-oss:120b-cloud` competent. They make it *presentable*: when
+it is wrong, the pipeline says so instead of deploying it.
+
+Offline proof: `server/test/model-proofing.test.js`, 30 cases, part of `npm test`.
+
+### A1 — deterministic decoding, and the measurement that matters ⚠️
+
+`temperature: 0` and a seed derived from the spec fingerprint are now sent on every codegen and
+verification call, passed through by each adapter to whatever the provider actually has
+(Anthropic has no `seed`, so none is fabricated — `DECODING_SENT` records that rather than
+implying otherwise).
+
+Then the obvious question was asked instead of assumed: **does Ollama honour any of it?**
+
+Four pairs of identical calls, `gpt-oss:120b-cloud`, high-entropy prompt:
+
+| probe | setup | result |
+|---|---|---|
+| P1 | temp 0, seed 42 twice | **DIFFERENT** |
+| P2 | temp 0, seed 42 vs seed 9999 | **IDENTICAL** |
+| P3 | temp 1.0, seed 42 twice | **DIFFERENT** |
+| P4 | temp 1.0, seed 42 vs 9999 | DIFFERENT |
+
+P2 and P3 together are decisive, and they point the same way: **the seed has no causal effect.**
+Two different seeds produced identical text; the same seed twice produced different text. If the
+seed were honoured, both of those results would be the other way round.
+
+A follow-up separated "the OpenAI-compat shim drops the field" from "the backend ignores it".
+Three calls to the **native** `/api/chat` with identical `options.seed` at temperature 1.0:
+
+```
+n1: Eclipsed Lattice of Aeons | Vermilion Quasar Canticle | Silicate Maelstrom Voyager | …
+n2: Aetherial Nomad          | Chronicle of the Void     | Obsidian Whisperwind        | …
+n3: Eclipsed Aurora          | Quantum Siren             | Obsidian Celestia           | …
+```
+
+Three seeded-identical requests, three different answers. **The seed is ignored by the backend,
+not dropped by the shim.**
+
+And temperature 0 is only *approximately* stable — three identical calls:
+
+```
+t1: Celestial Harbinger | Obsidian Whisper | Aetheric Nomad  | Quantum Siren     | Eclipsed Aurora
+t2: Celestial Harbinger | Obsidian Whisper | Quantum Aurora  | Eclipsed Seraphim | Nebulae's Lament
+t3: Celestial Harbinger | Obsidian Whisper | Quantum Aurora  | Eclipsed Seraphim | Nebulae's Lament
+```
+
+A shared prefix, then divergence at item 3 — the signature of batched GPU inference, where the
+greedy argmax is stable while one candidate dominates and flips when two are near-tied.
+
+**Consequence, and it is load-bearing:** no guard in this repo may assume a reproducible
+generation, because on the only model available here there is no such thing. Every guard A2–A5
+is written to hold under non-determinism. The parameters are still sent, because a stronger model
+swapped in through Settings may well honour them and the passthrough costs nothing — which is
+exactly the "a stronger model is a pure Settings swap" property this build is designed around.
+
+`providerInfo()` now reports this reality to the UI, so a non-reproducible backend is a visible
+fact rather than a footnote.
+
+### A2 — pinned flow identity
+
+The platform matches artifacts by **name**. A rename is therefore not cosmetic: it creates a
+second flow instead of updating the first. Across six runs this model produced *"…Vendor
+Issues"*, *"…Vendor Incidents"* and *"…Vendor Incident"*, and HARD RULE 2 asking it not to had
+no measurable effect.
+
+So the name is no longer requested — it is **imposed**. Pinned once per request (the deployed
+name on a regeneration, the intent name on a new one), then rewritten into the model's output at
+the string level, with every correction streamed as an SSE warning. Identity survives
+mechanically, on the same principle as guard 3's placeholder substitution.
+
+The names are located by **brace matching** on the `Flow(`/`Subflow(` config object, not a
+fixed-width regex window: an `updateRecord` action's own `name:` parameter sits well inside an
+800-character window, and a window-based rewrite would have pinned the wrong string. There is a
+test for exactly that.
+
+### A3 — promised literals
+
+One regeneration dropped the `"Vendor issue: "` prefix the request asked for. It compiled,
+installed, activated 10/10, and wrote the wrong text. Nothing downstream could catch it: the
+build is green, and the verification assertion is written by the same model that dropped it.
+
+The intent extractor now lists `promised_literals`, and every one is checked into the generated
+source before the SDK runs.
+
+The load-bearing detail is that **the extractor cannot invent a requirement**. Its list is
+intersected with the spec text, so a hallucinated literal is discarded rather than blocking a
+correct flow — the model can narrow this guard and never widen it. This repo has already had to
+undo two guards that failed correct work (`{{token}}` and `*` in expectations); A3 is built so
+that cannot happen.
+
+Trailing whitespace is preserved deliberately. `"Vendor issue: "` and `"Vendor issue:"` are
+different promises, and the space is the entire point of a prefix.
+
+**Known limit, stated rather than assumed away:** grounding proves a string is in the *request*,
+not that it is text the flow should *write*. A choice label the flow matches on ("Awaiting
+Vendor", correctly encoded as `hold_reason=4`) would be enforced as a literal if the extractor
+mislabelled it, and would then reject a correct flow. What prevents that is the extractor prompt,
+not the checker. There is a test pinning this boundary so it stays visible.
+
+### A4 — trigger_strategy lint
+
+Trap #10, promoted from documentation to enforcement. An `updated` / `createdOrUpdated` trigger
+must set `trigger_strategy` explicitly, and a request phrased as a **transition** ("updated to",
+"moves to", "becomes", "whenever") must set `unique_changes`.
+
+This is the least visible defect in the whole pipeline. The build is green, the install is 10/10,
+and a single-shot verification run **passes** — because the first firing is correct. `once` is
+only wrong the *second* time a record makes the transition, in production, weeks later. No
+existing check could see it; §17's PROBE B2 found it only by deliberately re-transitioning a
+record twice.
+
+### A5 — retries that add evidence
+
+Measured in §14: three verification attempts sent the same question and got the same rejected
+answer. The attempt budget bought nothing, because nothing about attempt 2 differed from
+attempt 1.
+
+Two changes:
+
+1. **Every rejection contributes measured evidence.** A field-check failure now attaches the
+   instance's actual field inventory for the tables the spec named — including *every reference
+   field and the table it points at*. "`problem` does not exist on `incident`" is a claim the
+   model spent three attempts disbelieving. The dictionary is not a claim.
+2. **An identical re-ask is structurally impossible.** A `RetryLedger` hashes every outgoing
+   prompt and refuses to send one that repeats an earlier attempt, with a message saying this is
+   a defect in the evidence builder rather than a model failure. Loud, per the house rule — the
+   old behaviour quietly spent an attempt on a question that had already been answered.
+
+Verification attempts were raised 3 → 4. Raising a budget is only worth anything *because* of
+(2); four identical re-asks would simply cost four times as much.
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 12 | **Ollama accepts `seed` and ignores it** | no error, no warning; the parameter is simply inert on `*-cloud` models, on both `/v1` and the native `/api/chat` | Never assume reproducibility. Verify with two identical seeded calls at temperature > 0 — if they differ, the seed is decorative |
+| 13 | **`temperature: 0` is only approximately deterministic** | repeated identical calls agree for a while, then diverge mid-output | Batched inference re-orders floating-point reductions. Guards must hold under non-determinism; a "we pinned the seed" comment is not a guarantee |
