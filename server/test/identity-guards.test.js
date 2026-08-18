@@ -442,3 +442,27 @@ test('ordinary literal values — including the empty string — still pass', as
   });
   assert.deepEqual(res.errors, []);
 });
+
+/* ------------------------------------------------------------------ *
+ * The false-GREEN guard
+ *
+ * Measured on the live instance: an encoded-query condition naming a field
+ * that does not exist is silently DROPPED, not rejected. Both
+ * "problemISNOTEMPTY" and "problemISEMPTY" matched the same incident, as did
+ * "zzz_totally_madeupISNOTEMPTY", while the real "work_notesISNOTEMPTY"
+ * correctly did not. A locator built on an absent field therefore matches
+ * whatever the flow did, and its assertion passes vacuously.
+ * ------------------------------------------------------------------ */
+
+test('queryFieldRoots extracts the fields an encoded query constrains on', async () => {
+  const { queryFieldRoots } = await import('../src/servicenow/fluent.js');
+  assert.deepEqual(queryFieldRoots('sys_id={{setup.sys_id}}^problemISNOTEMPTY'), ['sys_id', 'problem']);
+  assert.deepEqual(queryFieldRoots('short_description=Vendor issue: X^assigned_toISEMPTY'),
+    ['short_description', 'assigned_to']);
+  assert.deepEqual(queryFieldRoots('parent={{setup.sys_id}}'), ['parent']);
+  // dot-walks are checked at their root, and ORDERBY is not a constraint
+  assert.deepEqual(queryFieldRoots('assignment_group.name=Hardware^ORDERBYnumber'), ['assignment_group']);
+  assert.deepEqual(queryFieldRoots('state!=6^ORpriority=1'), ['state', 'priority']);
+  assert.deepEqual(queryFieldRoots(''), []);
+  assert.deepEqual(queryFieldRoots(undefined), []);
+});

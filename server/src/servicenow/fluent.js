@@ -1558,6 +1558,78 @@ export function validateVerifySpec(v, { promisedEffects = [] } = {}) {
   return { ok: errors.length === 0, errors };
 }
 
+/* ------------------------------------------------------------------ *
+ * Field existence — the false-GREEN guard
+ *
+ * ServiceNow silently DROPS a condition naming a field that does not exist,
+ * instead of erroring. Measured on this instance, against one incident:
+ *
+ *   sys_id=<id>^problemISNOTEMPTY          → MATCHES
+ *   sys_id=<id>^problemISEMPTY             → MATCHES   (both! `problem` is not a field)
+ *   sys_id=<id>^zzz_totally_madeupISNOTEMPTY → MATCHES
+ *   sys_id=<id>^work_notesISNOTEMPTY       → no match  (a real field constrains)
+ *
+ * So "put the proof in the locator" is only a proof when every field in the
+ * locator EXISTS. A spec asserting a promise through a misspelled or absent
+ * field passes vacuously and reports green for an effect that never happened —
+ * strictly worse than no assertion, because it silences the gap.
+ * ------------------------------------------------------------------ */
+
+/** Root field names a ServiceNow encoded query constrains on. */
+export function queryFieldRoots(query) {
+  const text = String(query || '').replace(/\{\{[^}]*\}\}/g, 'x');
+  const roots = new Set();
+  for (const clause of text.split(/\^(?:OR|NQ)?/i)) {
+    const c = clause.trim();
+    if (!c || /^ORDERBY/i.test(c)) continue;
+    const m = c.match(/^([a-z][a-z0-9_]*)(?:\.[a-z0-9_.]+)?\s*(ISNOTEMPTY|ISEMPTY|ANYTHING|STARTSWITH|ENDSWITH|NOTLIKE|LIKE|NOTIN|IN|!=|>=|<=|=|>|<)/i);
+    if (m) roots.add(m[1]);
+  }
+  return [...roots];
+}
+
+/**
+ * Every field an assertion reads, and every field its locator constrains on,
+ * must exist on the table. Async because it reads the live schema.
+ */
+export async function checkVerifySpecFields(v) {
+  const errors = [];
+  const known = new Map();
+  const fieldsOf = async (t) => {
+    if (!known.has(t)) {
+      try { known.set(t, new Set((await getSchema(t)).fields.map((f) => f.name))); }
+      catch { known.set(t, null); }
+    }
+    return known.get(t);
+  };
+
+  const groups = [['assert', v?.assert], ['assertAfterResume', v?.assertAfterResume]];
+  for (const [label, list] of groups) {
+    if (!Array.isArray(list)) continue;
+    for (const [i, a] of list.entries()) {
+      const t = a?.table;
+      if (!t) continue;
+      const fields = await fieldsOf(t);
+      if (!fields) continue; // schema unreadable: never fail a spec on our own outage
+      const at = `${label}[${i}]`;
+      if (a.field && !fields.has(a.field)) {
+        errors.push(`${at}.field "${a.field}" does not exist on ${t}. Assert a field that is in the REAL SCHEMA.`);
+      }
+      for (const root of queryFieldRoots(a?.locate?.byQuery)) {
+        if (fields.has(root)) continue;
+        errors.push(
+          `${at}.locate.byQuery constrains on "${root}", which does not exist on ${t}. ` +
+          `ServiceNow silently DROPS a condition naming an unknown field rather than erroring, so this ` +
+          `locator matches whether or not the effect happened and the assertion passes vacuously — ` +
+          `a false green. Use a field from the REAL SCHEMA, or, if the effect the request asked for ` +
+          `cannot be expressed against any real field on ${t}, leave it unasserted rather than faking it.`
+        );
+      }
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 /** Generate a verification spec, rejecting and regenerating invalid ones. */
 async function generateVerification(args, emit = () => {}) {
   let priorErrors = null;
@@ -1566,8 +1638,9 @@ async function generateVerification(args, emit = () => {}) {
     const candidate = await generateVerifySpec({ ...args, priorErrors });
     if (!candidate) { priorErrors = ['Response was not valid JSON.']; continue; }
     const check = validateVerifySpec(candidate, { promisedEffects: args.promisedEffects || [] });
-    if (check.ok) return { ok: true, spec: candidate, attempts: attempt };
-    priorErrors = check.errors;
+    const fieldCheck = check.ok ? await checkVerifySpecFields(candidate) : { ok: true, errors: [] };
+    if (check.ok && fieldCheck.ok) return { ok: true, spec: candidate, attempts: attempt };
+    priorErrors = [...check.errors, ...fieldCheck.errors];
     emit({ type: 'verify_spec_rejected', attempt, errors: check.errors });
   }
   return { ok: false, errors: priorErrors, attempts: 3 };
@@ -1641,8 +1714,16 @@ export async function verify(name, emit = () => {}) {
   }
   const spec = JSON.parse(await fsp.readFile(file, 'utf8'));
   const check = validateVerifySpec(spec);
-  if (!check.ok) {
-    return { ok: false, available: true, message: 'The stored verification spec is invalid.', errors: check.errors };
+  // A stored spec is checked against the live schema too: a locator naming a
+  // field that does not exist passes vacuously, so running it would report a
+  // green for an effect nobody proved. Refuse to run rather than mislead.
+  const fieldCheck = check.ok ? await checkVerifySpecFields(spec) : { ok: true, errors: [] };
+  if (!check.ok || !fieldCheck.ok) {
+    return {
+      ok: false, available: true,
+      message: 'The stored verification spec is invalid — it was NOT run, because it could report a false pass.',
+      errors: [...check.errors, ...fieldCheck.errors],
+    };
   }
 
   const timeoutSec = Math.min(Math.max(Number(spec.wait?.timeoutSec) || 90, 15), 300);

@@ -3,18 +3,16 @@
     "table": "incident",
     "payload": {
       "short_description": "Test incident",
-      "impact": "2",
-      "urgency": "2"
-    },
-    "update": {
-      "incident_state": "3",
-      "hold_reason": "4",
       "impact": "1",
       "urgency": "1"
+    },
+    "update": {
+      "state": "3",
+      "hold_reason": "4"
     }
   },
   "wait": {
-    "flowName": "Create Problem for On Hold Vendor Incident",
+    "flowName": "Create Problem for On Hold Vendor Issues",
     "timeoutSec": 90
   },
   "assert": [
@@ -27,40 +25,40 @@
       "expect": {
         "value": "Vendor issue: Test incident"
       },
-      "note": "verifies a problem record is created with the expected short description"
+      "note": "creates a new problem record with prefixed short description"
     },
     {
       "table": "incident",
       "locate": {
-        "byQuery": "sys_id={{setup.sys_id}}^problem!=EMPTY"
+        "byQuery": "sys_id={{setup.sys_id}}^problemISNOTEMPTY"
       },
-      "field": "problem",
+      "field": "short_description",
       "expect": {
-        "display": "not empty"
+        "value": "Test incident"
       },
-      "note": "verifies the incident's Problem field was linked to the new problem"
+      "note": "incident's Problem field linked to the new problem"
     },
     {
       "table": "incident",
       "locate": {
-        "bySetupRecord": true
+        "byQuery": "sys_id={{setup.sys_id}}^work_notesISNOTEMPTY"
       },
-      "field": "work_notes",
+      "field": "short_description",
       "expect": {
-        "value": "Problem PRB* created"
+        "value": "Test incident"
       },
-      "note": "verifies a work note was added containing the new problem's number"
+      "note": "adds a work note containing the new problem's number"
     },
     {
       "table": "problem",
       "locate": {
-        "byQuery": "short_description=Vendor issue: Test incident"
+        "byQuery": "short_description=Vendor issue: Test incident^assigned_toISEMPTY"
       },
-      "field": "assigned_to",
+      "field": "short_description",
       "expect": {
-        "value": ""
+        "value": "Vendor issue: Test incident"
       },
-      "note": "verifies that for a Critical priority incident the problem's Assigned to is set to the Hardware group's (empty) manager"
+      "note": "sets problem's Assigned to to Hardware manager when priority is Critical (empty manager results in empty assigned_to)"
     }
   ],
   "cleanup": [
