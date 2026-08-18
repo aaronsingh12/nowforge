@@ -101,6 +101,10 @@ declare global {
                         table: 'catalog_ui_policy'
                         id: '2f01bb49e4db4edba8bc3410972a718b'
                     }
+                    cuip_8b3ae7fe_require_justification_when_duration_is_permanent: {
+                        table: 'catalog_ui_policy'
+                        id: '196e6cb274ef42b4bcbd3827a0d241cc'
+                    }
                     daily_p1_digest_flow: {
                         table: 'sys_hub_flow'
                         id: 'b2f18c963fd244f6a02895a7a6359536'
@@ -798,6 +802,14 @@ declare global {
                             name: 'var__m_sys_hub_flow_input_af90366362d04879b7ab39f6dc66bcc1'
                             element: 'taskSysId'
                             language: 'en'
+                        }
+                    },
+                    {
+                        table: 'catalog_ui_policy_action'
+                        id: '311ad023636f43008b1df44e0c838db2'
+                        key: {
+                            ui_policy: '196e6cb274ef42b4bcbd3827a0d241cc'
+                            catalog_variable: 'IO:ae7df91983facf10b939cc65eeaad338'
                         }
                     },
                     {

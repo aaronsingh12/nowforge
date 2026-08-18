@@ -76,6 +76,57 @@ function awaitApproval(state, approvalId) {
   });
 }
 
+/* ------------------------------------------------------------------ *
+ * A6 — the stalled turn
+ *
+ * MEASURED on gpt-oss:120b-cloud, twice in three runs of the C-4 acceptance.
+ * Asked to "make the justification field mandatory only when duration is
+ * Permanent", the model resolved the item, read its variables, quoted the two
+ * correct sys_ids and the correct choice value in a tidy table — and then
+ * ended the turn with "Shall I create this UI Policy now?".
+ *
+ * Nothing was created, and nothing said so. From the outside a stalled turn
+ * looks exactly like a completed one: prose arrives, the stream closes.
+ *
+ * Asking harder does not fix it. The system prompt already said the approval
+ * gate IS the confirmation and to call the tool; the model asked anyway, which
+ * is §20's lesson again — three attempts of prose had not moved this model, and
+ * one dictionary listing moved it immediately. So this is a guard, and the
+ * evidence it feeds back is the thing the model demonstrably did not have: the
+ * fact that its question reached nobody.
+ *
+ * Deliberately narrow. It fires only when ALL of:
+ *   - the turn is ending with no tool call at all,
+ *   - the assistant's last line asks to proceed,
+ *   - the user's own message was an instruction to change something,
+ *   - and it has not already fired this turn.
+ * A genuine clarifying question ("which of these two items did you mean?") does
+ * not match, because it does not ask for permission to proceed.
+ * ------------------------------------------------------------------ */
+
+/** "Shall I ...?", "Let me know if you want me to ...", "Confirm and I will ...". */
+const ASKS_TO_PROCEED = /(\bshall i\b|\bwould you like me to\b|\bdo you want me to\b|\blet me know if\b|\bshould i (?:go ahead|proceed|create|update|delete|apply)\b|\bconfirm(?:\s+and)?\b[^.?!]*\bi(?:'ll| will)\b|\bplease confirm\b|\bgive me the go[- ]ahead\b|\bwaiting for your (?:approval|confirmation|go)\b)/i;
+
+/** The user told us to do something, rather than asking about something. */
+const IS_DIRECTIVE = /\b(make|create|add|set|update|change|remove|delete|rename|build|configure|hide|show|require|attach|enable|disable|reorder|fix)\b/i;
+
+export function detectStalledTurn({ assistantText, userText, mutatingCallCount = 0 }) {
+  // The test is whether the turn CHANGED anything, not whether it called
+  // anything. Measured: the guard first counted calls in the closing iteration,
+  // so a turn that resolved the item, created the policy and then signed off
+  // with "let me know if you want anything else" was nudged into a pointless
+  // extra read. Reads before a stall are the common shape of the real failure —
+  // the model gathers everything it needs and then asks permission anyway — so
+  // only a mutation clears the guard.
+  if (mutatingCallCount > 0) return null;
+  const text = String(assistantText || '');
+  if (!text.trim()) return null;
+  if (!ASKS_TO_PROCEED.test(text)) return null;
+  if (!IS_DIRECTIVE.test(String(userText || ''))) return null;
+  const asked = text.match(ASKS_TO_PROCEED)[0];
+  return { asked };
+}
+
 /**
  * Run one user turn. `emit(event)` streams progress to the client:
  *   { type: 'meta', provider, model }
@@ -92,6 +143,8 @@ export async function runTurn(sessionId, userText, emit) {
 
   if (!loadSessionRow(sessionId)) createSession({ id: sessionId });
 
+  let stallNudged = false;
+  let mutatingCallCount = 0;
   const userSeq = appendMessage(sessionId, { role: 'user', text: userText });
   indexMessage(sessionId, userSeq, 'user', userText);
   emit({ type: 'meta', ...providerInfo() });
@@ -123,6 +176,27 @@ export async function runTurn(sessionId, userText, emit) {
       }
 
       if (!res.toolCalls?.length) {
+        // A6. One nudge per turn, carrying the one fact the model is missing.
+        const stalled = !stallNudged && detectStalledTurn({
+          assistantText: res.text, userText, mutatingCallCount,
+        });
+        if (stalled) {
+          stallNudged = true;
+          const note =
+            `SYSTEM: that turn ended without calling a tool, so nothing happened on the instance and your ` +
+            `question ("${stalled.asked.trim()}") was not shown to the user as a prompt they can answer. ` +
+            `Approval is not requested in prose — it is requested BY calling the tool, which pauses and shows ` +
+            `the user an approve/reject card carrying the exact arguments. You already have what you need. ` +
+            `Call the tool now with the values you just described. If you are genuinely missing a value, call a ` +
+            `read-only tool to get it instead of asking.`;
+          appendMessage(sessionId, { role: 'user', text: note });
+          emit({ type: 'nudged', reason: 'stalled', asked: stalled.asked.trim() });
+          recordToolEvent(sessionId, {
+            kind: 'guard', name: 'a6_stalled_turn', payload: { asked: stalled.asked.trim() },
+            resultStatus: 'nudged', mutating: false, approval: null,
+          });
+          continue;
+        }
         emit({ type: 'done' });
         return;
       }
@@ -157,6 +231,7 @@ export async function runTurn(sessionId, userText, emit) {
         } else if (tool.mutating) {
           approval = 'auto';
         }
+        if (tool.mutating) mutatingCallCount += 1;
 
         try {
           const raw = await tool.execute(call.input || {});

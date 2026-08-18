@@ -4,6 +4,7 @@ import { catalog } from '../servicenow/catalog.js';
 import { flows, designFlowBlueprint } from '../servicenow/flows.js';
 import { capability, createLiveFlow, listManaged, removeManaged, smokeRun, verify } from '../servicenow/fluent.js';
 import { listSlas, getSla, slaMeta, createSla, verifySla } from '../servicenow/sla.js';
+import { listPoliciesForItem, itemVariables, createPolicy, CONDITION_OPERATORS } from '../servicenow/catalogPolicy.js';
 import { aclReport, aclDiff, explainAclReport } from '../servicenow/acl.js';
 import { search } from '../memory/recall.js';
 import { recordCalculatedFields, listFacts, recordFact } from '../memory/facts.js';
@@ -321,6 +322,153 @@ export const TOOLS = [
       required: ['table', 'values'],
     },
     execute: ({ table: t, values, wait_ms }) => smokeRun({ table: t, values, waitMs: wait_ms || 45000 }),
+  },
+  {
+    name: 'get_catalog_item',
+    description:
+      'Read a catalog item top to bottom: its variables in order (with type, mandatory flag, help text, default, and the REAL choice values for choice-type variables), plus every UI policy scoped to it. Call this before proposing any change to an item — variable sys_ids and choice VALUES are what conditions and actions are built from, and neither can be guessed.',
+    mutating: false,
+    inputSchema: {
+      type: 'object',
+      properties: { sys_id: { type: 'string', description: 'sys_id of the sc_cat_item (resolve the name with lookup_reference on sc_cat_item)' } },
+      required: ['sys_id'],
+    },
+    execute: async ({ sys_id }) => {
+      const [item, policies] = await Promise.all([catalog.getItemDeep(sys_id), listPoliciesForItem(sys_id)]);
+      return {
+        item: { sys_id, name: item.item?.name?.display_value ?? item.item?.name, active: item.item?.active?.value },
+        variables: policies.variables,
+        variableSets: item.variableSets?.map((s) => ({ title: s.title?.display_value ?? s.title, variables: (s._variables || []).length })) || [],
+        policies: policies.policies,
+      };
+    },
+  },
+  {
+    name: 'add_catalog_variable',
+    description:
+      'Add one variable to an EXISTING catalog item. For a choice type (3 Multiple Choice, 5 Select Box, 18 Lookup Select Box, 22 Lookup Multiple Choice) pass choices — a choice with no value cannot be referenced by a UI policy condition. Call get_catalog_item first so the order does not collide. Requires user approval.',
+    mutating: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cat_item: { type: 'string', description: 'sys_id of the catalog item' },
+        name: { type: 'string', description: 'internal name, snake_case' },
+        question_text: { type: 'string' },
+        type: { type: 'number', description: 'variable type code — read the real list from the catalog meta rather than assuming' },
+        mandatory: { type: 'boolean' },
+        order: { type: 'number' },
+        help_text: { type: 'string' },
+        default_value: { type: 'string' },
+        reference_table: { type: 'string', description: 'for type 8 (Reference) / 21 (List Collector)' },
+        choices: {
+          type: 'array',
+          items: { type: 'object', properties: { text: { type: 'string' }, value: { type: 'string' } } },
+        },
+      },
+      required: ['cat_item', 'name', 'type'],
+    },
+    execute: ({ cat_item, ...v }) => catalog.createVariable({ cat_item }, v),
+  },
+  {
+    name: 'update_catalog_variable',
+    description:
+      'Update one variable in place: question_text, order, mandatory, help_text, default_value. Use this rather than deleting and recreating — a recreated variable gets a NEW sys_id, and every UI policy condition and action that names the old one silently stops matching. Requires user approval.',
+    mutating: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sys_id: { type: 'string', description: 'sys_id of the item_option_new record' },
+        question_text: { type: 'string' },
+        order: { type: 'number' },
+        mandatory: { type: 'boolean' },
+        help_text: { type: 'string' },
+        default_value: { type: 'string' },
+      },
+      required: ['sys_id'],
+    },
+    execute: async ({ sys_id, ...patch }) => {
+      const data = {};
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === undefined) continue;
+        data[k] = typeof v === 'boolean' ? String(v) : String(v);
+      }
+      if (!Object.keys(data).length) throw new Error('Nothing to update — pass at least one field.');
+      const before = await table.get('item_option_new', sys_id);
+      await catalog.updateVariable(sys_id, data);
+      const after = await table.get('item_option_new', sys_id);
+      // Read-back, because a write to a field that does not exist is accepted
+      // and discarded rather than refused.
+      const mismatches = Object.entries(data)
+        .map(([f, want]) => ({ field: f, sent: want, stored: after?.[f]?.value ?? after?.[f] }))
+        .filter((m) => String(m.stored) !== String(m.sent));
+      return {
+        ok: mismatches.length === 0,
+        sys_id,
+        name: after?.name?.value ?? after?.name,
+        changed: Object.fromEntries(Object.keys(data).map((f) => [f, {
+          from: before?.[f]?.value ?? before?.[f], to: after?.[f]?.value ?? after?.[f],
+        }])),
+        mismatches,
+      };
+    },
+  },
+  {
+    name: 'list_ui_policies',
+    description:
+      'List the catalog UI policies scoped to one item, with their conditions decoded into readable form (which variable, which operator, which value) and their actions. Also reports problems NowForge can see without running the form: a condition on a variable that is not on the item, a value the variable cannot hold, or an action that leaves everything on "ignore" and therefore does nothing.',
+    mutating: false,
+    inputSchema: {
+      type: 'object',
+      properties: { cat_item: { type: 'string', description: 'sys_id of the catalog item' } },
+      required: ['cat_item'],
+    },
+    execute: ({ cat_item }) => listPoliciesForItem(cat_item),
+  },
+  {
+    name: 'create_ui_policy',
+    description:
+      'Create a catalog UI policy that shows, hides, requires or freezes a variable in response to another variable. Conditions and actions both address variables by their item_option_new sys_id, which you must read with get_catalog_item first — a condition naming anything else can never be satisfied, and NowForge refuses it rather than writing a policy that saves and does nothing. Choice values are checked against the variable real choices for the same reason. IMPORTANT: this compiles and installs through the ServiceNow SDK and takes about a minute, because catalog_ui_policy_action cannot be written over REST at all — a POST returns 201 and silently discards the fields that attach the action to its policy. Requires user approval.',
+    mutating: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        catalog_item: { type: 'string', description: 'sys_id of the catalog item' },
+        short_description: { type: 'string', description: 'The policy name, e.g. "Require justification for permanent access"' },
+        conditions: {
+          type: 'array',
+          description: 'WHEN. Every entry names a variable by sys_id.',
+          items: {
+            type: 'object',
+            properties: {
+              variable: { type: 'string', description: 'item_option_new sys_id of the variable being tested' },
+              operator: { type: 'string', description: 'One of: =, !=, IN, NOT IN, ISEMPTY, ISNOTEMPTY, LIKE, STARTSWITH' },
+              value: { type: 'string', description: 'For a choice variable this must be the choice VALUE, not its display text' },
+              join: { type: 'string', description: 'AND (default) | OR' },
+            },
+            required: ['variable', 'operator'],
+          },
+        },
+        actions: {
+          type: 'array',
+          description: 'THEN. Each state is the string "true", "false" or "ignore" — "ignore" means leave alone, and an action left entirely on ignore does nothing.',
+          items: {
+            type: 'object',
+            properties: {
+              variable: { type: 'string', description: 'item_option_new sys_id of the variable being changed' },
+              visible: { type: 'string', description: 'true | false | ignore' },
+              mandatory: { type: 'string', description: 'true | false | ignore' },
+              disabled: { type: 'string', description: 'true | false | ignore — "disabled" is read-only' },
+            },
+            required: ['variable'],
+          },
+        },
+        reverse_if_false: { type: 'boolean', description: 'Put the variables back when the condition stops being true. Default true, and almost always what "only when" means.' },
+        active: { type: 'boolean' },
+        order: { type: 'number' },
+      },
+      required: ['catalog_item', 'short_description', 'conditions', 'actions'],
+    },
+    execute: (input) => createPolicy(input),
   },
   {
     name: 'list_slas',

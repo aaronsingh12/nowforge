@@ -87,6 +87,26 @@ export const CONDITION_OPERATORS = [
 ];
 
 const OPERATOR_SET = new Set(CONDITION_OPERATORS.map((o) => o.op));
+
+/**
+ * Accept the human label as well as the symbol.
+ *
+ * Measured against gpt-oss:120b-cloud on the C-4 acceptance: asked for
+ * "mandatory only when duration is Permanent", it emitted `"operator": "is"` —
+ * the label this module publishes in its own metadata. Rejecting that would be
+ * pedantry: the mapping is exact and closed, so there is nothing to guess. What
+ * is NOT normalised is the choice VALUE, because "Permanent" and "permanent"
+ * are genuinely different there and guessing between them is how a condition
+ * ends up never matching.
+ */
+const OPERATOR_ALIASES = new Map(
+  CONDITION_OPERATORS.flatMap((o) => [[o.op.toLowerCase(), o.op], [o.label.toLowerCase(), o.op]])
+);
+
+export function normalizeOperator(op) {
+  const text = String(op ?? '').trim();
+  return OPERATOR_ALIASES.get(text.toLowerCase()) ?? text;
+}
 /** Longest first, so `NOT IN` is not read as `IN` and `!=` is not read as `=`. */
 const OPERATORS_BY_LENGTH = [...OPERATOR_SET].sort((a, b) => b.length - a.length);
 
@@ -130,7 +150,7 @@ export function parseVariableConditions(text) {
 export function buildVariableConditions(clauses = []) {
   const parts = [];
   clauses.forEach((c, i) => {
-    const op = String(c.operator || c.op || '=');
+    const op = normalizeOperator(c.operator || c.op || '=');
     const needsValue = CONDITION_OPERATORS.find((o) => o.op === op)?.takesValue !== false;
     const value = needsValue ? String(c.value ?? '') : '';
     const joiner = i === 0 ? '' : (c.join === 'OR' ? '^OR' : c.join === 'NQ' ? '^NQ' : '^');
@@ -366,9 +386,12 @@ export async function validatePolicyInput(input, { variablesFor = itemVariables 
       );
       return;
     }
-    const op = String(c?.operator || '=');
+    const op = normalizeOperator(c?.operator || '=');
     if (!OPERATOR_SET.has(op)) {
-      errors.push(`${at} uses operator "${op}", which NowForge does not build. Use one of: ${[...OPERATOR_SET].join(', ')}.`);
+      errors.push(
+        `${at} uses operator "${c?.operator}", which NowForge does not build. Use one of: ` +
+        `${CONDITION_OPERATORS.map((o) => `${o.op} (${o.label})`).join(', ')}.`
+      );
       return;
     }
     const spec = CONDITION_OPERATORS.find((o) => o.op === op);
