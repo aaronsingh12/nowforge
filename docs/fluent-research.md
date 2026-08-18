@@ -751,3 +751,153 @@ $id: Now.ID['vhp_if_critical']
 
 The prefix supplies uniqueness; the suffix supplies readability. Bare keys (`log`, `note`,
 `set`, `add_work_note`, `if_priority_critical`) are precisely the ones that collide.
+
+---
+
+## 14. Phase 4 live test — the vendor-hold spec
+
+Driven through `createLiveFlow()` → `verify()`, the entry point the panel route
+(`POST /api/flows/live`) and the agent tool `create_flow_live` both call. Provider: Ollama
+`gpt-oss:120b-cloud`.
+
+### Deploy ✅
+
+| | |
+|---|---|
+| build attempts | **1** |
+| activation | **10/10** |
+| flow | `Create Problem for On Hold Vendor Incidents` — `39acb67eac164650a6b15f5e724cae76`, active |
+| structure read back | 1 trigger, 5 actions, 1 logic block |
+| element keys | `vpo_trigger_updated`, `vpo_lookup_hw_group`, `vpo_create_problem`, `vpo_update_incident_problem`, `vpo_add_work_note`, `vpo_if_critical`, `vpo_assign_problem_manager` |
+
+Every key is flow-prefixed and freshly minted. Across all six live runs the identity guard never
+had to reject a candidate — the HARD RULE alone was enough once the cheatsheet stopped handing
+out live keys.
+
+### The guards, measured live ✅
+
+- **Guard 2** — every attempt wrote `candidate-0a8c04f64afd4b31.now.ts`, the spec fingerprint,
+  including a run where attempt 1 failed on `TS4111` and attempt 2 succeeded. The model named the
+  flow *"Create Problem for On Hold Vendor Issues"*, *"...Vendor Incidents"* and *"...On Hold
+  Vendor Incident"* on different runs; not one of those names ever selected a filename.
+- **Guard 3** — on the regeneration path the deployed source went to the model with its keys
+  replaced by `__ID_n__`, and came back with **every `cphv_*` key byte-identical** and the
+  artifact name preserved verbatim, while the body changed. Identity survived mechanically.
+
+### Trigger and condition, as generated
+
+```typescript
+wfa.trigger(
+    trigger.record.updated,
+    { $id: Now.ID['vpo_trigger_updated'] },
+    { table: 'incident', condition: 'state=3^hold_reason=4', run_flow_in: 'background' }
+),
+// lookup:  conditions: `sys_id=8a5055c9c61122780043563ef53438e3`
+// if:      condition: `${wfa.dataPill(params.trigger.current.priority, 'integer')}=1`
+```
+
+**Encoded values, not display labels** — confirmed against the instance's own choice lists:
+
+| written | means | label on this instance |
+|---|---|---|
+| `state=3` | `state` value 3 | On Hold |
+| `hold_reason=4` | `hold_reason` value 4 | Awaiting Vendor |
+| `priority ... =1` | `priority` value 1 | 1 - Critical |
+| `sys_id=8a5055c9…` | resolved sys_id | the Hardware group |
+
+Not one display label leaked into a query. The group is matched by resolved sys_id rather than by
+name, which is what the rewritten NO MATCH guidance pushes the model toward.
+
+### Verification: create-then-update works, one promise is unsatisfiable
+
+The runner extension fired correctly. Setup created the incident **outside** the trigger
+condition, then transitioned it in, and the platform's computed value was read back:
+
+```
+transition -> incident_state: On Hold (3), hold_reason: Awaiting Vendor (4), priority: 1 - Critical
+flow execution state: COMPLETE
+```
+
+`priority` was driven through `impact=1` + `urgency=1` and landed as Critical, never written
+directly. A record-UPDATED trigger is now reachable; before this extension it was not.
+
+**Direct read-back counter-probe of all five promised effects** (measurement, not a
+model-authored assertion):
+
+| | promise | expected | actual |
+|---|---|---|---|
+| ✅ | problem created, description prefixed | `Vendor issue: Counter probe alpha` | `Vendor issue: Counter probe alpha` |
+| ✅ | problem assigned to Hardware | `Hardware` | `Hardware` |
+| ❌ | incident's Problem field links back | `PRB0040006` | **no such field on this instance** |
+| ✅ | work note contains the problem number | contains `PRB0040006` | `Linked Problem PRB0040006` |
+| ✅ | Critical → problem Assigned to = Hardware manager | manager is EMPTY, so no assignment | empty |
+
+**4 of 5 confirmed. The one failure is not a flow defect and not a pipeline defect.**
+`problem_id` exists on **no table** on this instance — `element=problem_id` returns zero
+`sys_dictionary` rows, and none of the 20 reference fields on `incident`/`task` points at
+`problem`. The request asked for a link the instance has nowhere to store. ServiceNow accepts a
+write to an unknown field silently, so the flow "succeeds" and the effect simply never happens.
+
+The fifth promise is vacuous in a different way: the Hardware group has no manager
+(`manager = ""`), so "assign to the group's manager" can only ever produce an empty value. The
+flow does the right thing; there is nothing to observe.
+
+### The false green, and why `verify` now refuses to run some specs ⚠️
+
+One generated spec reported **4/4 green** and it was **wrong**. It proved the Problem link with
+
+```json
+"locate": { "byQuery": "sys_id={{setup.sys_id}}^problemISNOTEMPTY" }
+```
+
+ServiceNow **silently drops** a condition naming a field that does not exist. Measured against a
+single incident:
+
+```
+sys_id=<id>^problemISNOTEMPTY             MATCHES
+sys_id=<id>^problemISEMPTY                MATCHES   <- both, simultaneously
+sys_id=<id>^zzz_totally_madeupISNOTEMPTY  MATCHES
+sys_id=<id>^work_notesISNOTEMPTY          no match  <- a real field constrains
+```
+
+So the locator matched regardless, and an effect that never happened reported green. This is the
+worst failure mode in the pipeline: it does not merely miss a bug, it **certifies its absence**.
+Every asserted field and every field a locator constrains on is now checked against the live
+schema — at generation time, and again before a stored spec runs. On the final run the model
+spent all 3 attempts insisting on `^problemISNOTEMPTY`, so **no verification spec was produced**
+and `createLiveFlow` reported the gap:
+
+```
+"verification": { "available": false,
+  "reason": "Could not produce a valid verification spec in 3 attempts." }
+```
+
+That is the correct outcome. The flow is deployed and honest about being unverified, rather than
+carrying a green that means nothing.
+
+### Other defects this test surfaced (all fixed, each committed separately)
+
+| defect | consequence | fix |
+|---|---|---|
+| create-only setup | a record-UPDATED trigger could never fire | `setup.update` transition step |
+| empty related field omitted from context | model invented a group manager "John Doe" | empty fields stated as EMPTY |
+| `{{token}}` accepted in `expect` | a correct work note reported FAIL | non-literal expectations rejected |
+| `*` wildcard / "not empty" in `expect` | a correct work note reported FAIL again | same guard, widened |
+| unresolvable proper noun | `name=Hardware group` matched nothing → **flow ERRORed on every run** | retry without trailing common noun; a real miss lists what exists |
+| deployed source outranked live context | a stale name survived every regeneration | live context wins for values, never for identity |
+| locator on a non-existent field | **false green** | schema check on every asserted and constrained field |
+
+### Honest status
+
+- Deploy: **green**, 1 attempt, 10/10, read back off the instance.
+- Flow behaviour: **4 of 5 promises confirmed by direct read-back**; the 5th is unsatisfiable on
+  this instance.
+- Pipeline verification: **not green — no spec could be produced**, because the only assertion the
+  model would write for the impossible promise was one that could only pass vacuously.
+- The flow is **left deployed and active** for manual counter-probes.
+
+The provider is the weak link throughout. Across six runs the same spec produced a different flow
+name every time, dropped the `"Vendor issue: "` prefix on one regeneration, and wrote a different
+malformed assertion on nearly every verification attempt. Each guard added here catches a real
+class of that damage; none of them can make a weak model competent. `fluent.js` already surfaces
+this as a hint, and it is the first lever to pull before reading anything else into these results.

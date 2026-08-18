@@ -1641,7 +1641,9 @@ async function generateVerification(args, emit = () => {}) {
     const fieldCheck = check.ok ? await checkVerifySpecFields(candidate) : { ok: true, errors: [] };
     if (check.ok && fieldCheck.ok) return { ok: true, spec: candidate, attempts: attempt };
     priorErrors = [...check.errors, ...fieldCheck.errors];
-    emit({ type: 'verify_spec_rejected', attempt, errors: check.errors });
+    // Report every reason, not just the structural ones: a spec rejected only
+    // by the field check would otherwise stream "rejected" with an empty list.
+    emit({ type: 'verify_spec_rejected', attempt, errors: priorErrors });
   }
   return { ok: false, errors: priorErrors, attempts: 3 };
 }

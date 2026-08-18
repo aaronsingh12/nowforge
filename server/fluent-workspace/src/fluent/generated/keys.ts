@@ -643,34 +643,74 @@ declare global {
                     vhp_add_work_note: {
                         table: 'sys_hub_action_instance_v2'
                         id: '60c34388513c4f54930fa9209275fb96'
+                        deleted: true
                     }
                     vhp_create_problem: {
                         table: 'sys_hub_action_instance_v2'
                         id: '48abf4c9b1824130bd8657205bc9c113'
+                        deleted: true
                     }
                     vhp_flow: {
                         table: 'sys_hub_flow'
                         id: 'a71cfdfee6e1425ca00b10dc9874b17d'
+                        deleted: true
                     }
                     vhp_hw_group_lookup: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'ca21a6587b874aed8879c6a55596cfb9'
+                        deleted: true
                     }
                     vhp_if_critical: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '6ebbe6df93944c998debd01c2a075150'
+                        deleted: true
                     }
                     vhp_link_incident_problem: {
                         table: 'sys_hub_action_instance_v2'
                         id: '119b77875dd44e72b8e0b4eabb30a1da'
+                        deleted: true
                     }
                     vhp_trigger: {
                         table: 'sys_hub_trigger_instance_v2'
                         id: '1e9648c8f4014f1c84b4c4f4bf38d488'
+                        deleted: true
                     }
                     vhp_update_problem_assigned_to: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'cc56b1666d454ccb9026d3f8582dcb86'
+                        deleted: true
+                    }
+                    vpo_add_work_note: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'fae634b7c19f47eeb38968306cf22b72'
+                    }
+                    vpo_assign_problem_manager: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'a2ba9ad0a21144108976b0ab5d89860e'
+                    }
+                    vpo_create_problem: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '919bc38611aa42448234356f9f0c7cb6'
+                    }
+                    vpo_create_problem_flow: {
+                        table: 'sys_hub_flow'
+                        id: '39acb67eac164650a6b15f5e724cae76'
+                    }
+                    vpo_if_critical: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '28758f9ec2c14325aace3b77b65960b7'
+                    }
+                    vpo_lookup_hw_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '4f5ff153e06149d9aa20125292ed1dd2'
+                    }
+                    vpo_trigger_updated: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '3b536fe3832b469f89acd041cc8cc425'
+                    }
+                    vpo_update_incident_problem: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '3bcc8c7bffa8403b9d5e65de5245ca1f'
                     }
                 }
                 composite: [
