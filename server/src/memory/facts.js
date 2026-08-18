@@ -167,6 +167,35 @@ const SEED = [
     value: 'A weak model can return HTTP 200 with correct prose that collapses into a repetition loop — measured on gpt-oss:120b-cloud, four role names cycling about sixty times inside one sentence. Printed beside an accurate structured report it reads as a finding about the instance rather than as the generation breaking down. Check generated text for consecutive n-gram loops and low lexical variety before showing it; retry once WITH the repeated fragment quoted as evidence, then refuse loudly.',
     provenance: 'fluent-research §22 B-3, the first live run of the ACL explanation', confidence: 0.9 },
 
+  // --- Track C: catalog UI policies (fluent-research §23) ---
+  { scope: UNIVERSAL, kind: 'trap', key: 'ui-policy-action-not-writable-over-rest',
+    value: '`catalog_ui_policy_action` accepts a POST, returns 201, and SILENTLY DISCARDS `ui_policy` and `catalog_variable` — the two fields that attach the action to its policy and to its variable. Every other field lands, so you get a policy whose actions do nothing and no error anywhere. The cause is a field ACL on `sys_ui_policy_action.ui_policy` granting only the role `nobody` with admin_overrides OFF: the Table API DROPS a field the caller may not write rather than refusing. Reproduced through basic auth, a logged-in browser session, and the platform\'s own form (which renders the field read-only). Write catalog UI policies through the ServiceNow SDK instead; reads over the Table API are fine.',
+    provenance: 'fluent-research §23, measured three ways on dev442675', confidence: 0.99 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'dictionary-readonly-does-not-predict-rest-writes',
+    value: 'The dictionary `read_only` flag does not tell you which fields a REST write will keep. On catalog_ui_policy_action, `variable` and `catalog_item` ARE read_only and store fine, while `ui_policy` and `catalog_variable` are NOT read_only and are dropped. Field ACLs decide. Test the write and read it back field by field.',
+    provenance: 'fluent-research §23', confidence: 0.95 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'ui-policy-condition-is-io-prefixed-sysid',
+    value: 'A catalog UI policy condition is NOT an encoded query on field names. `catalog_ui_policy.catalog_conditions` is a `variable_conditions` field addressing variables by sys_id with an `IO:` prefix, ending in `^EQ` — e.g. `IO:35c19214f7752110ed589ef0e3bfd6c3=true^EQ`. A condition written with field names saves and never matches. An action needs BOTH `variable` (the internal name) and `catalog_variable` (`IO:` + sys_id).',
+    provenance: 'fluent-research §23, read off the OOB policies', confidence: 0.99 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'ui-policy-action-states-default-to-ignore',
+    value: '`visible`, `mandatory` and `disabled` on a UI policy action are STRINGS — "ignore", "true", "false" — not booleans, and "ignore" is the default meaning leave alone. An action that sets none of them saves cleanly and does nothing. Also: comparing a choice variable against its display LABEL instead of its stored VALUE produces a condition that can never be true.',
+    provenance: 'fluent-research §23', confidence: 0.95 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'variable-type-codes-drift',
+    value: 'Hardcoded catalog variable type codes go stale silently. On this instance 31 is "Requested For", 32 is "Rich Text Label" and 33 is "Attachment" — a common hardcoded list has 31 as Rich Text Label and 32 as Attachment, and omits 33 entirely. Read the choice list off `item_option_new.type` in sys_dictionary rather than trusting a table in code.',
+    provenance: 'fluent-research §23, 26 hardcoded codes against 31 live ones', confidence: 0.9 },
+
+  { scope: UNIVERSAL, kind: 'decision', key: 'edit-variables-in-place',
+    value: 'Update a catalog variable in place; never delete and recreate it. A recreated variable gets a NEW sys_id, and every UI policy condition and action that named the old one keeps the reference and silently stops matching. The same applies to a choice: its `value` is what a policy condition compares against, so changing or deleting one can break a policy with no error.',
+    provenance: 'fluent-research §23', confidence: 0.9 },
+
+  { scope: UNIVERSAL, kind: 'decision', key: 'ui-policy-proven-only-by-the-form',
+    value: 'A catalog UI policy is evaluated in the BROWSER, so no server-side read can prove it works — the record being correct and the form behaving are different claims. Related: setting the Angular model directly on a portal control changes the value WITHOUT re-evaluating the policy; only a real interaction does. Verify a policy by driving the form, never by reading the record back.',
+    provenance: 'fluent-research §23, measured while driving /sp', confidence: 0.9 },
+
   // --- Measured on THIS instance, and scoped to it ---
   { scope: 'instance', kind: 'mapping', key: 'incident.problem-link-absent',
     value: 'This instance has no `problem_id`, `rfc` or `caused_by` on incident, and NO field on incident/task references `problem` at all. A request to "link the problem back to the incident" cannot be satisfied here. The available task-to-task links are `incident.parent` and `problem.first_reported_by_task`.',

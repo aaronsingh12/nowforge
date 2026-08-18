@@ -2239,3 +2239,304 @@ byte-for-byte afterwards and the working tree is clean.
 | 20 | **A `schedule` is inert unless `schedule_source` is `sla_definition`** | the field is set, the UI shows it, the clock runs 24x7 | Measured: 4.00h vs 7.84h on otherwise identical definitions. Set both, and check `task_sla.schedule` on the attached row rather than the definition |
 | 21 | **`task_sla` times are UTC; `display_value` is session-local** | a breach clock checked against the display half is out by the offset — 7h here — and fails a correct SLA | Parse the `value` half with an explicit `Z`. Trap #UTC, now with a second table it applies to |
 | 22 | **A weak model can return HTTP 200 and a repetition loop** | correct prose, then one phrase cycling sixty times, printed next to an accurate report where it reads as a finding | Check generated text for n-gram loops and low lexical variety before showing it. Retry once WITH the fragment quoted as evidence, then refuse loudly |
+
+---
+
+## 23. Track C — catalog UI policies, variable editing, agent parity
+
+Measured against `dev442675.service-now.com` before the code that relies on it
+was written. The centrepiece is a constraint that changed the design mid-build.
+
+---
+
+### The finding: `catalog_ui_policy_action` cannot be written over REST ⚠️
+
+A POST to `catalog_ui_policy_action` returns **201 Created** and silently
+discards `ui_policy` and `catalog_variable` — the two fields that attach an
+action to its policy and to its variable. Everything else lands. Field by
+field:
+
+```
+ui_policy          sent="6717f5d5…"                stored=""   <-- DROPPED
+catalog_variable   sent="IO:3617b5d5…"             stored=""   <-- DROPPED
+variable           sent="justification"            stored="justification"  OK
+visible            sent="false"                    stored="false"          OK
+mandatory          sent="true"                     stored="true"           OK
+disabled           sent="true"                     stored="true"           OK
+order              sent="250"                      stored="250"            OK
+```
+
+The result is a policy with actions that do nothing, and nothing anywhere says
+so. `PATCH` after insert is dropped too.
+
+**The cause, found with Track B's own analyzer in one query:**
+
+```
+sys_security_acl:  sys_ui_policy_action.ui_policy / create  roles=["nobody"]  admin_overrides=false
+                   sys_ui_policy_action.ui_policy / write   roles=["nobody"]  admin_overrides=false
+```
+
+A field ACL granting only the role `nobody`, with `admin_overrides` **off**, so
+not even an admin passes it — and the Table API DROPS a field the caller may not
+write rather than refusing the request. That is trap #3 wearing a different hat:
+the same silence, a different reason.
+
+Note the inversion that makes this hard to guess at. `variable` and
+`catalog_item` ARE marked `read_only: true` in the dictionary and they store
+fine; `ui_policy` and `catalog_variable` are `read_only: false` and do not. The
+dictionary is not the thing to read here.
+
+**Measured through three independent channels before redesigning around it:**
+
+| channel | result |
+|---|---|
+| Table API, basic auth, admin | 201, both fields empty |
+| Table API from a logged-in browser session with `X-UserToken` | 201, both fields empty |
+| the platform's own classic form | renders `ui_policy` **read-only**; `sysparm_query` does not prefill it |
+
+It is not a credential problem and not an item-state problem: it reproduces on
+an out-of-box item whose policies already work. The `catalog_variable` half has
+no ACL naming it and is presumably dropped by the `Restrict edit if the item is
+checked out` business rule, whose script is not readable through any channel
+tried here — so that half is a **measurement without a mechanism**, and is
+recorded as such.
+
+### The answer: drive the SDK, which is what the repo already does for `sys_hub_*`
+
+`now-sdk explain --list` has `cataloguipolicy-api`. The SDK installs metadata as
+a system operation, so both fields land:
+
+```
+action  ui_policy        = 668aba2f…   (the installed policy)
+        catalog_variable = IO:3617b5d5…
+        variable         = justification
+        visible          = false
+```
+
+So NowForge **reads catalog UI policies over the Table API and writes them
+through the SDK**, in one deterministic template — a policy draft is already
+precise, so there is nothing for a model to add and one more way to be wrong.
+`fluent.js` exports a shared build/install surface, because two concurrent
+`now-sdk install` runs would each ship a half-built `dist/`.
+
+One SDK detail, measured: `variableName` takes the **bare sys_id**. Passing
+`IO:<sys_id>` produced `catalog_variable = "IO:IO:<sys_id>"`.
+
+---
+
+### Four more behaviours the builder handles up front
+
+1. **The condition is not an encoded query.** `catalog_conditions` is a
+   `variable_conditions` field addressing variables by sys_id with an `IO:`
+   prefix — `IO:35c19214f7752110ed589ef0e3bfd6c3=true^EQ`. A field name means
+   nothing here. `conditions.js`'s `splitQuery` handles the joiners, since
+   `^` / `^OR` / `^NQ` mean the same thing; only the operand grammar differs.
+
+2. **An action needs both `variable` and `catalog_variable`** — the internal
+   name AND `IO:` + the sys_id. Every out-of-box action sets both.
+
+3. **`visible` / `mandatory` / `disabled` are the strings `ignore` / `true` /
+   `false`.** `ignore` means leave alone and is the default, so an action that
+   sets nothing saves cleanly and does nothing. Refused before the write.
+
+4. **`ui_type` — and a claim that was wrong.** It defaults to 0, labelled
+   "Desktop" against 1 "Mobile / Service Portal" and 10 "All", and 82 of the
+   100 out-of-box policies here sit at 0. The obvious reading is that a
+   default-valued policy does not run on the portal, and this project asserted
+   exactly that, in a code comment, a validation warning and a commit message,
+   before measuring it.
+
+   **It is wrong on this release.** The same policy installed at ui_type 0 hid
+   and revealed its variable on `/sp?id=sc_cat_item` identically to the same
+   policy at 10 — reinstalled at 0, re-driven through the portal, reinstalled
+   back at 10, re-checked. The warning is gone; a guard that fires on a
+   distinction which does not exist teaches people to ignore guards. NowForge
+   still writes 10, but for a defensible reason rather than a measured one: it
+   is the SDK's own default for `runScriptsInUiType` and unambiguous everywhere.
+
+---
+
+### C-1 — the builder ✅
+
+`server/src/servicenow/catalogPolicy.js`, routes under `/api/catalog`, and a
+**UI policies** tab in the item view alongside Variables and Variable sets.
+
+Choice-aware by construction: the value control becomes a dropdown of the
+variable's real choices the moment a variable with any is picked, so the
+commonest way to write a condition that can never be true — comparing a select
+box against its display label rather than its stored value — is not reachable
+from the form. Validation refuses, before anything is written:
+
+| refused | why it matters |
+|---|---|
+| a condition on a variable that is not on the item | evaluated against the form, so it can never be satisfied |
+| a choice value the variable cannot hold | never true; the real values are listed in the error |
+| a checkbox compared with anything but true/false | same |
+| an action left entirely on `ignore` | saves cleanly, does nothing |
+| no condition at all | always true, so it applies unconditionally |
+
+Hiding a variable that is **mandatory** warns rather than blocks: it is legal,
+and the correct fix (`mandatory: 'false'` in the same action) is one field away.
+The SDK's own guide agrees — "hide mandatory variables that have no value" is on
+its NEVER list.
+
+**Acceptance, live, driven through NowForge's own UI:**
+
+```
+policies before the UI run: 0
+  → item picked, UI policies tab, form filled, Create policy
+result: Installed UI policy "Hide justification unless approval is needed"
+        with 1 action(s); every action reads back attached to the policy and
+        to its variable.
+policies after: 1  managed=true  actions=1  problems=0
+
+Service Portal /sp?id=sc_cat_item:
+  checkbox unchecked → Justification NOT visible
+  checkbox ticked    → Justification visible
+```
+
+Screenshots: `docs/media/c1-ui-1-builder.png`,
+`c1-ui-2-installed.png`, `c1-ui-3-policy-list.png`,
+`c1-portal-1-hidden.png`, `c1-portal-2-shown.png`. Visibility is asserted from
+the element's own bounding box, not its presence in the DOM.
+
+---
+
+### C-2 — variable editing ✅
+
+Inline edit (question text, order, mandatory, help text, default), reorder, and
+choice CRUD on choice-type variables.
+
+**Reordering renumbers the whole list**, server-side, from 100 in steps of 100,
+reading every row back. `order` is an integer and two variables sharing a value
+render in an order the platform picks — which looks exactly like the reorder
+having failed. Measured live: swap and restore, every row `ok: true`.
+
+**Editing is in place, never delete-and-recreate.** A recreated variable gets a
+new sys_id, and every UI policy condition and action naming the old one keeps
+the reference and silently stops matching. The agent tool description says so
+too, because that is the shortcut a model reaches for.
+
+A derived choice value drops punctuation rather than underscoring it:
+`Contractor (30 days)` was producing `contractor_(30_days)`, a value nobody
+wants to type into a condition and one that reads like a mistake when it turns
+up in one.
+
+Destructive confirmation is one module — `client/src/components/confirm.js` —
+with the consequence text written once per artifact kind. Track D's dialog
+replaces that file and nothing else.
+
+---
+
+### C-3 — completeness, and a stale hardcoded list ✅
+
+Item active toggle, category creation inline where a category is picked, order
+guide and record producer delete, and a producer row that links straight into
+the item view — a record producer IS a catalog item, so managing its variables
+should not mean finding it again by hand. Each exercised over HTTP against the
+live PDI.
+
+**Variable type codes now come from the instance dictionary.** The hardcoded
+list was wrong here in the way hardcoded lists go wrong:
+
+| code | the hardcoded list said | this instance says |
+|---|---|---|
+| 31 | Rich Text Label | **Requested For** |
+| 32 | Attachment | **Rich Text Label** |
+| 33 | *(absent)* | **Attachment** |
+
+26 codes against the instance's 31. It survives as a fallback, and the UI says
+loudly when it is being used — serving stale codes quietly is how a variable
+ships with a silently different type.
+
+---
+
+### C-4 — agent parity, and A6 ✅
+
+Five tools: `get_catalog_item` (deep read with the real choice VALUES),
+`add_catalog_variable`, `update_catalog_variable`, `list_ui_policies`,
+`create_ui_policy`. The two writers are mutating and gated.
+
+#### Operator labels, normalised
+
+Asked for "mandatory only when duration is Permanent", the model emitted
+`"operator": "is"` — the label this module publishes in its own metadata.
+Accepted now: the mapping is exact and closed, so rejecting it would be
+pedantry. The choice VALUE is deliberately **not** normalised — "Permanent" and
+"permanent" are genuinely different there, and guessing is how a condition ends
+up never matching.
+
+The same reasoning applies to action states: `visible: false` from a JS caller
+means "hide it", which is what the string `"false"` means here. That used to
+happen by accident through a bare `String()` call; it is now a named function
+with a comment, because an accident is not a decision.
+
+#### A6 — the stalled turn ⚠️
+
+**Twice in three runs.** The model resolved the item, read its variables, quoted
+the two correct sys_ids and the right choice value in a tidy table, and ended
+the turn with:
+
+> *Shall I create this UI Policy now? (It will take about a minute.)*
+
+Nothing was created. Nothing said so. From outside, a stalled turn looks exactly
+like a finished one: prose arrives, the stream closes.
+
+Tightening the prompt did not fix it — the system prompt already said the
+approval gate IS the confirmation and to call the tool, and the model asked
+anyway. That is §20's lesson again, so it is a guard. One nudge per turn,
+carrying the fact the model lacked: that its question reached nobody, and that
+approval is requested BY calling the tool.
+
+Narrow by construction — it needs a directive from the user, an assistant line
+asking to proceed, and **no mutation anywhere in the turn**. That last clause was
+itself a fix: the first version counted calls in the closing iteration and
+nudged a turn that had already created the policy and was signing off politely.
+
+**Acceptance, live, one approval:**
+
+```
+lookup_reference → get_catalog_item → list_ui_policies →
+create_ui_policy (approved) → list_ui_policies
+
+Corp VPN, Service Portal:
+  duration = Temporary → justification aria-required="false"
+  duration = Permanent → justification aria-required="true", starred,
+                         and listed under "Required information"
+```
+
+Screenshots: `docs/media/c4-vpn-1-optional.png`, `c4-vpn-2-mandatory.png`.
+
+#### A UI policy is proven by the form, never by the record
+
+Driving that form produced one more finding worth keeping. Setting the Angular
+model directly — `scope.$apply(() => { scope.fieldValue = 'permanent'; })` —
+changed the value and did **not** re-evaluate the policy. Only a real click
+through the input pipeline did. The record was identical in both cases.
+
+---
+
+### How the browser checks were run
+
+No Playwright or Puppeteer, and none added: adding a browser dependency to this
+repo for an acceptance run would change its dependency profile without being
+asked. Node 24 ships a global `WebSocket`, so the checks drive the installed
+Chrome directly over the DevTools protocol — launch with
+`--remote-debugging-port`, attach to the page target, `Page.navigate`,
+`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Page.captureScreenshot`. About
+90 lines, and it lives in the scratchpad rather than the repo.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 23 | **`catalog_ui_policy_action` silently drops `ui_policy` and `catalog_variable`** | POST returns 201, every other field lands, and the policy has actions that do nothing | A field ACL granting only `nobody` with `admin_overrides` off; the Table API DROPS a field the caller may not write. Write these through the SDK. Read the ACLs before assuming a write path exists |
+| 24 | **The dictionary's `read_only` flag does not predict which fields a REST write keeps** | `variable` is read_only and stores; `ui_policy` is not and does not | Field ACLs decide, not the dictionary. Test the write and read it back, per field |
+| 25 | **A catalog UI policy condition is `IO:<variable sys_id>`, not a field name** | a condition written with field names saves and never matches | `catalog_conditions` is a `variable_conditions` field. Address variables by sys_id with the `IO:` prefix, and end with `^EQ` |
+| 26 | **`visible`/`mandatory`/`disabled` default to `ignore`** | an action saves cleanly and changes nothing | They are strings, not booleans, and `ignore` means leave alone. An action must set at least one |
+| 27 | **`ui_type` 0 is labelled "Desktop" but is NOT a Service Portal exclusion** | you build a guard around a distinction that does not exist | Measured: a policy at ui_type 0 worked on `/sp` identically to one at 10. Read the label as a label |
+| 28 | **Hardcoded platform code lists go stale silently** | a variable ships as "Requested For" when you asked for "Rich Text Label" | 31/32/33 all shifted here, and five codes were missing. Read choice lists from `sys_dictionary`; keep any hardcoded list as a loud fallback |
+| 29 | **A stalled agent turn is indistinguishable from a finished one** | correct analysis, correct sys_ids, then "Shall I create this now?" — and nothing happened | The approval gate is only shown by CALLING the tool. Detect a directive answered with a request to proceed and no mutation, and feed that fact back |
+| 30 | **Setting an Angular model directly does not re-evaluate a UI policy** | the variable's value changes on the form and the policy does not fire, so a correct policy looks broken | Drive the real control through the input pipeline. A UI policy is proven by the form, never by the record |

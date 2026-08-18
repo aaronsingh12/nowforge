@@ -2,7 +2,7 @@
 
 Connect a ServiceNow PDI and build on it two ways: through clean module UIs, or by telling an AI agent what you want and approving each change it proposes. Bring your own model — Anthropic, OpenAI, or fully-local Ollama. No Now Assist SKUs required.
 
-**Scope (this build):** PDI connection · Incident Management (full CRUD) · Catalog Management (items, all variable types with choices, variable sets, order guides, record producers) · Flow Designer (full read, executions, activate, **live authoring of real flows and subflows via the ServiceNow SDK**, AI blueprint design + classic fallback) · **SLA definitions** (read, create, and semantic verification of the breach clock) · **Access control** (ACL report, two-role diff, plain-language explanation — read-only) · deep reference-field/table handling everywhere · agentic chat with a human approval gate on every mutation.
+**Scope (this build):** PDI connection · Incident Management (full CRUD) · Catalog Management (items, all variable types with choices, inline variable editing and reordering, **catalog UI policies**, variable sets, order guides, record producers) · Flow Designer (full read, executions, activate, **live authoring of real flows and subflows via the ServiceNow SDK**, AI blueprint design + classic fallback) · **SLA definitions** (read, create, and semantic verification of the breach clock) · **Access control** (ACL report, two-role diff, plain-language explanation — read-only) · deep reference-field/table handling everywhere · agentic chat with a human approval gate on every mutation.
 
 ---
 
@@ -66,7 +66,15 @@ Four tabs covering the catalog stack top to bottom:
 - **Items & variables** — create items (with category/catalog), then add variables of any type. Choice types (Multiple Choice, Select Box, Lookup) take a one-per-line choices editor that writes `question_choice` rows. Reference (type 8) and List Collector (21) take a live table picker. Variables render with type labels, mandatory flags, and reference targets.
 - **Variable sets** — create `item_option_new_set` records, add variables to them, attach sets to items via `io_set_item`.
 - **Order guides** — create guides (`sc_cat_item_guide`, two-step supported) and manage rule-base entries.
-- **Record producers** — create `sc_cat_item_producer` with a target-table picker and mapping script. Producers are catalog items, so their variables are managed from the Items tab.
+- **Record producers** — create `sc_cat_item_producer` with a target-table picker and mapping script. Producers are catalog items, so a producer row links straight into the item view.
+
+The item view itself has three tabs:
+
+- **Variables** — add them, edit them in place (question text, order, mandatory, help text, default), reorder with buttons that renumber the whole list server-side and read every row back, and manage choices on choice-type variables. Editing in place matters: a recreated variable gets a new sys_id, and every UI policy naming the old one keeps the reference and silently stops matching.
+- **UI policies** — a builder that reads as a sentence: *when `<variable>` is `<value>` then `<variable>` visible / mandatory / read-only*. Choice-aware — the value control becomes a dropdown of the variable's real choices as soon as you pick a variable that has any, so the commonest way to write a condition that can never be true (comparing a select box against its display label instead of its stored value) is not reachable from the form. Existing policies render the same way, with a badge separating the ones NowForge authored from the platform's own.
+- **Variable sets** — attach and inspect.
+
+**Why creating a UI policy takes about a minute.** `catalog_ui_policy_action` cannot be written over REST at all on this platform: a POST returns 201 and silently discards `ui_policy` and `catalog_variable`, the two fields that attach the action to its policy and to its variable. The cause is a field ACL granting only the role `nobody` with `admin_overrides` off — and the Table API drops a field the caller may not write rather than refusing. So policies are authored through the ServiceNow SDK, exactly as flows are and for exactly the same reason, and the result is read back to confirm every action landed attached. See `docs/fluent-research.md` §23.
 
 ### Flows
 - **Read everything:** flows *and subflows* from `sys_hub_flow`, trigger instances, ordered action instances, logic blocks, and execution history from `sys_flow_context`. Activate/deactivate with one click. Trigger configuration (table, condition, run-in) is decoded from the platform's compressed `trigger_inputs` blob, because current releases keep none of it in columns.
@@ -157,6 +165,9 @@ Three tiers. **LIVE (verified)** means it was exercised end-to-end against a rea
 | **ACL report matches the records** | 143 rules across `incident → task`; three ACLs re-read through a separate code path and compared field by field, 3/3; `incident_task`'s 43 ACLs, 0 leaked |
 | **Two-role diff shows real differences** | admin vs itil: 3 operations only-itil, 36 field-level differences, with the `admin_overrides` inversion stated |
 | **SLA assertions inside a flow verification spec** | `Escalate Network P1 Incident` run with an SLA assertion alongside its field assertions: 3/3, 0s drift, and the three rival SLAs that also attached named in the result |
+| **Catalog UI policies, proven on the form** | policy built in NowForge's own UI, installed through the SDK, then driven on `/sp?id=sc_cat_item`: the variable is absent, then rendered, when the checkbox flips. Asserted from the element's bounding box, not its presence in the DOM |
+| **Agent-authored UI policy, one approval** | "make the justification field mandatory only when duration is Permanent" → `get_catalog_item` → `create_ui_policy` (approved) → on the Corp VPN form, `aria-required` goes false → true and the field appears under "Required information" |
+| **Variable reorder, choices, item toggle, category create** | each exercised over HTTP against the live PDI; reorder renumbers the whole list and reads every row back |
 
 **What semantic verification does and does not cover.** It creates a record matching the flow's own trigger, waits for the execution to settle, asserts the effects the request promised, and always deletes its test data. It **catches**: the flow never firing, firing then erroring, writing the wrong value, writing nothing, an approval routed to the wrong person. It **cannot catch**: an effect nobody asserted; a trigger condition wrong in the same direction as the setup payload (both derived from one misreading); anything timing-dependent past the wait window; and for scheduled flows, whether the schedule *fires* — there is no supported manual-execute path, so those are verified by schedule metadata only, and the result says so.
 
@@ -178,6 +189,7 @@ Three tiers. **LIVE (verified)** means it was exercised end-to-end against a rea
 | Anything when the SDK cannot run | blueprint + inactive `sys_script`, with the capability banner printing the exact fix commands |
 | Application triggers (inbound email, SLA, catalog) | supported by the SDK and documented in the cheatsheet, but **not exercised here** — treat as unproven until verified. Note this is the SLA *flow trigger*; SLA **definitions** are Tier 1 above and go through the Table API, not the SDK |
 | ACL authoring | **out of scope on purpose**, not a gap to close later with a REST write. The SDK route — `sys_security_acl` as managed source, reviewed and installed like any other artifact — is the only defensible way to author one |
+| Editing a catalog UI policy NowForge did not author | read-only here. Without a Fluent source there is nothing to edit or remove through the toolchain, and the REST path cannot write the fields that matter. Marked "platform" in the UI rather than offered and then failing |
 
 There is still **no supported REST API for writing `sys_hub_*` directly**, and NowForge never attempts it. Live authoring works because it drives ServiceNow's own toolchain.
 
@@ -192,6 +204,7 @@ Every guard answers a failure **measured** against `gpt-oss:120b-cloud`, not a h
 | **A3** promised literals | a regeneration silently dropped the `"Vendor issue: "` prefix — compiled, installed, activated 10/10, wrote the wrong text | literals intersected with the spec text, so the model can only narrow the guard, never invent a requirement |
 | **A4** `trigger_strategy` lint | nothing set it, so the platform default `once` took over — fires **once ever** per record (trap #10) | the least visible defect in the pipeline: build green, install 10/10, single-shot verification **passes**, wrong only the second time |
 | **A5** evidence-fed retries | three verification attempts re-asked the identical question and got the identical bad answer | each rejection attaches the instance's real field inventory; a `RetryLedger` refuses a byte-identical re-ask and names it as *our* defect |
+| **A6** the stalled turn | twice in three runs, the model resolved the item, quoted the right sys_ids and the right choice value, then ended with *"Shall I create this UI Policy now?"* — nothing created, nothing said so | a turn ending with a request to proceed, on a directive, with **no mutation anywhere in it**, gets one nudge carrying the fact the model lacked: its question reached nobody, and approval is requested BY calling the tool |
 
 **Test 1 Step 1, resumed and closed** (§20). The §14 failure class is gone: attempt 1 still reached for `^problemISNOTEMPTY`, A5 attached the real reference-field inventory of `incident`, and no attempt in any run went back to it. Three attempts of prose had not moved this model; one dictionary listing moved it immediately.
 
@@ -229,7 +242,7 @@ This is the part most homegrown tools skimp on:
 Modeled on Claude Code / opencode:
 
 - **Session loop** — provider-agnostic agent iterations (max 15/turn) with a neutral message format translated per provider. History is **persisted to SQLite** and written through on every append, so a conversation survives navigating away and survives a server restart.
-- **Tool registry** — 32 tools (`server/src/agent/tools.js`): schema inspection, reference/table lookup, generic record CRUD, incident + catalog composites, flow reading, blueprint design, live flow authoring (`create_flow_live`, `verify_flow_live`, `delete_live_flow`, `smoke_test_flow`, `list_live_flows`, `flow_authoring_capability`), SLAs (`sla_meta`, `list_slas`, `get_sla`, `create_sla`, `verify_sla_live`), access control (`acl_report`, `acl_diff`, `explain_acls` — all read-only), and memory (`recall_memory`, `list_instance_facts`, `remember_fact`). Each tool declares `mutating`.
+- **Tool registry** — 37 tools (`server/src/agent/tools.js`): schema inspection, reference/table lookup, generic record CRUD, incident + catalog composites, flow reading, blueprint design, live flow authoring (`create_flow_live`, `verify_flow_live`, `delete_live_flow`, `smoke_test_flow`, `list_live_flows`, `flow_authoring_capability`), SLAs (`sla_meta`, `list_slas`, `get_sla`, `create_sla`, `verify_sla_live`), catalog items and UI policies (`get_catalog_item`, `add_catalog_variable`, `update_catalog_variable`, `list_ui_policies`, `create_ui_policy`), access control (`acl_report`, `acl_diff`, `explain_acls` — all read-only), and memory (`recall_memory`, `list_instance_facts`, `remember_fact`). Each tool declares `mutating`.
 - **Flow authoring tiers** — the prompt makes the order explicit: `design_flow_blueprint` designs, `create_flow_live` builds, and the Business Rule fallback is reserved for environments where capability reports `ok: false`. Verifying a flow (`verify_flow_live`) writes real records, so it is a *separate* mutating tool with its own approval and is never automatic after a deploy.
 - **Permission gate** — mutating calls pause the loop, stream an `approval_required` event, and wait (5-min timeout) for your Approve/Reject. Rejections are fed back to the model as tool errors. Auto-approve is opt-in.
 - **BYO provider** — one adapter for Anthropic's Messages API, one OpenAI-compatible adapter covering OpenAI and Ollama (same wire format). Add a provider by writing one file.
@@ -242,7 +255,11 @@ Modeled on Claude Code / opencode:
 ```
 /api/system      health · settings · connection/test · schema/:table · hierarchy/:table · reference/:table · tables
 /api/incidents   list+filters · stats · get · create · update · delete
-/api/catalog     meta · catalogs · categories · items CRUD + deep view · variables · variable-sets (+variables, attach) · order-guides (+items) · record-producers
+/api/catalog     meta · catalogs · categories (+create) · items CRUD + deep view
+                 variables (+reorder, +choices CRUD) · variable-sets (+variables, attach)
+                 items/:id/policies · items/:id/policy-variables
+                 policies/validate · policies (POST/PATCH/DELETE, SSE — SDK build + install)
+                 order-guides (+items, delete) · record-producers (+delete)
 /api/flows       list (flows + subflows, type filter) · :id detail · executions · :id/active
                  design · blueprint-to-rule
                  live (POST, SSE — accepts `updates` to edit in place)
@@ -272,6 +289,7 @@ Modeled on Claude Code / opencode:
 - **Done — the model-proofing floor:** five guards so the pipeline reports a weak model's mistakes instead of deploying them. The one available model (`gpt-oss:120b-cloud`) provably ignores `seed`, so every guard is written to hold under non-deterministic generation; a stronger model stays a pure Settings swap.
 - **Done — memory and sessions:** conversations persist across restarts, compact into structured digests when they outgrow the context budget, and are searchable. A per-instance knowledge ledger carries every trap in `docs/fluent-research.md` into the agent prompt *and* the codegen context.
 - **Done — SLAs and access control:** SLA definitions with conditions checked against the live dictionary before any write, and a breach clock proven by making the platform run it — `task_sla` matched to the *right* definition, planned end asserted in UTC against a tolerance the spec has to state. An ACL analyzer that reads, diffs and explains, and never authors; an unreadable ACL table reports its visibility instead of rendering an empty report.
+- **Done — catalog UI policies and variable editing:** a builder scoped to an item that cannot express a condition the form could never satisfy, variables edited in place and reordered with a full renumber, and agent parity for both. Policies are authored through the SDK because `catalog_ui_policy_action` cannot be written over REST — found by pointing Track B's ACL analyzer at the table that was swallowing the writes.
 - **Next:** exercise application triggers (inbound email, SLA, catalog) so they can leave the unproven tier; ATF test triggering after builds; OAuth refresh flow. Also: the deployed vendor-hold flow still sets no `trigger_strategy` (trap #10) — A4 blocks new flows from shipping that defect but does not retro-fix a deployed one.
 - **Later — productize:** multi-instance workspaces, update-set capture around agent sessions ("everything the agent did in this session" as one exportable set), audit log, packaging/licensing for consultancies.
 
@@ -285,6 +303,11 @@ Things that cost real time and are documented in `docs/fluent-research.md`:
 - Reasoning models (gpt-oss, o-series) bill hidden reasoning tokens against `max_tokens` and return HTTP 200 with empty content when the budget runs out. NowForge now raises a specific error instead of reporting "the model returned nothing".
 - `priority` on task tables is **calculated** from `impact` and `urgency`. Writing `{"priority":"1"}` is silently stored as *4 - Low*, so a verification setup that sets priority directly never matches a `priority=1` trigger. Drive calculated fields through their inputs.
 - Schedule times are stored in **UTC**: `Time({hours:7}, 'Asia/Kolkata')` persists as `01:30`. Asserting the local wall-clock time against the stored value fails a perfectly correct flow.
+- `catalog_ui_policy_action` accepts a POST, returns 201, and silently discards the two fields that make the action work. A field ACL grants only the role `nobody`, `admin_overrides` is off, and the Table API drops a field you may not write instead of refusing. The dictionary's `read_only` flag is no guide: on that table the read-only fields store and the writable ones do not.
+- A catalog UI policy condition is `IO:<variable sys_id>`, not a field name — and its action states are the strings `ignore`/`true`/`false`, where the default `ignore` means an action that saves cleanly and does nothing.
+- `ui_type` 0 is labelled "Desktop", which reads like a Service Portal exclusion. It is not, on this release — this project asserted that it was, in a comment, a warning and a commit message, before measuring it.
+- Hardcoded platform code lists go stale silently: 31, 32 and 33 had all shifted for catalog variable types, and five codes were missing.
+- A UI policy is evaluated in the browser, so no server-side read proves it works. Setting the Angular model on a portal control even changes the value without re-evaluating the policy — only a real click does.
 - A `task_sla` row on a record proves nothing about **which** SLA produced it. One P1 incident attached three: ours and two out-of-box ones. "The SLA attached" is an assertion that passes with the definition under test deleted.
 - `contract_sla.duration` carries whole days in the **date** half of the timestamp, so a 2-day SLA is `1970-01-03 00:00:00` and reads as zero if you look only at the clock.
 - A `contract_sla.schedule` is inert unless `schedule_source` says `sla_definition`. Same schedule, same 4h duration, one field apart: 4.00h against 7.84h.

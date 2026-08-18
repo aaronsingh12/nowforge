@@ -117,6 +117,22 @@ export const ACTION_STATES = [
 ];
 const ACTION_STATE_SET = new Set(ACTION_STATES.map((s) => s.value));
 
+/**
+ * Normalise an action state.
+ *
+ * The platform stores strings — "ignore", "true", "false" — and an omitted
+ * state means "ignore", which is the default and does nothing. A JS caller
+ * writing `visible: false` means "hide it", which is exactly what the string
+ * "false" means here, so booleans are accepted rather than refused on a
+ * technicality. Written out because it used to happen by accident, through a
+ * bare String() call, and an accident is not a decision.
+ */
+export function actionState(value) {
+  if (value === undefined || value === null || value === '') return 'ignore';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return String(value);
+}
+
 const raw = (cell) => (cell && typeof cell === 'object' ? cell.value : cell);
 const shown = (cell) => (cell && typeof cell === 'object' ? (cell.display_value ?? cell.value ?? '') : (cell ?? ''));
 
@@ -444,12 +460,15 @@ export async function validatePolicyInput(input, { variablesFor = itemVariables 
       return;
     }
     for (const field of ['visible', 'mandatory', 'disabled']) {
-      const state = String(a?.[field] ?? 'ignore');
+      const state = actionState(a?.[field]);
       if (!ACTION_STATE_SET.has(state)) {
-        errors.push(`${at}.${field} must be one of ${[...ACTION_STATE_SET].join(', ')} — these are string choices, not booleans.`);
+        errors.push(
+          `${at}.${field} is "${a?.[field]}", which is not a state this field can hold. The platform stores ` +
+          `"ignore", "true" or "false" — where "ignore" means leave alone.`
+        );
       }
     }
-    const allIgnore = ['visible', 'mandatory', 'disabled'].every((f) => String(a?.[f] ?? 'ignore') === 'ignore');
+    const allIgnore = ['visible', 'mandatory', 'disabled'].every((f) => actionState(a?.[f]) === 'ignore');
     if (allIgnore) {
       errors.push(
         `${at} on "${v.question_text}" leaves visible, mandatory and read-only all on "ignore". That saves ` +
@@ -610,9 +629,9 @@ export async function createPolicy(input, emit = () => {}) {
       return {
         variableSysId: v.sys_id,
         variableName: v.name,
-        visible: String(a.visible ?? 'ignore'),
-        mandatory: String(a.mandatory ?? 'ignore'),
-        disabled: String(a.disabled ?? 'ignore'),
+        visible: actionState(a.visible),
+        mandatory: actionState(a.mandatory),
+        disabled: actionState(a.disabled),
         order: a.order ?? (i + 1) * 100,
       };
     }),
