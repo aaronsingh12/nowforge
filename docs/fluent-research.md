@@ -654,3 +654,100 @@ uniqueness has to come from a **namespace**, not from entropy.
    request and *asserted* back to its pre-request state after a failure.
 3. **Context sanitation** — `$id` keys in any source fed back into the prompt are neutralised
    (names kept), and the cheatsheet carries a HARD RULE with the mint format.
+
+---
+
+## 13. The three identity guards (Phase 4 fix)
+
+All three are **offline**. None of them can touch the instance, and all three run before
+`now-sdk build` is spawned. `npm test` in `server/` exercises them (18 tests, no network).
+
+### Guard 1 — pre-build static validation ✅
+
+`validateCandidateIds(candidate, others, { file })` parses every `Now.ID['key']` out of a
+candidate and rejects it *before* the SDK runs when:
+
+| check | why |
+|---|---|
+| same key twice inside the candidate | CLASS A |
+| key already declared by another source in `src/` | CLASS B / CLASS C |
+| literal 32-hex sys_id used as an `$id` | identity the SDK cannot track |
+| leftover `__ID_n__` placeholder | guard 3 round-trip failed; never ship it |
+
+The value is the *diagnostic*. The SDK aborts with a sys_id the model never wrote:
+
+```
+Record sys_hub_action_instance_v2.10c0ec9dcf0c486ab1e40f73c0edbe8d is defined 2 times in the project
+```
+
+There is nothing in the model's own source matching that string, so the retry is blind — which
+is why all three attempts failed identically. The guard says instead:
+
+```
+ERROR: identity validation failed before build.
+ERROR: Duplicate $id across the project: Now.ID['add_work_note'] is defined 2 times —
+candidate-<fp>.now.ts:8 and escalate-network-p1-incident.now.ts:8. Now.ID keys are a
+PROJECT-WIDE namespace: this key already identifies a live record owned by
+escalate-network-p1-incident.now.ts, so reusing it collides instead of creating a new element.
+Mint a fresh key unique to this flow (prefix every key with a short slug of this flow's name,
+e.g. 'vhp_add_work_note').
+```
+
+It names the key, both definition sites, the rule, and the repair. It is shaped like compiler
+output so the existing retry prompt feeds it back unchanged — **a cryptic abort became a
+self-correcting retry**. A rejected candidate is never written to `src/`, so an identity failure
+costs no disk state and no SDK invocation at all.
+
+### Guard 2 — retry hygiene, asserted ✅
+
+- **One filename per request.** Every attempt writes `candidate-<spec-fingerprint>.now.ts`.
+  The model's chosen flow name no longer selects the file it is written to; a new artifact is
+  renamed to its readable slug **only after it builds**, and never onto a name another spec
+  already owns (that returns a loud `stage: 'naming'` failure instead of clobbering a live
+  artifact's source).
+- **Sweep on entry.** Any `candidate-*.now.ts` on disk means an earlier request died without
+  cleaning up. It is removed and reported (`hygiene_swept`) before the run starts.
+- **Cleanup is proven, not assumed.** `src/` is snapshotted (content-addressed) after the sweep
+  and diffed after a terminal failure. The result carries
+  `hygiene: { restored, drift, sweptOnEntry }`, and a non-empty `drift` changes the failure
+  message. Invariant (b) is now an assertion the pipeline reports on.
+- **Latent bug fixed.** The old terminal-failure path ran `rm(file)` — but on a *regeneration*
+  `file` is the deployed artifact's own source. Three failed attempts at editing an existing
+  flow would have deleted it from `src/`, and the next whole-app install would have deleted it
+  **from the instance**. Restore-from-snapshot replaces the delete.
+
+### Guard 3 — context sanitation ✅
+
+Every source fed into the codegen prompt has its `Now.ID` keys swapped for `__ID_n__`
+placeholders through one shared map, and the real keys are substituted back into the model's
+output. Two consequences:
+
+- The model **never sees a live key**, so it cannot copy one — the CLASS C vector is closed at
+  the source rather than argued against in prose.
+- Identity of a regenerated artifact is preserved **mechanically**. Previously the prompt asked
+  the model to keep every `Now.ID` key verbatim and trusted it; now keeping a placeholder is the
+  only thing it *can* do, and the mapping back is deterministic. This is strictly stronger than
+  the old instruction, and the `sanitize → edit → restore` round trip is unit-tested.
+
+`name:` values are never touched — the verbatim-name survival mechanism is what keeps the
+platform matching the same artifacts, and it stays exactly as it was.
+
+Cheatsheet examples are prefixed `ex_` before being embedded. Its snippets are **real deployed
+sources**, so `Now.ID['nm_send_email']` in an example is a *live key*; copying it reproduced the
+collision exactly.
+
+### The rule that was wrong, in both places
+
+`HARD_RULES` rule 2 (`fluent.js`) and rule 2 of the cheatsheet's non-negotiables both said keys
+must be unique **"within the file"**. Both now state the project-wide namespace, forbid copying
+from examples or existing sources, forbid entropy-based uniqueness, and give the **mint format**:
+
+```typescript
+// Flow "Vendor Hold Problem" → prefix vhp_
+$id: Now.ID['vhp_trigger']
+$id: Now.ID['vhp_create_problem']
+$id: Now.ID['vhp_if_critical']
+```
+
+The prefix supplies uniqueness; the suffix supplies readability. Bare keys (`log`, `note`,
+`set`, `add_work_note`, `if_priority_critical`) are precisely the ones that collide.
