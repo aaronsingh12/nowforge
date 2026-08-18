@@ -2,7 +2,9 @@
   "setup": {
     "table": "incident",
     "payload": {
-      "short_description": "Test incident"
+      "short_description": "Printer not printing",
+      "incident_state": "2",
+      "hold_reason": "1"
     },
     "update": {
       "incident_state": "3",
@@ -19,24 +21,24 @@
     {
       "table": "problem",
       "locate": {
-        "byQuery": "short_description=Vendor issue: Test incident"
+        "byQuery": "short_description=Vendor issue: Printer not printing"
       },
       "field": "short_description",
       "expect": {
-        "value": "Vendor issue: Test incident"
+        "value": "Vendor issue: Printer not printing"
       },
-      "note": "Problem created with prefixed short description"
+      "note": "creates a problem record with short description prefixed"
     },
     {
       "table": "incident",
       "locate": {
-        "byQuery": "sys_id={{setup.sys_id}}^problemISNOTEMPTY"
+        "bySetupRecord": true
       },
-      "field": "short_description",
+      "field": "problem",
       "expect": {
-        "value": "Test incident"
+        "display": "Vendor issue: Printer not printing"
       },
-      "note": "Incident's Problem field linked to newly created problem"
+      "note": "sets the incident's Problem field to reference the new problem"
     },
     {
       "table": "incident",
@@ -47,18 +49,18 @@
       "expect": {
         "value": "Problem "
       },
-      "note": "Work note added with problem number"
+      "note": "adds a work note containing the new problem's number"
     },
     {
       "table": "problem",
       "locate": {
-        "byQuery": "short_description=Vendor issue: Test incident"
+        "byQuery": "short_description=Vendor issue: Printer not printing"
       },
       "field": "assigned_to",
       "expect": {
         "value": ""
       },
-      "note": "Problem assigned_to set to hardware group's manager when priority critical (empty here due to missing group)"
+      "note": "sets Assigned to manager of Hardware group when priority is Critical"
     }
   ],
   "cleanup": [
@@ -71,7 +73,7 @@
     {
       "table": "problem",
       "locate": {
-        "byQuery": "short_description=Vendor issue: Test incident"
+        "byQuery": "short_description=Vendor issue: Printer not printing"
       }
     }
   ]

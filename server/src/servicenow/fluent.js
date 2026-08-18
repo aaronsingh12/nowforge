@@ -837,7 +837,14 @@ export async function generate(spec, { intent, context, priorSource, priorError,
       `they are the stable identity of live records, and changing one creates a duplicate on the ` +
       `instance instead of updating it. Never invent a new __ID_n__ placeholder: an element that ` +
       `is genuinely NEW gets a freshly minted descriptive key instead (see HARD RULE 2). ` +
-      `Change only what the request now requires; if nothing changed, return it essentially unchanged.` +
+      `Change only what the request now requires; if nothing changed, return it essentially unchanged.\n` +
+      `EXCEPTION — the LIVE INSTANCE CONTEXT above is authoritative and current, and the deployed ` +
+      `source is not. Where the two disagree about a VALUE — a group or user name, a field name, a ` +
+      `choice value, a sys_id that no longer resolves — the live context wins and you must fix that ` +
+      `line. "Keep it verbatim" governs identity (the __ID_n__ placeholders) and the artifact's ` +
+      `name: values; it never protects a value the live context has just corrected. A lookUpRecord ` +
+      `whose query matches nothing ERRORS the flow on every run, so a stale name left in place is a ` +
+      `broken flow, not a preserved one.` +
       `\n\n--- DEPLOYED SOURCE ---\n${existingSan}`
     );
   } else if (intent?.name) {
