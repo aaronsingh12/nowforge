@@ -113,6 +113,13 @@ export async function aclReport(tableName, {
   includeInherited = true,
   readAcls = null,
   readRoles = null,
+  // "Is ANY ACL visible on this connection?" — the probe that separates a real
+  // absence from a refused read. Injectable so the offline suite can drive both.
+  probeAnyAcl = null,
+  // Operation/type name maps. Injectable for the same reason as everything else
+  // here: without it the offline suite silently makes two live requests per
+  // report and passes on the catch, which is a test that only looks offline.
+  referenceNames = referenceNameMap,
   schemaFor = getSchema,
   hierarchyFor = getTableHierarchy,
 } = {}) {
@@ -166,8 +173,9 @@ export async function aclReport(tableName, {
   if (restricted) visibility = 'error';
   else if (rows.length === 0) {
     let anyAclVisible = null;
+    const probe = probeAnyAcl || (async () => (await table.query(ACL_TABLE, { fields: 'sys_id', limit: 1, display: 'false' })).length > 0);
     try {
-      anyAclVisible = (await table.query(ACL_TABLE, { fields: 'sys_id', limit: 1, display: 'false' })).length > 0;
+      anyAclVisible = await probe();
     } catch (err) {
       failures.push({ table: ACL_TABLE, status: err.status || null, message: err.message });
       visibility = 'error';
@@ -196,8 +204,8 @@ export async function aclReport(tableName, {
   }
 
   const [opNames, typeNames] = await Promise.all([
-    referenceNameMap('sys_security_operation'),
-    referenceNameMap('sys_security_type'),
+    referenceNames('sys_security_operation'),
+    referenceNames('sys_security_type'),
   ]);
 
   // Roles, in chunks: an IN list of 300 sys_ids is a URL nobody's proxy likes.
