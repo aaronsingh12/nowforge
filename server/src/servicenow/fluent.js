@@ -645,6 +645,30 @@ async function extractIntent(spec) {
 }
 
 /**
+ * Proper nouns arrive as the spec phrased them ("the Hardware group"), and the
+ * intent extractor keeps or drops the trailing common noun unpredictably — the
+ * SAME spec yielded "Hardware" on one run and "Hardware group" on the next, and
+ * the second spelling matched nothing. Retry once without the trailing common
+ * noun before declaring a miss.
+ */
+const TRAILING_COMMON_NOUN = /\s+(group|groups|team|teams|queue|department|dept|user|users|table)$/i;
+
+export function stripTrailingCommonNoun(name) {
+  return String(name || '').trim().replace(TRAILING_COMMON_NOUN, '').trim();
+}
+
+async function resolveReference(tbl, name) {
+  const hits = await referenceLookup(tbl, name, 5);
+  if (hits.length) return { hits, used: name, corrected: false };
+  const trimmed = stripTrailingCommonNoun(name);
+  if (trimmed && trimmed.toLowerCase() !== String(name).trim().toLowerCase()) {
+    const retry = await referenceLookup(tbl, trimmed, 5);
+    if (retry.length) return { hits: retry, used: trimmed, corrected: true };
+  }
+  return { hits: [], used: name, corrected: false };
+}
+
+/**
  * Build the live-context block: real field names from the trigger table and
  * real sys_ids for every proper noun the spec named. The model is told to use
  * these and never to invent an identifier.
@@ -681,18 +705,20 @@ async function buildLiveContext(intent) {
   for (const l of intent.lookups || []) {
     if (!l?.table || !l?.name) continue;
     try {
-      const found = await referenceLookup(l.table, l.name, 5);
+      const attempt = await resolveReference(l.table, l.name);
+      const found = attempt.hits;
+      const searched = attempt.used;
       // referenceLookup orders by display field, so a LIKE search for "Network"
       // returns "ATF_TestGroup_Network" ahead of the exact "Network". Put exact
       // matches first: the model reads the list top-down, and enrichment below
       // describes the best candidate.
-      const wanted = String(l.name).trim().toLowerCase();
+      const wanted = String(searched).trim().toLowerCase();
       const hits = [...found].sort((a, b) => {
         const rank = (h) => (String(h.display).trim().toLowerCase() === wanted ? 0 : 1);
         return rank(a) - rank(b);
       });
       if (hits.length) {
-        resolved.push({ table: l.table, search: l.name, matches: hits });
+        resolved.push({ table: l.table, search: l.name, resolvedAs: searched, matches: hits });
         // Also surface a few related fields of the best match. Verification
         // assertions frequently name a dot-walked value ("the group's manager"),
         // and without this the model invents a plausible display name — which
@@ -721,11 +747,31 @@ async function buildLiveContext(intent) {
           );
         }
         parts.push(
-          `RESOLVED REFERENCE "${l.name}" on ${l.table}:\n${hits.map((h) => `  sys_id=${h.sys_id} display=${h.display}`).join('\n')}` +
+          `RESOLVED REFERENCE "${l.name}" on ${l.table}` +
+          (attempt.corrected
+            ? ` — nothing on this instance is named "${l.name}"; the real record is "${hits[0].display}", so write name=${hits[0].display} and never name=${l.name}`
+            : '') +
+          `:\n${hits.map((h) => `  sys_id=${h.sys_id} display=${h.display}`).join('\n')}` +
           (related.length ? `\n  fields on "${hits[0].display}" — use these exact display values, do not invent names:\n${related.join('\n')}` : '')
         );
       } else {
-        parts.push(`NO MATCH on ${l.table} for "${l.name}". Do NOT invent a sys_id — match by name in an encoded query instead (e.g. assignment_group.name=${l.name}).`);
+        // A lookUpRecord whose query matches nothing does NOT return empty — it
+        // ERRORS the whole flow at run time ("No record found in Look Up Record
+        // action"). The old guidance said "match by name instead" and handed
+        // back the very name that does not exist, so the flow failed on every
+        // execution while the build stayed green.
+        const sample = await referenceLookup(l.table, '', 8).catch(() => []);
+        parts.push(
+          `NO MATCH on ${l.table} for "${l.name}" — no record with that name exists on this instance, ` +
+          `under that name or any shortening of it. Do NOT write name=${l.name}, and do NOT invent a sys_id: ` +
+          `a lookUpRecord whose query matches nothing ERRORS the flow at run time, so that spelling would break ` +
+          `every execution.` +
+          (sample.length
+            ? ` Records that DO exist on ${l.table} include: ${sample.map((h) => `"${h.display}"`).join(', ')}. ` +
+              `If one of them is what the request meant, use that exact name.`
+            : '') +
+          ` If none of them is, leave the lookup out rather than guessing a name.`
+        );
       }
     } catch (err) {
       parts.push(`Reference lookup failed for "${l.name}" on ${l.table}: ${err.message}. Match by name in an encoded query instead.`);

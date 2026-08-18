@@ -23,7 +23,7 @@ Flow(
             { $id: Now.ID['cphv_hw_lookup'] },
             {
                 table: 'sys_user_group',
-                conditions: `name=Hardware`,
+                conditions: `name=Hardware group`,
             }
         )
 

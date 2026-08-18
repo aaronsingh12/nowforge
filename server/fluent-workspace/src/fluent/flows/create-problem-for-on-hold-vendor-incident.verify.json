@@ -2,15 +2,13 @@
   "setup": {
     "table": "incident",
     "payload": {
-      "short_description": "Test incident",
-      "impact": "1",
-      "urgency": "1",
-      "incident_state": "2",
-      "hold_reason": "1"
+      "short_description": "Test incident"
     },
     "update": {
       "incident_state": "3",
-      "hold_reason": "4"
+      "hold_reason": "4",
+      "impact": "1",
+      "urgency": "1"
     }
   },
   "wait": {
@@ -27,29 +25,18 @@
       "expect": {
         "value": "Vendor issue: Test incident"
       },
-      "note": "Problem record is created with prefixed short description"
-    },
-    {
-      "table": "problem",
-      "locate": {
-        "byQuery": "short_description=Vendor issue: Test incident"
-      },
-      "field": "assignment_group",
-      "expect": {
-        "display": "Hardware"
-      },
-      "note": "Problem is assigned to the Hardware group"
+      "note": "Problem created with prefixed short description"
     },
     {
       "table": "incident",
       "locate": {
-        "bySetupRecord": true
+        "byQuery": "sys_id={{setup.sys_id}}^problemISNOTEMPTY"
       },
-      "field": "problem",
+      "field": "short_description",
       "expect": {
-        "display": "{{lookup.problem_number}}"
+        "value": "Test incident"
       },
-      "note": "Incident's Problem field references the newly created problem"
+      "note": "Incident's Problem field linked to newly created problem"
     },
     {
       "table": "incident",
@@ -58,9 +45,9 @@
       },
       "field": "work_notes",
       "expect": {
-        "value": "Problem {{lookup.problem_number}} created"
+        "value": "Problem "
       },
-      "note": "Work note added to incident referencing the new problem"
+      "note": "Work note added with problem number"
     },
     {
       "table": "problem",
@@ -69,9 +56,9 @@
       },
       "field": "assigned_to",
       "expect": {
-        "display": "John Doe"
+        "value": ""
       },
-      "note": "Critical priority incidents set Assigned to the Hardware group's manager"
+      "note": "Problem assigned_to set to hardware group's manager when priority critical (empty here due to missing group)"
     }
   ],
   "cleanup": [

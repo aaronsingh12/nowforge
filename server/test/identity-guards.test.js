@@ -395,3 +395,17 @@ test('{{setup.sys_id}} is still allowed in a locator', async () => {
   assert.deepEqual(res.errors, []);
   assert.equal(res.ok, true);
 });
+
+test('a proper noun that keeps its trailing common noun still resolves', async () => {
+  const { stripTrailingCommonNoun } = await import('../src/servicenow/fluent.js');
+  // The intent extractor kept "group" on one run and dropped it on the next,
+  // for the SAME spec. The second spelling matched nothing, and the flow's
+  // lookUpRecord then ERRORed on every execution.
+  assert.equal(stripTrailingCommonNoun('Hardware group'), 'Hardware');
+  assert.equal(stripTrailingCommonNoun('Service Desk Team'), 'Service Desk');
+  assert.equal(stripTrailingCommonNoun('  Network  '), 'Network');
+  // A name whose last word is genuinely part of it is left alone by the retry:
+  // the literal lookup is always tried first, so this only ever adds a chance.
+  assert.equal(stripTrailingCommonNoun('Hardware'), 'Hardware');
+  assert.equal(stripTrailingCommonNoun(''), '');
+});
