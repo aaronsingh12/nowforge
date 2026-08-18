@@ -5,6 +5,8 @@ import { incidentsRouter } from './routes/incidents.js';
 import { catalogRouter } from './routes/catalog.js';
 import { flowsRouter } from './routes/flows.js';
 import { agentRouter } from './routes/agent.js';
+import { slaRouter } from './routes/sla.js';
+import { accessRouter } from './routes/access.js';
 import { SnowError } from './servicenow/client.js';
 import { getDb } from './memory/db.js';
 import { seedLedger } from './memory/facts.js';
@@ -18,6 +20,8 @@ app.use('/api/incidents', incidentsRouter);
 app.use('/api/catalog', catalogRouter);
 app.use('/api/flows', flowsRouter);
 app.use('/api/agent', agentRouter);
+app.use('/api/sla', slaRouter);
+app.use('/api/access', accessRouter);
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {

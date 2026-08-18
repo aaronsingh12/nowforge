@@ -18,6 +18,7 @@ import {
 } from './codegen-guards.js';
 import { getSchema, referenceLookup } from './schema.js';
 import { queryFieldRoots } from './conditions.js';
+import { assertTaskSla, findSla, SLA_TOLERANCE_DEFAULT_SEC } from './sla.js';
 import { factBlock } from '../memory/facts.js';
 import { flows } from './flows.js';
 import { table } from './client.js';
@@ -1486,7 +1487,15 @@ You are given the automation request, the compiled Fluent source of the flow, an
                  "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" },
                  "field": "<field name>",
                  "expect": { "value": "<raw value>" } | { "display": "<display value>" },
-                 "note": "<what promise of the request this proves>" } ],
+                 "note": "<what promise of the request this proves>" },
+
+               // SLA assertion — use ONLY when the request promises an SLA clock.
+               { "type": "sla",
+                 "sla": "<exact contract_sla name, or its sys_id>",
+                 "locate": { "bySetupRecord": true },
+                 "expect": { "attached": true, "stage": "in_progress", "breached": false,
+                             "plannedEndToleranceSec": 120 },
+                 "note": "<the promise this proves>" } ],
   "cleanup": [ { "table": "<table>", "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" } } ],
 
   // ONLY for a promised effect that CANNOT be observed on this instance. Omit when there are none.
@@ -1527,6 +1536,11 @@ RULES:
     Rule 9 still applies to BOTH halves: to reach Critical priority put {"impact":"1","urgency":"1"} in the half that needs it and never write "priority" directly.
     Rule 3 also applies to both: a field written by "update" cannot be asserted on the setup record.
     Use "update" ONLY for an updated trigger. For a created trigger, omit it — a created flow fires on the insert and an extra update proves nothing.
+11b. SLA ASSERTIONS. If the request promises that a record gets an SLA — a response or resolution clock, a breach time — assert it with { "type": "sla" } rather than by reading fields. It resolves the named contract_sla, finds the task_sla row that references THAT DEFINITION on the setup record, and checks the breach clock. Two rules:
+    - Name the definition exactly. Asserting "a task_sla exists" proves nothing: this instance attaches its own out-of-box SLAs to the same record, and one P1 incident was measured attaching THREE rows. The assertion is "this definition attached", never "an SLA attached".
+    - State expect.plannedEndToleranceSec yourself. The clock starts when the platform attaches the row, not when the runner posted the record, so the two differ by however long the insert took. 120 is a sensible value; a tolerance nobody can see in the spec is a number nobody can review.
+    Do NOT hand-assert planned_end_time with a field assertion. Those times are stored in UTC and rendered to the session timezone, and a literal comparison against either half fails a correct SLA.
+
 11. PAUSING FLOWS. If the source contains askForApproval (or any wait), the flow STOPS there and everything after it has not run yet. Split the assertions:
     - "assert" holds only what is true while paused. For an approval this MUST prove WHO the approval was raised for, not merely that one exists: assert the "approver" field of the sysapproval_approver row (locate by "document_id={{setup.sys_id}}") against the approver's display name from the live context. Asserting only state="requested" is too weak — an approval routed to the wrong person would pass it.
     - "resume" describes the state change that unblocks it: patch the sysapproval_approver row to {"state":"approved"}.
@@ -1567,6 +1581,56 @@ async function generateVerifySpec({ spec, source, context, flowName, promisedEff
     if (m) { try { return JSON.parse(m[0]); } catch { /* fall through */ } }
     return null;
   }
+}
+
+/**
+ * An SLA assertion's shape.
+ *
+ * Two of these rules exist because of measurements, not tidiness:
+ *
+ *   `sla` is mandatory because a task_sla row on the record proves nothing
+ *   about which SLA produced it — one P1 incident on this instance attached
+ *   three rows, ours and two out-of-box ones. An assertion that omits the
+ *   definition passes with the definition under test deleted.
+ *
+ *   the tolerance must be STATED because the clock starts when the platform
+ *   attaches the row, not when the runner posted the record. A tolerance
+ *   defaulted inside the runner is a number that never appears in the artifact
+ *   a human reviews.
+ */
+export function validateSlaAssertion(a, at = 'assert[0]') {
+  const errors = [];
+  if (!a?.sla || typeof a.sla !== 'string' || !a.sla.trim()) {
+    errors.push(
+      `${at}.sla is required — name the contract_sla definition exactly (or give its sys_id). ` +
+      `Asserting that "a task_sla attached" proves nothing: this instance attaches its own out-of-box ` +
+      `SLAs to the same record, so such an assertion passes even with the definition under test deleted.`
+    );
+  }
+  if (!a?.locate?.bySetupRecord && !a?.locate?.byQuery) {
+    errors.push(`${at}.locate needs bySetupRecord or byQuery — the task the SLA is expected to attach to.`);
+  }
+  if (a?.field) {
+    errors.push(
+      `${at} is an SLA assertion and must not carry a "field". SLA times are stored in UTC and rendered to ` +
+      `the session timezone, so a literal field comparison against planned_end_time fails a correct SLA. ` +
+      `The clock is checked by the assertion itself.`
+    );
+  }
+  const tol = a?.expect?.plannedEndToleranceSec;
+  if (a?.expect?.attached !== false) {
+    if (tol === undefined) {
+      errors.push(
+        `${at}.expect.plannedEndToleranceSec is required. The SLA clock starts when the platform attaches the ` +
+        `row, not when the setup record was posted, so the two differ by the insert's own latency. State the ` +
+        `tolerance in the spec (${SLA_TOLERANCE_DEFAULT_SEC} is a sensible value) rather than leaving a ` +
+        `reviewer to guess what slack the runner allows.`
+      );
+    } else if (!Number.isFinite(Number(tol)) || Number(tol) < 0) {
+      errors.push(`${at}.expect.plannedEndToleranceSec must be a non-negative number of seconds, not "${tol}".`);
+    }
+  }
+  return errors;
 }
 
 /**
@@ -1645,6 +1709,16 @@ export function validateVerifySpec(v, { promisedEffects = [], verifiedExcuses = 
     }
     v.assert.forEach((a, i) => {
       const at = `assert[${i}]`;
+
+      // An SLA assertion reads a clock, not a field, so it has its own shape.
+      // Validated here rather than trusted to the prompt for the same reason
+      // every other rule in this function is: the failure it prevents (an
+      // assertion that passes because SOME SLA attached) reports green.
+      if (a?.type === 'sla') {
+        errors.push(...validateSlaAssertion(a, at));
+        return;
+      }
+
       if (!a?.field) errors.push(`${at}.field is required.`);
       if (!a?.table) errors.push(`${at}.table is required.`);
       if (!a?.locate?.bySetupRecord && !a?.locate?.byQuery) {
@@ -1761,6 +1835,10 @@ export async function checkVerifySpecFields(v, { schemaFor = getSchema } = {}) {
   for (const [label, list] of groups) {
     if (!Array.isArray(list)) continue;
     for (const [i, a] of list.entries()) {
+      // An SLA assertion names a definition, not a field on a table, so the
+      // field-existence guard has nothing to check and must not invent a
+      // complaint about a missing `table`.
+      if (a?.type === 'sla') continue;
       const t = a?.table;
       if (!t) continue;
       const fields = await fieldsOf(t);
@@ -1815,6 +1893,7 @@ export async function buildRejectionEvidence(v, { schemaFor = getSchema } = {}) 
       for (const a of list) {
         if (a?.table !== t) continue;
         if (a.field) named.add(a.field);
+        if (a?.type === 'sla') continue;
         for (const root of queryFieldRoots(a?.locate?.byQuery)) named.add(root);
       }
     }
@@ -2087,6 +2166,45 @@ async function locate(loc, tableName, ctx) {
 }
 
 /**
+ * Run one { "type": "sla" } assertion.
+ *
+ * The definition is resolved off the instance rather than taken from the spec,
+ * so a spec naming an SLA that does not exist fails loudly here instead of
+ * quietly asserting nothing. The clock arithmetic — including the UTC parsing
+ * that trap #UTC is about — lives in sla.js and is shared with the SLA page's
+ * own verification, so there is one implementation of "is this breach clock
+ * sane" rather than two that can drift.
+ */
+async function runSlaAssertion(a, { setupSysId, phase }) {
+  const shell = { phase, pass: false, type: 'sla', table: 'task_sla', field: `sla:${a.sla}`, note: a.note };
+  let definition;
+  try {
+    definition = await findSla(a.sla);
+  } catch (err) {
+    return { assertion: { ...shell, reason: `The SLA definition could not be resolved: ${err.message}` } };
+  }
+  const taskSysId = await locate(a.locate, definition.collection, { setupSysId });
+  if (!taskSysId) {
+    return { assertion: { ...shell, reason: 'No record matched the locator, so there is nothing for the SLA to attach to.' } };
+  }
+  const result = await assertTaskSla({ definition, taskSysId, expect: a.expect || {} });
+  return {
+    assertion: {
+      ...shell,
+      pass: result.pass,
+      sys_id: taskSysId,
+      sla: result.sla,
+      attached: result.attached,
+      others: result.others,
+      task_sla: result.task_sla,
+      clock: result.clock,
+      checks: result.checks,
+      reason: result.reason,
+    },
+  };
+}
+
+/**
  * Execute a verification spec: setup → wait → assert → cleanup.
  * Cleanup runs in `finally`, so a failed assertion never leaves test data behind.
  * A wait timeout is a FAIL carrying the last observed context state, not a hang.
@@ -2207,6 +2325,12 @@ export async function verify(name, emit = () => {}) {
     // --- assert ---
     const runAssertions = async (list, phase) => {
       for (const a of list) {
+        if (a?.type === 'sla') {
+          const outcome = await runSlaAssertion(a, { setupSysId, phase });
+          assertions.push(outcome.assertion);
+          emit({ type: 'verify_assert', phase, pass: outcome.assertion.pass, field: `sla:${a.sla}`, reason: outcome.assertion.reason });
+          continue;
+        }
         const target = await locate(a.locate, a.table, { setupSysId });
         if (!target) {
           assertions.push({ phase, pass: false, table: a.table, field: a.field, note: a.note, reason: 'No record matched the locator.' });
