@@ -226,17 +226,44 @@ export async function backfillEmbeddings({ limit = 128 } = {}) {
  * Search
  * ------------------------------------------------------------------ */
 
+/**
+ * Words that carry no retrieval signal. A natural-language question is mostly
+ * these — "what did we decide about vendor-hold incidents?" is 5 stopwords and
+ * 3 real terms — and leaving them in lets a session match on "we" and "about".
+ * Measured: with them included, the wrong session won the acceptance query.
+ */
+const STOPWORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'than', 'that', 'this', 'these', 'those',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am', 'do', 'does', 'did', 'doing', 'done',
+  'have', 'has', 'had', 'having', 'will', 'would', 'shall', 'should', 'can', 'could', 'may',
+  'might', 'must', 'i', 'we', 'you', 'he', 'she', 'it', 'they', 'me', 'us', 'him', 'her', 'them',
+  'my', 'our', 'your', 'his', 'its', 'their', 'what', 'which', 'who', 'whom', 'whose', 'when',
+  'where', 'why', 'how', 'about', 'for', 'with', 'from', 'into', 'onto', 'to', 'of', 'in', 'on',
+  'at', 'by', 'as', 'so', 'up', 'out', 'over', 'under', 'again', 'there', 'here', 'all', 'any',
+  'some', 'no', 'not', 'only', 'own', 'same', 'too', 'very', 'just', 'now', 'also', 'please',
+  'tell', 'show', 'give', 'get', 'make', 'let',
+]);
+
 /** FTS5 MATCH syntax is not free text — quote every term so a query cannot throw. */
-function toFtsQuery(q) {
-  const terms = String(q || '')
+export function toFtsQuery(q) {
+  const all = String(q || '')
     .toLowerCase()
     .split(/[^a-z0-9_]+/i)
     .filter((t) => t.length > 1);
+  // Keep the content words; fall back to the raw terms if the question was
+  // nothing BUT stopwords, so a query still does something rather than nothing.
+  const content = all.filter((t) => !STOPWORDS.has(t));
+  const terms = content.length ? content : all;
   if (!terms.length) return null;
   return terms.map((t) => `"${t}"`).join(' OR ');
 }
 
-function keywordSearch(query, { limit, sessionId }) {
+/**
+ * The degraded path, exported so it can be tested deterministically. Whether
+ * `search()` reaches it depends on whether an embedding model happens to be
+ * pulled on this machine, which is not something a test should depend on.
+ */
+export function keywordSearch(query, { limit = 8, sessionId = null } = {}) {
   const fts = toFtsQuery(query);
   if (!fts) return [];
   const db = getDb();
@@ -250,8 +277,15 @@ function keywordSearch(query, { limit, sessionId }) {
      LIMIT ?`;
   const args = sessionId ? [fts, sessionId, limit] : [fts, limit];
   try {
-    // bm25 is "lower is better"; normalise so both modes report higher-is-better.
-    return db.prepare(sql).all(...args).map((r) => ({ ...r, score: 1 / (1 + Math.abs(r.score)) }));
+    // SQLite's bm25() returns a NEGATIVE number, and a better match is MORE
+    // negative. Negating it is the whole conversion to higher-is-better.
+    //
+    // The first version used `1 / (1 + Math.abs(score))`, which inverted the
+    // ranking: the best match (most negative) came out with the LOWEST score,
+    // so searchSessions — which sorts descending — returned the worst matches
+    // first. The acceptance query put the right session dead last. `Math.abs`
+    // on a value whose sign carries the meaning is how that happened.
+    return db.prepare(sql).all(...args).map((r) => ({ ...r, score: -r.score }));
   } catch {
     return [];
   }

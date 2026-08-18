@@ -386,27 +386,41 @@ test('A-5: cosine behaves, including the degenerate cases', () => {
   assert.equal(cosine([1, 0], [1, 0, 0]), 0, 'a dimension mismatch scores 0, never a partial match');
 });
 
-test('A-5: the keyword fallback finds the right session with no embedding model at all', async () => {
-  const { search } = await import('../src/memory/recall.js');
+test('A-5: the keyword fallback finds the right session, with no embeddings involved', async () => {
+  // Calls the degraded path DIRECTLY rather than going through search(), which
+  // would branch on whether an embedding model happens to be pulled on this
+  // machine. A test that changes meaning when someone runs `ollama pull` is not
+  // testing the fallback — it is testing the environment.
+  const { keywordSearch } = await import('../src/memory/recall.js');
   const vendor = 'sess-recall-vendor';
   const laptop = 'sess-recall-laptop';
   createSession({ id: vendor });
   createSession({ id: laptop });
 
-  const s1 = appendMessage(vendor, { role: 'user', text: 'For vendor-hold incidents we decided to create a Problem and prefix it with "Vendor issue: "' });
-  indexMessage(vendor, s1, 'user', 'For vendor-hold incidents we decided to create a Problem and prefix it with "Vendor issue: "');
-  const s2 = appendMessage(laptop, { role: 'user', text: 'Build a laptop request catalog item with six variables' });
-  indexMessage(laptop, s2, 'user', 'Build a laptop request catalog item with six variables');
+  const v = 'For vendor-hold incidents we decided to create a Problem and prefix it with "Vendor issue: "';
+  const l = 'Build a laptop request catalog item with six variables';
+  indexMessage(vendor, appendMessage(vendor, { role: 'user', text: v }), 'user', v);
+  indexMessage(laptop, appendMessage(laptop, { role: 'user', text: l }), 'user', l);
 
-  const res = await search('what did we decide about vendor-hold incidents');
-  // This machine has no embedding model pulled, so this is the degraded path —
-  // and it must SAY it is degraded rather than passing keyword hits off as
-  // semantic ones.
-  assert.equal(res.mode, 'keyword');
-  assert.equal(res.degraded, true);
-  assert.match(res.command, /ollama pull/);
-  assert.ok(res.hits.length > 0, 'the fallback must still find something');
-  assert.equal(res.hits[0].session, vendor, 'and it must find the RIGHT session');
+  const hits = keywordSearch('what did we decide about vendor-hold incidents');
+  assert.ok(hits.length > 0, 'the fallback must still find something');
+  assert.equal(hits[0].session, vendor, 'and it must find the RIGHT session');
+});
+
+test('A-5: search always states its mode, and a degraded one carries the fix', async () => {
+  const { search } = await import('../src/memory/recall.js');
+  const res = await search('vendor-hold incidents');
+  // Either mode is legitimate; silently passing keyword hits off as semantic
+  // ones is not. Whichever ran, it must say which.
+  assert.ok(['semantic', 'keyword'].includes(res.mode));
+  if (res.mode === 'keyword') {
+    assert.equal(res.degraded, true);
+    assert.match(res.command, /ollama pull/);
+  } else {
+    assert.equal(res.degraded, false);
+    assert.ok(res.model, 'a semantic result must name the model that produced it');
+  }
+  assert.ok(Array.isArray(res.hits));
 });
 
 test('A-5: an unparseable query degrades to no hits rather than throwing', async () => {
@@ -426,4 +440,57 @@ test('A-5: the FTS index tracks deletes, so a removed session stops being findab
   deleteSession(id);
   const after = await search('zzyzx');
   assert.equal(after.hits.filter((h) => h.session === id).length, 0, 'a deleted session must leave no searchable residue');
+});
+
+test('A-5: the acceptance query ranks the RIGHT session first, not last', async () => {
+  // This is the bug the live acceptance run caught, pinned so it cannot return.
+  //
+  // SQLite's bm25() returns a NEGATIVE score where a better match is MORE
+  // negative. The first implementation normalised with `1 / (1 + Math.abs(s))`,
+  // which inverted the ordering — the best match came out with the lowest
+  // score and searchSessions, sorting descending, returned the worst first.
+  // The acceptance query put the correct session dead LAST out of five.
+  const { searchSessions } = await import('../src/memory/recall.js');
+
+  const topics = [
+    ['acc-vendor', 'When an incident goes On Hold awaiting a vendor we create a Problem and prefix it with "Vendor issue: ", and we do not link it back'],
+    ['acc-laptop', 'We built the Laptop Request catalog item with six variables and decided the manager approval variable is mandatory'],
+    ['acc-digest', 'The Daily P1 Digest is a scheduled flow at 07:00 IST stored as 01:30 UTC and cannot be verified by firing it'],
+  ];
+  for (const [id, text] of topics) {
+    createSession({ id });
+    const seq = appendMessage(id, { role: 'user', text });
+    indexMessage(id, seq, 'user', text);
+  }
+
+  const res = await searchSessions('what did we decide about vendor-hold incidents?');
+  assert.ok(res.sessions.length > 0, 'the query must find something');
+
+  // Scoped to this test's own three sessions. Other tests in this file seed
+  // conversations that legitimately match the same query — asserting on the
+  // global winner would make this test depend on their contents.
+  const mine = res.sessions.filter((s) => s.id.startsWith('acc-'));
+  assert.ok(mine.length >= 2, 'the query must reach more than one of them, or ranking proves nothing');
+  assert.equal(mine[0].id, 'acc-vendor', `wrong session ranked first: ${mine[0].id}`);
+
+  // And the ordering must be monotonically decreasing, higher-is-better. This
+  // is the assertion the inverted normalisation actually broke.
+  for (let i = 1; i < res.sessions.length; i++) {
+    assert.ok(res.sessions[i - 1].score >= res.sessions[i].score, 'scores must be sorted best-first');
+  }
+});
+
+test('A-5: stopwords are dropped, so a question matches on its content words', async () => {
+  const { toFtsQuery } = await import('../src/memory/recall.js');
+  const q = toFtsQuery('what did we decide about vendor-hold incidents?');
+  assert.ok(!/"we"|"what"|"did"|"about"/.test(q), `stopwords survived: ${q}`);
+  assert.match(q, /"vendor"/);
+  assert.match(q, /"hold"/);
+  assert.match(q, /"incidents"/);
+});
+
+test('A-5: a question made only of stopwords still produces a query rather than nothing', async () => {
+  const { toFtsQuery } = await import('../src/memory/recall.js');
+  const q = toFtsQuery('what did we do');
+  assert.ok(q && q.includes('"what"'), 'falls back to the raw terms rather than returning null');
 });
