@@ -1299,7 +1299,9 @@ You are given the automation request, the compiled Fluent source of the flow, an
 
 {
   "setup":   { "table": "<table the flow triggers on>",
-               "payload": { "<field>": "<value>", ... } },
+               "payload": { "<field>": "<value>", ... },
+               // ONLY for a record-UPDATED trigger. Omit entirely otherwise.
+               "update":  { "<field>": "<value>", ... } },
   "wait":    { "flowName": "<exact flow name>", "timeoutSec": 90 },
   "assert":  [ { "table": "<table to read>",
                  "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" },
@@ -1329,6 +1331,12 @@ RULES:
 8. Keep setup.payload minimal: only what the trigger condition requires, plus a short_description so the record is identifiable.
 9. DERIVED FIELDS — critical. On task tables (incident, problem, change_request, sc_task) "priority" is CALCULATED from "impact" and "urgency". Writing priority directly is silently overwritten on insert: {"priority":"1"} lands as 4 - Low. To create a P1 record set {"impact":"1","urgency":"1"} and do NOT set priority at all. The same applies to any field the platform computes — set the inputs, not the result.
 10. setup.payload must make the trigger condition TRUE after the platform's own rules run, not merely look like it. If the trigger tests a calculated field, drive it through the fields it is calculated from.
+10b. RECORD-UPDATED TRIGGERS. Read the trigger out of the source. If it is trigger.record.updated (not .created / .createdOrUpdated), an insert can NEVER fire it — the flow only runs on a transition. Split setup in two:
+    - "payload" creates the record OUTSIDE the trigger condition (do not satisfy the condition here);
+    - "update" is the patch that moves it INTO the trigger condition, and that is what fires the flow.
+    Rule 9 still applies to BOTH halves: to reach Critical priority put {"impact":"1","urgency":"1"} in the half that needs it and never write "priority" directly.
+    Rule 3 also applies to both: a field written by "update" cannot be asserted on the setup record.
+    Use "update" ONLY for an updated trigger. For a created trigger, omit it — a created flow fires on the insert and an extra update proves nothing.
 11. PAUSING FLOWS. If the source contains askForApproval (or any wait), the flow STOPS there and everything after it has not run yet. Split the assertions:
     - "assert" holds only what is true while paused. For an approval this MUST prove WHO the approval was raised for, not merely that one exists: assert the "approver" field of the sysapproval_approver row (locate by "document_id={{setup.sys_id}}") against the approver's display name from the live context. Asserting only state="requested" is too weak — an approval routed to the wrong person would pass it.
     - "resume" describes the state change that unblocks it: patch the sysapproval_approver row to {"state":"approved"}.
@@ -1375,6 +1383,15 @@ export function validateVerifySpec(v, { promisedEffects = [] } = {}) {
   if (!payload || typeof payload !== 'object' || !Object.keys(payload).length) {
     errors.push('setup.payload must be a non-empty object.');
   }
+  // Optional second setup step: the transition that fires a record-UPDATED
+  // trigger. Fields it writes count as setup-written for the anti-trivial rule.
+  const update = v.setup?.update;
+  if (update !== undefined) {
+    if (!update || typeof update !== 'object' || Array.isArray(update) || !Object.keys(update).length) {
+      errors.push('setup.update, when present, must be a non-empty object of field/value pairs.');
+    }
+  }
+  const setupWrites = { ...(payload && typeof payload === 'object' ? payload : {}), ...(update && typeof update === 'object' ? update : {}) };
   if (!v.wait?.flowName) errors.push('wait.flowName is required.');
 
   const afterResume = Array.isArray(v.assertAfterResume) ? v.assertAfterResume : [];
@@ -1410,12 +1427,14 @@ export function validateVerifySpec(v, { promisedEffects = [] } = {}) {
       const hasExpect = a?.expect && (a.expect.value !== undefined || a.expect.display !== undefined);
       if (!hasExpect) errors.push(`${at}.expect needs a value or display.`);
 
-      // The anti-trivial rule.
-      if (a?.locate?.bySetupRecord && a?.table === setupTable && payload && a.field in payload) {
+      // The anti-trivial rule — setup.update writes count too, or a spec could
+      // smuggle the effect it claims to prove into the transition step.
+      if (a?.locate?.bySetupRecord && a?.table === setupTable && a.field in setupWrites) {
+        const via = update && a.field in update ? 'setup.update' : 'setup.payload';
         errors.push(
-          `${at} asserts "${a.field}" on the setup record, but setup.payload already sets "${a.field}" ` +
-          `to "${payload[a.field]}". That assertion is true regardless of what the flow does. ` +
-          `Either remove "${a.field}" from setup.payload (if the flow is supposed to set it) or assert a different effect.`
+          `${at} asserts "${a.field}" on the setup record, but ${via} already sets "${a.field}" ` +
+          `to "${setupWrites[a.field]}". That assertion is true regardless of what the flow does. ` +
+          `Either remove "${a.field}" from ${via} (if the flow is supposed to set it) or assert a different effect.`
         );
       }
     });
@@ -1518,6 +1537,7 @@ export async function verify(name, emit = () => {}) {
   const created = [];
   let setupSysId = null;
   let setupLabel = null;
+  let setupTransition = null;
   let execution = null;
   const assertions = [];
 
@@ -1528,6 +1548,33 @@ export async function verify(name, emit = () => {}) {
     setupLabel = rec.number?.value ?? rec.name?.value ?? setupSysId;
     created.push({ table: spec.setup.table, sys_id: setupSysId });
     emit({ type: 'verify_setup_done', record: setupLabel, sys_id: setupSysId });
+
+    // A record-UPDATED trigger cannot be reached by an insert. `setup.update`
+    // is a second step that drives the record INTO the trigger condition, so
+    // the flow fires on the transition the request actually described. Creating
+    // a record that already satisfies the condition would prove nothing: the
+    // flow would never run, and the assertions would fail a correct flow.
+    if (spec.setup.update && Object.keys(spec.setup.update).length) {
+      // Let the insert's own business rules settle before the transition, so
+      // the update is a distinct operation rather than part of the insert.
+      await new Promise((r) => setTimeout(r, 2000));
+      emit({ type: 'verify_setup_update', patch: spec.setup.update, sys_id: setupSysId });
+      await table.update(spec.setup.table, setupSysId, spec.setup.update);
+      const afterUpdate = await table.get(spec.setup.table, setupSysId).catch(() => null);
+      setupTransition = {
+        patch: spec.setup.update,
+        // Read back what the platform actually computed — a calculated field
+        // like priority lands from impact+urgency, not from what we asked for.
+        observed: Object.fromEntries(
+          [...Object.keys(spec.setup.update), 'priority'].map((f) => {
+            const cell = afterUpdate?.[f];
+            const dv = cell && typeof cell === 'object' ? (cell.display_value ?? cell.value) : cell;
+            return [f, dv ?? null];
+          })
+        ),
+      };
+      emit({ type: 'verify_setup_updated', observed: setupTransition.observed });
+    }
 
     // --- wait ---
     emit({ type: 'verify_waiting', timeoutSec, flowName: spec.wait.flowName });
@@ -1558,7 +1605,7 @@ export async function verify(name, emit = () => {}) {
       return {
         ok: false, available: true, stage: 'wait',
         message: `No sys_flow_context appeared for ${setupLabel} within ${timeoutSec}s. The flow did not fire — its trigger condition probably does not match the setup record.`,
-        setup: { record: setupLabel, sys_id: setupSysId, payload: spec.setup.payload },
+        setup: { record: setupLabel, sys_id: setupSysId, payload: spec.setup.payload, transition: setupTransition },
         assertions: [], execution: null,
       };
     }
@@ -1566,14 +1613,14 @@ export async function verify(name, emit = () => {}) {
       return {
         ok: false, available: true, stage: 'wait',
         message: `The flow ran but finished in state ${execution.state}.`,
-        setup: { record: setupLabel, sys_id: setupSysId }, execution, assertions: [],
+        setup: { record: setupLabel, sys_id: setupSysId, transition: setupTransition }, execution, assertions: [],
       };
     }
     if (![...TERMINAL_OK, ...SETTLED_PAUSED].includes(execution.state)) {
       return {
         ok: false, available: true, stage: 'wait',
         message: `The flow did not settle within ${timeoutSec}s (last state ${execution.state}).`,
-        setup: { record: setupLabel, sys_id: setupSysId }, execution, assertions: [],
+        setup: { record: setupLabel, sys_id: setupSysId, transition: setupTransition }, execution, assertions: [],
       };
     }
 
@@ -1639,7 +1686,7 @@ export async function verify(name, emit = () => {}) {
       ok: assertions.length > 0 && passed === assertions.length,
       available: true,
       stage: 'assert',
-      setup: { record: setupLabel, sys_id: setupSysId, payload: spec.setup.payload },
+      setup: { record: setupLabel, sys_id: setupSysId, payload: spec.setup.payload, transition: setupTransition },
       execution,
       assertions,
       summary: `${passed}/${assertions.length} assertions passed`,

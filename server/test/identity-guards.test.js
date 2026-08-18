@@ -286,3 +286,70 @@ test('cheatsheet example keys are neutralised before the model sees them', () =>
   assert.ok(out.includes("Now.ID['ex_nm_send_email']"));
   assert.equal(sanitizeExampleIds(out), out, 'already-prefixed keys are left alone');
 });
+
+/* ------------------------------------------------------------------ *
+ * Verification runner — create-then-update setups
+ *
+ * A record-UPDATED trigger cannot be reached by an insert, so the runner
+ * needs a second setup step. These prove the spec-level contract; the live
+ * run is what proves the runner end to end.
+ * ------------------------------------------------------------------ */
+
+const UPDATE_TRIGGERED_SPEC = {
+  setup: {
+    table: 'incident',
+    payload: { short_description: 'Vendor hold test', impact: '1', urgency: '1' },
+    update: { state: '3', hold_reason: '4' },
+  },
+  wait: { flowName: 'Vendor Hold Problem', timeoutSec: 120 },
+  assert: [
+    { table: 'problem', locate: { byQuery: 'parent={{setup.sys_id}}' }, field: 'short_description',
+      expect: { value: 'Vendor issue: Vendor hold test' }, note: 'problem created with the prefix' },
+    { table: 'incident', locate: { bySetupRecord: true }, field: 'work_notes',
+      expect: { value: 'PRB' }, note: 'work note carries the problem number' },
+  ],
+  cleanup: [{ table: 'incident', locate: { bySetupRecord: true } }],
+};
+
+test('a create-then-update setup is accepted', async () => {
+  const { validateVerifySpec } = await import('../src/servicenow/fluent.js');
+  const res = validateVerifySpec(UPDATE_TRIGGERED_SPEC);
+  assert.deepEqual(res.errors, []);
+  assert.equal(res.ok, true);
+});
+
+test('setup.update must be a non-empty object when present', async () => {
+  const { validateVerifySpec } = await import('../src/servicenow/fluent.js');
+  for (const bad of [{}, [], 'state=3', null]) {
+    const res = validateVerifySpec({ ...UPDATE_TRIGGERED_SPEC, setup: { ...UPDATE_TRIGGERED_SPEC.setup, update: bad } });
+    assert.equal(res.ok, false, `${JSON.stringify(bad)} must be rejected`);
+    assert.ok(res.errors.some((e) => e.includes('setup.update')), res.errors.join('\n'));
+  }
+});
+
+test('the anti-trivial rule covers fields written by setup.update, not just payload', async () => {
+  const { validateVerifySpec } = await import('../src/servicenow/fluent.js');
+  // Asserting `state` is trivially true: setup.update itself set it to 3.
+  const smuggled = {
+    ...UPDATE_TRIGGERED_SPEC,
+    assert: [
+      ...UPDATE_TRIGGERED_SPEC.assert,
+      { table: 'incident', locate: { bySetupRecord: true }, field: 'state',
+        expect: { value: '3' }, note: 'incident is on hold' },
+    ],
+  };
+  const res = validateVerifySpec(smuggled);
+  assert.equal(res.ok, false);
+  const e = res.errors.find((x) => x.includes('"state"'));
+  assert.ok(e, res.errors.join('\n'));
+  assert.match(e, /setup\.update already sets "state"/, 'names the step that smuggled it in');
+  assert.match(e, /true regardless of what the flow does/);
+});
+
+test('omitting setup.update stays valid — created triggers are unaffected', async () => {
+  const { validateVerifySpec } = await import('../src/servicenow/fluent.js');
+  const { update, ...payloadOnly } = UPDATE_TRIGGERED_SPEC.setup;
+  const res = validateVerifySpec({ ...UPDATE_TRIGGERED_SPEC, setup: payloadOnly });
+  assert.deepEqual(res.errors, []);
+  assert.equal(res.ok, true);
+});

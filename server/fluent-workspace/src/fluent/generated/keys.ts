@@ -5,6 +5,10 @@ declare global {
         namespace Internal {
             interface Keys extends KeysRegistry {
                 explicit: {
+                    add_non_critical_work_note: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'e5fe8f73bf97433b928b10187334ccf3'
+                    }
                     add_work_note: {
                         table: 'sys_hub_action_instance_v2'
                         id: '10c0ec9dcf0c486ab1e40f73c0edbe8d'
@@ -53,6 +57,22 @@ declare global {
                         id: 'b2f18c963fd244f6a02895a7a6359536'
                         deleted: false
                     }
+                    demo_incident_created_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '0fe23bcad3a64045bafebc46f7472bb8'
+                    }
+                    demo_incident_flow_main: {
+                        table: 'sys_hub_flow'
+                        id: 'ba6a8fa5c6674115bb3b405498bad6c4'
+                    }
+                    demo_incident_priority_notification_flow: {
+                        table: 'sys_hub_flow'
+                        id: 'a61c24ed9dde42c09544c621983fca00'
+                    }
+                    demo_incident_priority_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: 'c0c731a08daa44bb91c887e4c99bfb30'
+                    }
                     dpd_any_found: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '0cb679e794b2426190e6e12134d295c5'
@@ -92,6 +112,14 @@ declare global {
                         table: 'sys_hub_trigger_instance_v2'
                         id: 'f08c35b8fb92486194178b5f8be6caab'
                         deleted: false
+                    }
+                    else_non_critical: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'e8af78ee1b18483b8146ecec232c8d55'
+                    }
+                    email_to_incident_manager: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '683885121fec49d39198132759a335ae'
                     }
                     escalate_high_priority_problem: {
                         table: 'sys_hub_flow'
@@ -201,6 +229,50 @@ declare global {
                         id: '63969ce6be924657b40ec4ea81df9652'
                         deleted: true
                     }
+                    handle_high_priority_incident: {
+                        table: 'sys_hub_flow'
+                        id: '1dea409991ee44a3ba375ac6ebbdeb4d'
+                    }
+                    handle_high_priority_incident_flow: {
+                        table: 'sys_hub_flow'
+                        id: '15c78bbff94945879529d7b3ae065403'
+                        deleted: true
+                    }
+                    hhpi_assign_manager: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '74ba61aa76c94188ae4f0979b354eb5e'
+                        deleted: true
+                    }
+                    hhpi_if_unassigned: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '6828d9e241ff4b20ab56270e9b0dcb83'
+                        deleted: true
+                    }
+                    hhpi_log: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'b402da1b54a54c2da2e6f379f3909cd5'
+                        deleted: true
+                    }
+                    hhpi_lookup_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '35cd491174d44065a044bc86edd94d21'
+                        deleted: true
+                    }
+                    hhpi_send_email: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '91aca5fc1f5d448d9319553ef8754830'
+                        deleted: true
+                    }
+                    hhpi_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: 'f36f3e3e355a4c08b51e0324dd461d90'
+                        deleted: true
+                    }
+                    hhpi_update_work_notes: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '5355a1e3e2194efbbb45db9ffaebc955'
+                        deleted: true
+                    }
                     high_risk_change_approval_ask: {
                         table: 'sys_hub_action_instance_v2'
                         id: '7a2a72661556428c8ac096f3e93bfc83'
@@ -231,6 +303,64 @@ declare global {
                         id: '85a7c398dfc34ec68575e54754c2328f'
                         deleted: true
                     }
+                    hp_add_work_note: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'c194dc95dbfa415f800afa580bede0ab'
+                        deleted: true
+                    }
+                    hp_assign_manager: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '25101a2cb92b4fc2a153108aa56eaa66'
+                        deleted: true
+                    }
+                    hp_if_unassigned: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '0d1279e16a7549cabadaa6012251e531'
+                        deleted: true
+                    }
+                    hp_inc_created: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: 'b71bf136d0664ee0ab4aa54bae868c96'
+                        deleted: true
+                    }
+                    hp_lookup_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '21eb3fecbe674526945afe0380487cef'
+                        deleted: true
+                    }
+                    hp_send_email: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '546f7add4e1e4514bd72030eb131a95a'
+                        deleted: true
+                    }
+                    hpi_assign_manager: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '040255d5ed284d1591115ee6903c5275'
+                    }
+                    hpi_if_high_priority: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'e6f14d1c37b24156ae4c1e54df859cc5'
+                    }
+                    hpi_if_unassigned: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'e4b440e2c90e4aa4a228c05a9534687e'
+                    }
+                    hpi_lookup_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '2d74dff9ea7040f19359d55c57362a56'
+                    }
+                    hpi_send_email: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '3a1e89d553734258869f96fcf6e2c4fd'
+                    }
+                    hpi_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '605ce77aea4f4fc5a7e06117920dad23'
+                    }
+                    hpi_update_work_note: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '8a12e793640f4896bf5c917ff0f00c2a'
+                    }
                     hrc_ask_approval: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'c3f8204bbaec45a6a142e29cfd35df4c'
@@ -255,6 +385,10 @@ declare global {
                         table: 'sys_hub_action_instance_v2'
                         id: '1a9dfa4ff6254075906effaf6a7df5d2'
                     }
+                    if_priority_critical: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '3f6799c741524cc3afadf8bbd2a3e52d'
+                    }
                     if_unassigned: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '2adf0780a1654dbfb4c7ab9d55eec34a'
@@ -269,6 +403,10 @@ declare global {
                         table: 'sys_hub_action_instance_v2'
                         id: '382415adc84a4365bcd57a5259be5f3f'
                         deleted: true
+                    }
+                    lookup_incident_manager_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '2825f82d5d35416fa3221c3101eed8de'
                     }
                     lookup_network_group: {
                         table: 'sys_hub_action_instance_v2'
@@ -332,6 +470,30 @@ declare global {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '72534f405427486587afd43a4b08c12f'
                     }
+                    notif_p1_inc_mgr_add_note: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'c34c32910f4e4a9ea6022633e8619457'
+                    }
+                    notif_p1_inc_mgr_cond_manager: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '72423bed276849b692a6e8e8fb3c7c4a'
+                    }
+                    notif_p1_inc_mgr_flow: {
+                        table: 'sys_hub_flow'
+                        id: '0f1e80df2b6e4ecdbc221d0262c231ad'
+                    }
+                    notif_p1_inc_mgr_no_manager: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '6fed008077784aeeb6cf52c33ca66759'
+                    }
+                    notif_p1_inc_mgr_send_email: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '4109526633904f62a1182c8360b99462'
+                    }
+                    notif_p1_inc_mgr_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '8f7a60ffb03c4bf3866bc7355cf470a3'
+                    }
                     notify_manager_subflow: {
                         table: 'sys_hub_flow'
                         id: 'af90366362d04879b7ab39f6dc66bcc1'
@@ -381,6 +543,10 @@ declare global {
                         table: 'sys_module'
                         id: '1fda3d027fcf423e90c0e17dc5298ea2'
                     }
+                    send_high_priority_email: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '322c28009aa244d89bc607cc05da3c7f'
+                    }
                     set_assigned_to_manager: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'a647d91fdb5b4ab888c63d043486206b'
@@ -421,6 +587,18 @@ declare global {
                         table: 'sys_hub_action_instance_v2'
                         id: '52f496cb8c114c5ab66ac7c6c86fec58'
                         deleted: true
+                    }
+                    update_assign_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'd4723717f28c4efda14a62aefd5cc56f'
+                    }
+                    update_demo_flag: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '6e4d9feadbf1499892f27f7d8c702d80'
+                    }
+                    update_work_note_sent: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '4a53d57d49f54480994702aff8479add'
                     }
                 }
                 composite: [
