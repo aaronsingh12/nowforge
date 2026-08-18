@@ -1119,3 +1119,91 @@ require *two* runs of the same flow, or a run that is expected **not** to happen
 `.verify.json` shape has one setup, one wait, one set of assertions. Branch conditionality and
 re-fire semantics are structurally outside it. They belong in a separate probe harness, and until
 one exists they are a known, named gap rather than a silent one.
+
+---
+
+## 18. Step 3 — hygiene closure, and two broken artifacts it exposed
+
+### `demo-incident-flow.now.ts` is under git ✅
+
+It is tracked, along with every other source and verify spec in `src/fluent/flows/`. The
+working tree is clean.
+
+### It cannot be given a verification spec — three independent reasons
+
+**1. It has never executed. Not once.** Its trigger is `record_create` on `incident` with an
+**empty condition**, so it should fire on every incident insert. Across this session's probes —
+including a dedicated one that created a P1 incident and waited a fixed 45s — it produced **zero**
+`sys_flow_context` rows, while other flows on the same insert did:
+
+```
+Notify P1 Incident Assignment Group Manager -> Complete
+Demo Incident Priority Notification         -> Error
+Demo Incident Flow                          -> (never appears)
+```
+
+Verification works by firing a flow and asserting its effects. A flow that does not fire cannot
+be verified by any spec.
+
+**2. `u_demo_flag` does not exist on `incident`.** Verified the same three ways as `problem_id`:
+absent from the 91-field schema, no `u_*` fields on the table at all, and `sysparm_fields=sys_id,
+u_demo_flag` returns only `sys_id`. The flow's `update_demo_flag` action writes to nothing, and
+the field-existence checker would reject any assertion on it — correctly.
+
+**3. The group "Incident Manager" does not exist.** The nearest is **"Incident Management"**. The
+flow's `lookup_incident_manager_group` uses `conditions: name=Incident Manager`, which matches
+nothing — trap #6, the failure that ERRORs a flow at run time.
+
+So two of its three promised effects target things this instance does not have, and the flow
+never runs. **The precise reason it has no `.verify.json` is recorded here rather than papered
+over with a spec that could only pass vacuously.**
+
+### Why it never fires: undetermined, and stated as undetermined
+
+Two hypotheses were tested and **both failed**:
+
+- *"Empty `compiler_build`"* — it is empty on this flow, **but also on `Handle High Priority
+  Incident`, which runs.** Not the discriminator.
+- *"The trigger instance is malformed"* — a field-by-field diff against `Demo Incident Priority
+  Notification` (also `record_create` on `incident`, and it does fire) shows the two trigger
+  records are structurally identical: same `trigger_type`, same `trigger_definition`, same scope.
+  Not the difference.
+
+One unexplained inconsistency remains, recorded without a causal claim: its published
+`master_snapshot` is dated **2026-08-17 18:40:08**, which is *older* than its own trigger
+instance's last update (**23:34:50**) and older than the source file itself. `latest_snapshot`
+and `master_snapshot` are the same record, whereas working flows have them differ. That is
+suspicious, not proven.
+
+**Recommended disposition:** this artifact is a demo leftover whose two distinctive effects are
+unbuildable here. Either regenerate it against real targets (`Incident Management`, and an effect
+on a field that exists), or remove it with `removeManaged`. Both need a generation run, so both
+are queued behind the provider switch.
+
+### Bonus finding — `Demo Incident Priority Notification` is broken in production
+
+It is active, it fires on every P1/P2 incident, and it **errors every time**:
+
+```
+Email validation failed: Email has no recipients.
+```
+
+Same root class as the Hardware manager: it emails a group's manager, the manager (or their
+email) is empty, and `sendEmail` with no recipient is a hard error rather than a no-op. This is
+pre-existing and unrelated to the hotfix, but it is a live flow failing on every execution and
+should not stay that way.
+
+### Survey of all 10 NowForge-scoped artifacts
+
+| artifact | type | active | ever run |
+|---|---|---|---|
+| Notify P1 Incident Assignment Group Manager | Flow | ✅ | ✅ |
+| Handle High Priority Incident | Flow | ✅ | ✅ |
+| Create Problem for On Hold Vendor Incidents | Flow | ✅ | ✅ |
+| Escalate Network P1 Incident | Flow | ✅ | ✅ |
+| Demo Incident Priority Notification | Flow | ✅ | ✅ **errors every run** |
+| Notify Manager | SubFlow | ✅ | ✅ |
+| High Risk Change Approval | Flow | ✅ | ✅ |
+| Daily P1 Digest | Flow | ✅ | ❌ scheduled, window not yet hit |
+| NowForge Smoke Test | Flow | ✅ | ❌ no trigger by design |
+| **Demo Incident Flow** | Flow | ✅ | ❌ **should fire on every incident; never does** |
