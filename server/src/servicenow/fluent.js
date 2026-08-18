@@ -1393,6 +1393,7 @@ RULES:
 5. For journal fields (work_notes, comments) assert the distinctive text the flow writes — a substring match is applied.
 6. In byQuery you may use the token {{setup.sys_id}}, which is replaced with the created record's sys_id. Use it to find records the flow created (e.g. "parent={{setup.sys_id}}").
 6b. {{setup.sys_id}} is the ONLY token, and it works ONLY inside locate.byQuery. NEVER put {{...}} in expect.value or expect.display — nothing substitutes it there, it is compared literally, and it fails a flow that is working. If an expected value is not knowable when you write the spec (a generated number like PRB0012345, a sys_id), do not guess it: move the proof into the LOCATOR. Locate with a query that can only match when the effect happened, then assert a field whose value you DO know. A locator that matches nothing is reported as a failed assertion, so the locator carries the proof.
+6d. EXPECTED VALUES ARE LITERAL. Comparison is exact for ordinary fields and containment for journal fields; there are no wildcards and no phrases. Never write "*", "%", "not empty", "any ...", or "<something>" as an expected value. If part of the text is generated (a PRB/INC number, a sys_id, a timestamp), assert only the FIXED text around it — for a work note reading "Problem PRB0012345 created", assert " created". To prove a field is merely set, put ISNOTEMPTY in the locator and assert a field whose value you know.
 6c. Never assert a field that is not in the REAL SCHEMA below, and never assume a value for a field the live context reports as EMPTY on this instance — an effect that depends on an empty field produces nothing here, so asserting a made-up value fails a correct flow.
 7. cleanup MUST include the setup record ({ "bySetupRecord": true }) plus every record the flow creates.
 8. Keep setup.payload minimal: only what the trigger condition requires, plus a short_description so the record is identifiable.
@@ -1511,6 +1512,30 @@ export function validateVerifySpec(v, { promisedEffects = [] } = {}) {
           `that only matches when the link exists (e.g. ` +
           `"sys_id={{setup.sys_id}}^<ref_field>.short_description=<the value the flow wrote>") and ` +
           `assert a field whose value you already know. If the locator matches, the link exists.`
+        );
+      }
+
+      // The comparison is literal — exact for ordinary fields, containment for
+      // journal fields. Anything that only READS like a value (a wildcard, the
+      // words "not empty", an <angle-bracket> stand-in) is compared character
+      // for character and fails a flow that did exactly the right thing.
+      for (const half of ['value', 'display']) {
+        const raw = a?.expect?.[half];
+        if (typeof raw !== 'string' || raw.includes('{{')) continue;
+        const wildcard = raw.includes('*') || raw.includes('%');
+        const prose = /^\s*(not\s+empty|non-?empty|any.*|some.*|<.+>|\.\.\.)\s*$/i.test(raw);
+        if (!wildcard && !prose) continue;
+        errors.push(
+          `${at}.expect.${half} is "${raw}", which is not a literal value. The runner compares ` +
+          `${'exactly for ordinary fields and by containment for journal fields'} — it does not ` +
+          `interpret wildcards or phrases, so this fails a flow that behaved correctly. ` +
+          (wildcard
+            ? `Drop the generated part and assert only the fixed text around it: for a work note ` +
+              `reading "Problem PRB0012345 created", assert the literal " created" or "Problem ", ` +
+              `never "Problem PRB* created".`
+            : `To prove a field is merely SET, put that in the locator instead ` +
+              `("sys_id={{setup.sys_id}}^<field>ISNOTEMPTY") and assert a field whose value you know; ` +
+              `a locator that matches nothing is reported as a failure.`)
         );
       }
 

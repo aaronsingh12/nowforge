@@ -409,3 +409,36 @@ test('a proper noun that keeps its trailing common noun still resolves', async (
   assert.equal(stripTrailingCommonNoun('Hardware'), 'Hardware');
   assert.equal(stripTrailingCommonNoun(''), '');
 });
+
+test('a wildcard or prose expected value is rejected as a false-alarm source', async () => {
+  const { validateVerifySpec } = await import('../src/servicenow/fluent.js');
+  const cases = [
+    ['Problem PRB* created', /Drop the generated part/],
+    ['not empty', /put that in the locator instead/],
+    ['<the problem number>', /put that in the locator instead/],
+  ];
+  for (const [bad, hint] of cases) {
+    const res = validateVerifySpec({
+      ...UPDATE_TRIGGERED_SPEC,
+      assert: [{ table: 'incident', locate: { bySetupRecord: true }, field: 'work_notes',
+        expect: { value: bad }, note: 'n' }],
+    });
+    assert.equal(res.ok, false, `"${bad}" must be rejected`);
+    assert.match(res.errors[0], /is not a literal value/);
+    assert.match(res.errors[0], hint);
+  }
+});
+
+test('ordinary literal values — including the empty string — still pass', async () => {
+  const { validateVerifySpec } = await import('../src/servicenow/fluent.js');
+  const res = validateVerifySpec({
+    ...UPDATE_TRIGGERED_SPEC,
+    assert: [
+      { table: 'incident', locate: { bySetupRecord: true }, field: 'work_notes',
+        expect: { value: ' created' }, note: 'fixed fragment of the work note' },
+      { table: 'problem', locate: { byQuery: 'parent={{setup.sys_id}}' }, field: 'assigned_to',
+        expect: { value: '' }, note: 'empty because the group has no manager' },
+    ],
+  });
+  assert.deepEqual(res.errors, []);
+});
