@@ -1800,3 +1800,414 @@ environment, not the fallback, so it now calls the keyword path directly.
 |---|---|---|---|
 | 14 | **`bm25()` is negative, and more-negative is better** | a relevance sort that returns the *worst* matches first, with plausible-looking scores | Never `Math.abs()` a value whose sign carries meaning. Assert the ORDER in a test, not merely that hits came back |
 | 15 | **A test that branches on the environment silently changes meaning** | a green suite that was asserting something different yesterday | Call the degraded path directly. `ollama pull` finishing mid-run should not alter what a test proves |
+
+---
+
+## 22. Track B — SLAs and access control
+
+Everything below was executed against `dev442675.service-now.com` before the
+code that relies on it was written. Where a claim is a measurement, the numbers
+are the ones that came back; where something was not verified, it says so.
+
+### Storage note
+
+Track B adds no storage. The SLA and ACL layers are stateless readers and
+writers over the Table API — there is nothing durable to keep that the instance
+is not already the source of truth for. `server/data/nowforge.db` is unchanged
+and no migration was added.
+
+---
+
+### B-1 — SLA definitions
+
+`server/src/servicenow/sla.js`, `server/src/routes/sla.js`, the **SLA** page,
+and the agent tools `sla_meta` / `list_slas` / `get_sla` / `create_sla`
+(mutating, amber gate) / `verify_sla_live` (mutating).
+
+#### The duration codec ✅
+
+`contract_sla.duration` is a `glide_duration`, and it is **an offset from
+1970-01-01 with whole days carried in the DATE half**:
+
+| stored | means |
+|---|---|
+| `1970-01-01 04:00:00` | 4h |
+| `1970-01-01 00:15:00` | 15m |
+| `1970-01-03 00:00:00` | **2 days** — read as a clock time this is zero |
+
+Read off this instance: "Priority 1 resolution (1 hour)" stores
+`1970-01-01 01:00:00`, "Priority 4 resolution (2 day)" stores
+`1970-01-03 00:00:00`.
+
+#### `duration_type` replaces the duration entirely
+
+`duration_type` references `cmn_relative_duration` (5 rows here: *Breach on Due
+Date*, *End of next business day*, *Next business day by 4pm*, *2/3 business
+days by 4pm*). When it is set, the fixed duration is not used and the breach
+clock cannot be checked arithmetically — `assertTaskSla` says so and skips that
+check rather than inventing an expectation.
+
+#### The schedule is inert unless `schedule_source` switches it on ⚠️
+
+Two definitions, identical but for one field, one incident, one run:
+
+| definition | `schedule` | `schedule_source` | task_sla.schedule | wall-clock to planned end |
+|---|---|---|---|---|
+| probe A | 8-5 weekdays | `no_schedule` | *(empty)* | **4.00h** |
+| probe B | 8-5 weekdays | `sla_definition` | 8-5 weekdays | **7.84h** |
+
+Both were created with a 4h duration. Setting the schedule reference alone
+produced a clock that ignores it, with nothing anywhere reporting that the
+field was inert. `createSla` warns on exactly this combination, and the SLA
+page prints the warning at the field, not after the save.
+
+The 7.84h is correct arithmetic, incidentally: the incident was created at
+04:09 PDT, before the schedule's 08:00 window opens, so the clock starts at
+08:00 and four business hours land at 12:00 PDT = 19:00 UTC.
+
+#### Conditions are field-checked before the write ✅
+
+Trap #2 is worse on this table than anywhere else it has come up. A start
+condition naming a field that does not exist is not rejected — the clause is
+**dropped**, so `active=true^prioritee=1` becomes `active=true` and the SLA
+attaches to **every active record on the table**. Nothing errors, and the
+definition looks right in the UI.
+
+`validateSlaInput` checks every one of start/stop/pause/reset/cancel against
+the target table's live dictionary and refuses before anything is written.
+Measured live:
+
+```
+create_sla { start_condition: 'active=true^prioritee=1' }
+  → refused: The start condition constrains on "prioritee", which does not exist
+    on incident. ... An SLA start condition loses its filter and attaches to
+    every record on the table.
+```
+
+An SLA with **no** start condition is refused for the same reason.
+
+#### Writes are read back field by field ✅
+
+Trap #3 applies here too, and was re-measured on this table: a deliberate
+`zzz_nowforge_not_a_field` was accepted by the POST and absent from the stored
+record, with no error. So `createSla`/`updateSla` compare every field sent
+against the stored record and return `mismatches[]`; conditions compare modulo
+the `^EQ` end marker, which the platform appends to anything saved through its
+own condition builder and does not append to a REST write.
+
+The live creation of the acceptance definition:
+
+```
+Created SLA definition "P1 resolve in 4h" (796fadd5837acf10b939cc65eeaad3ea);
+every field read back as sent.
+  duration  1970-01-01 04:00:00 → 4h
+  clock     24x7 (no schedule in effect)
+  start     active=true^priority=1
+```
+
+`contract_sla` writes land in the `global` scope as `sys_class_name:
+contract_sla`, and DELETE followed by a read-back returns 0 rows — so create
+and delete are both proven, not assumed.
+
+---
+
+### B-2 — SLA-aware verification
+
+The runner gains an assertion type. In a `.verify.json` spec:
+
+```json
+{ "type": "sla",
+  "sla": "P1 resolve in 4h",
+  "locate": { "bySetupRecord": true },
+  "expect": { "attached": true, "stage": "in_progress", "breached": false,
+              "plannedEndToleranceSec": 120 },
+  "note": "the P1 resolution clock starts" }
+```
+
+and `verifySla(name)` runs the same evaluator standalone for a definition that
+has no flow attached to it. One implementation, two entry points.
+
+#### The setup record is DERIVED, not generated ⚠️
+
+A start condition is already a precise machine-readable statement of what has
+to be true. Asking a model to restate it as a payload adds a way to be wrong
+and nothing else — which is the entire §14/§20 failure class. So
+`derivePayloadFor` parses the condition and builds the record in code, applying
+trap #5 on the way:
+
+```
+start_condition   active=true^priority=1
+derived payload   { active: "true", impact: "1", urgency: "1" }
+note              priority=1 is CALCULATED (trap #5) — set impact=1, urgency=1
+                  instead and never write priority
+```
+
+Then — and this is the part that makes the derivation checkable rather than
+merely plausible — **the platform is asked whether the stored record satisfies
+the condition**, by querying `sys_id=<id>^<start_condition>`. Live:
+
+```
+satisfies: true
+observed:  active=true  impact=1 - High  urgency=1 - High  priority=1 - Critical
+```
+
+If a PDI had a customised priority matrix, this is where it would surface as a
+named mismatch instead of a mysteriously unattached SLA. The check is sound
+only because every field in the condition was confirmed to exist first —
+otherwise the clause would drop and `sys_id=<id>` alone would match, passing
+vacuously. Trap #2 defending against itself.
+
+A clause with no single satisfying value (`LIKE`, `!=`, a `javascript:` value,
+a dot-walk, an OR arm) is **named and the run refuses**, rather than being
+approximated.
+
+#### A task_sla row proves nothing about which SLA ⚠️ — new trap #18
+
+One P1 incident, three attachments:
+
+| task_sla.sla | name | planned end (UTC) |
+|---|---|---|
+| `796fadd5…` | **P1 resolve in 4h** (ours) | 15:24:19 |
+| `35420982…` | Priority 1 resolution (1 hour) | 12:24:19 |
+| `2ca94b74…` | Priority 1 response (15 minutes) | 11:39:19 |
+
+An assertion of the form "a task_sla exists on the record" passes here **with
+the definition under test deleted**. So the assertion filters by
+`task_sla.sla == definition.sys_id`, and `sla` is mandatory in the spec —
+enforced in `validateSlaAssertion`, not left to the prompt. When ours does not
+attach, the failure names the rivals that did, because "nothing attached" and
+"three attached and ours was not one of them" are different diagnoses and only
+the second one is usually true.
+
+#### Trap #UTC, applied
+
+`task_sla` times are stored in UTC; the Table API's `display_value` renders
+them in the session timezone. The same instant, from the live run:
+
+```
+start_time        value 2026-08-18 11:24:19   display 2026-08-18 04:24:19
+planned_end_time  value 2026-08-18 15:24:19   display 2026-08-18 08:24:19
+```
+
+Seven hours. A runner that reads the display half and adds the 4h duration
+expects 08:24:19, sees 15:24:19, and reports a **correct** SLA as seven hours
+broken. `parseSnowUtc` takes only the `value` half and parses it with an
+explicit `Z`; the display half is carried into the result for a human to look
+at and is touched by no calculation. The offline suite fixture carries both
+halves so a regression fails there rather than on a PDI.
+
+#### The tolerance is stated in the spec, not defaulted in the runner
+
+The clock starts when the platform attaches the row, not when the runner posted
+the record, so the two differ by the insert's own latency. A tolerance living
+inside the runner is a number that never appears in the artifact a human
+reviews, so `expect.plannedEndToleranceSec` is **required** and its absence is
+a validation error. Observed drift on the live run: **0s**.
+
+#### Schedule-bound SLAs are bounded, not recomputed
+
+Recomputing the schedule engine's arithmetic would mean reimplementing it, and
+asserting the 24×7 expectation against it fails a correct SLA by 3.84h (see
+B-1). So the assertion reports which mode it ran in and, for a scheduled SLA,
+asserts what is actually true: the clock runs forward, it cannot be shorter
+than the duration (a schedule can only push a breach out), and the schedule the
+platform used is the one the definition names. Stated in the result, not
+silently skipped.
+
+#### Acceptance run, verbatim ✅
+
+```
+sla_verify_definition   P1 resolve in 4h on incident
+sla_verify_setup        incident {active:"true", impact:"1", urgency:"1",
+                                  short_description:"NowForge SLA check ..."}
+                        note: priority=1 is CALCULATED (trap #5)
+sla_verify_setup_done   INC0010035
+sla_verify_setup_checked satisfies=true  priority=1 - Critical
+sla_verify_poll         attached=1  pass=true
+sla_verify_cleanup_done ok=true taskSlasAtStart=3 cascaded=true
+                        taskSlasLeft=0 recordLeft=0
+
+ok: true — "task_sla attached to the right definition with a sane breach clock
+(4 checks passed)"
+  exactly one task_sla references this definition
+  stage is "in_progress"
+  has_breached is false
+  planned_end is start + 4h within 120s (drift 0s)
+```
+
+Cleanup is read back rather than assumed: deleting the incident **cascades**
+its task_sla rows away on this instance (measured: 3 at start, 0 left), and any
+survivor would be deleted explicitly and re-counted. A verification run that
+leaves a running clock behind is debris with a breach date.
+
+---
+
+### B-3 — ACL analyzer (read / explain / diff)
+
+`server/src/servicenow/acl.js`, `server/src/routes/access.js`, the **Access**
+page, and the read-only tools `acl_report` / `acl_diff` / `explain_acls`.
+
+**No authoring, deliberately.** An ACL is the one artifact class where a
+confidently wrong write is a security incident rather than a bug. There is no
+tool to create one and the system prompt forbids simulating one through
+`create_record` on `sys_security_acl`.
+
+#### `operation` and `type` are references with inconsistent sys_ids ⚠️ — new trap #16
+
+`sys_security_operation` mixes two conventions in one table:
+
+```
+sys_id "read"    name read          sys_id "create" name create
+sys_id "write"   name write         sys_id "delete" name delete
+sys_id 0997ab83733303005978e4b9cdf6a7b9   name report_view
+sys_id 7aad4c50b7f4621062b62181ce11a918   name conditional_table_query_range
+```
+
+A raw read gives a report that is half readable and half opaque, which looks
+like a data problem rather than a reading error. `sys_security_type` is the
+same: `record` is its own sys_id, `ux_page` is 32 hex. Every operation and type
+is resolved through the display value, with a lookup map as the fallback and an
+explicit `operationResolved: false` when neither can name it.
+
+#### `nameSTARTSWITHincident` also matches `incident_task` ⚠️ — new trap #17
+
+`incident_task` is a different table with **43** ACLs of its own. A prefix
+query sweeps every one of them into an incident report. The query is
+`name=<t>^ORnameSTARTSWITH<t>.` and each row is re-checked against
+`belongsToTable`. Measured: **0 of 43** leaked.
+
+#### ACLs are inherited
+
+`incident` is governed by its own rows and by every `task` row. The report
+walks `getTableHierarchy` and each row carries `definedOn` / `inherited`, so a
+rule the reader cannot find on the incident ACL list is still visible with the
+table that defines it named.
+
+#### ACL conditions get the same trap #2 check
+
+An ACL condition naming a field that does not exist has its clause dropped,
+which makes the rule **broader** than it reads. Flagged per row and counted in
+`counts.conditionsOnUnknownFields`. On `incident`: 0 — the OOB set is clean,
+which is worth knowing rather than assuming.
+
+#### The incident report, and the spot-check ✅
+
+```
+hierarchy   incident -> task
+visibility  full        complete true
+counts      total 143 · record 27 · field 116 · inactive 3 · scriptGuarded 17
+            adminOverrides 99 · noRoleRequired 32 · conditionsOnUnknownFields 0
+operations  conditional_table_query_range, create, delete, list_edit,
+            query_range, read, report_view, save_as_template, write
+roles       20
+```
+
+**Spot-check: 3/3.** Three ACLs — a deny-unless rule with a security attribute
+and no roles, a role-plus-condition rule, and a script-guarded rule — were
+re-read through a **separate** code path (a direct `table.get` per record plus
+its own `sys_security_acl_role` query, sharing no helper with the analyzer) and
+compared field by field on name, operation, type, active, admin_overrides,
+advanced, condition, script presence and roles. All three match.
+
+> **Provenance, stated plainly.** This is a read-back against the raw records,
+> which is what the platform form renders. It is **not** a human opening three
+> ACL forms in the ServiceNow UI, and it cannot be — nothing in this
+> environment drives a browser. If the platform form shows a field this
+> comparison does not read, the spot-check would not catch it.
+
+#### The diff shows real differences ✅
+
+`admin` vs `itil` on `incident`:
+
+```
+only itil   conditional_table_query_range, read, write
+both        report_view
+only admin  (none)
+field differences  36
+```
+
+That "only admin: none" invites a wrong conclusion, and the diff says so
+above the grid rather than under it: **21 of 27 record ACLs on incident set
+`admin_overrides`**, which means they are *skipped* for admin. Admin not being
+named is the grant, not the absence of one. The result also carries a standing
+caveat that this compares which rules **name** each role and is not an
+evaluation of access — the platform runs every matching ACL at each level, most
+specific first, and a field ACL, condition, script or security attribute can
+deny what a table-level row appears to allow. NowForge does not run that
+engine, and a report implying it did would be worse than no report.
+
+#### Read-restricted renders loudly ✅
+
+`sys_security_acl` is itself ACL-protected: a connection without the
+`security_admin` elevation gets a refusal or an empty list. An empty list
+rendered as an empty report says *"this table has no ACLs"*, which is the most
+dangerous sentence this feature could produce. Three states, always reported:
+
+| `visibility` | what happened | what the banner says |
+|---|---|---|
+| `full` | rows read | the count and the chain |
+| `empty` | none for this table, but other tables' ACLs ARE readable | "a real absence rather than a permission problem" |
+| `restricted` | no ACL row visible anywhere | "a visibility result, not a security result… do not read this as *X has no ACLs*" |
+| `error` | the read threw | "This report is INCOMPLETE", quoting the failure |
+
+`complete` is false for `restricted` and `error`. The banner is rendered on
+every report, not only the bad ones, so the reader is never left to infer which
+state they are looking at.
+
+The same distinction runs one level down. An ACL with **no role rows** is "no
+role required"; an ACL whose roles could **not be read** is `roles: null,
+rolesUnknown: true`. These are opposite answers, and a bug caught while writing
+the tests had them sharing `undefined` — which rendered an unreadable rule as
+an unrestricted one, in a security report. Both states are now asserted.
+
+Since this cannot be produced on an admin connection, it is driven in the
+offline suite by injecting a reader that throws and one that returns empty.
+**Not** verified against a real de-elevated login here.
+
+#### The explanation, and a measured model failure ⚠️ — guard B-1
+
+"Explain in plain language" sends the structured report through the configured
+provider, read-only, and the answer is labelled AI-generated at the API
+boundary and again in the UI.
+
+The **first live run** against `gpt-oss:120b-cloud` opened correctly and then
+collapsed:
+
+```
+Roles that appear on record ACLs include sn_incident_read, sn_incident_write,
+itil, itil_admin, … sn_incident_comments_write, sn_incident_write,
+sn_incident_read, sn_incident_admin, sn_incident_comments_write,
+sn_incident_write, sn_incident_read, sn_incident_admin, …
+```
+
+— four role names cycling roughly sixty times inside one sentence, at HTTP 200,
+with plausible prose either side of it. That output is worse than none: it sits
+beside a report that IS accurate, so the loop reads as a finding about the
+instance rather than as the model breaking down.
+
+`detectDegenerateRepetition` rejects it on two independent signals (a short
+n-gram repeating back to back, or a 40-word window with fewer than 7 distinct
+words), then **retries once with the repeated fragment quoted back as
+evidence** — the A5 rule, because a byte-identical re-ask of a backend that
+provably ignores `seed` (trap #12) is a coin flip dressed as a correction. Two
+degenerate attempts is a loud 422 that says the failure is the generation's and
+that the structured report beside it is unaffected.
+
+The captured loop is a fixture in the offline suite. Re-running the same
+request afterwards produced a clean, usable explanation on the first attempt —
+which is trap #13 restated: nothing here is reproducible, so the guard has to
+hold rather than the generation.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 16 | **`sys_security_acl.operation` / `type` sys_ids are inconsistent** | half the report reads `read`/`write`, the other half reads `0997ab83733303005978e4b9cdf6a7b9` — it looks like corrupt data | The core operations' sys_ids ARE the words; extended ones are 32-hex. Resolve through `display_value`, keep a `sys_security_operation` map as the fallback, and flag anything neither can name |
+| 17 | **`nameSTARTSWITH<table>` matches sibling tables** | 43 `incident_task` ACLs land in an `incident` report and read as incident rules | Query `name=<t>^ORnameSTARTSWITH<t>.` and re-check each row: a name belongs to a table only if it equals it or starts with it plus a dot |
+| 18 | **A `task_sla` row proves nothing about WHICH SLA** | "the SLA attached" passes with the definition under test deleted — one P1 incident attaches three rows here | Filter by `task_sla.sla = <contract_sla sys_id>`, and when it is missing, report which rivals DID attach |
+| 19 | **`contract_sla.duration` carries days in the DATE half** | a 2-day SLA reads as `00:00:00`, i.e. zero | It is an offset from 1970-01-01: `1970-01-03 00:00:00` is 2 days. Decode it; never read the time half alone |
+| 20 | **A `schedule` is inert unless `schedule_source` is `sla_definition`** | the field is set, the UI shows it, the clock runs 24x7 | Measured: 4.00h vs 7.84h on otherwise identical definitions. Set both, and check `task_sla.schedule` on the attached row rather than the definition |
+| 21 | **`task_sla` times are UTC; `display_value` is session-local** | a breach clock checked against the display half is out by the offset — 7h here — and fails a correct SLA | Parse the `value` half with an explicit `Z`. Trap #UTC, now with a second table it applies to |
+| 22 | **A weak model can return HTTP 200 and a repetition loop** | correct prose, then one phrase cycling sixty times, printed next to an accurate report where it reads as a finding | Check generated text for n-gram loops and low lexical variety before showing it. Retry once WITH the fragment quoted as evidence, then refuse loudly |

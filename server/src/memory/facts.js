@@ -130,6 +130,43 @@ const SEED = [
     value: 'When an expected value is not knowable in advance (a generated PRB/INC number, a sys_id), do not guess it — move the proof into the LOCATOR. Locate with a query that can only match when the effect happened, then assert a field whose value you do know. A locator matching nothing is reported as a failed assertion. This only works when every field in the locator EXISTS.',
     provenance: 'fluent-research §14', confidence: 0.9 },
 
+  // --- Track B: SLAs and access control (fluent-research §22) ---
+  { scope: UNIVERSAL, kind: 'trap', key: 'task-sla-row-proves-nothing',
+    value: 'A `task_sla` row on a record proves NOTHING about which SLA produced it. Out-of-box definitions attach to the same record, so "an SLA attached" is an assertion that passes with the definition under test deleted. Always filter by `task_sla.sla = <contract_sla sys_id>`, and when the expected one is missing, report which rivals DID attach — "nothing attached" and "three attached and ours was not one of them" are different diagnoses.',
+    provenance: 'fluent-research §22 B-2; measured — one P1 incident attached three task_sla rows', confidence: 0.99 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'contract-sla-duration-carries-days',
+    value: '`contract_sla.duration` is a glide_duration stored as an OFFSET FROM 1970-01-01, with whole days carried in the DATE half: 4h is "1970-01-01 04:00:00" and 2 days is "1970-01-03 00:00:00". Reading the time half alone gives the right answer under a day and silently reports a 2-day SLA as zero.',
+    provenance: 'fluent-research §22 B-1, read off the OOB definitions', confidence: 0.99 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'sla-schedule-inert-without-source',
+    value: 'A `contract_sla.schedule` is IGNORED unless `schedule_source` is "sla_definition". Setting the reference alone leaves the clock running 24x7 and nothing reports it. Measured: two definitions identical but for that field, same 4h duration, same incident — 4.00h wall-clock at "no_schedule" against 7.84h at "sla_definition". Verify against `task_sla.schedule` on the attached row, not against the definition.',
+    provenance: 'fluent-research §22 B-1, two-definition probe', confidence: 0.99 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'task-sla-times-are-utc',
+    value: '`task_sla.start_time` and `planned_end_time` are stored in UTC, and the Table API renders `display_value` in the session timezone. On a US-Pacific session those differ by seven hours, so a breach clock checked against the display half reports a CORRECT SLA as broken. Parse the `value` half with an explicit Z; never compute on a display value.',
+    provenance: 'fluent-research §22 B-2; the same instant read as 15:24:19 (value) and 08:24:19 (display)', confidence: 0.99 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'acl-operation-sysids-inconsistent',
+    value: '`sys_security_acl.operation` and `.type` are references whose sys_ids follow two conventions at once: the core operations have literal sys_ids ("read", "write", "create", "delete", "execute") while extended ones are ordinary 32-hex ("report_view" is 0997ab83733303005978e4b9cdf6a7b9), and `record` is its own sys_id on sys_security_type. A raw read produces a report that is half readable and half opaque, which looks like a data problem rather than a reading error. Resolve through display_value.',
+    provenance: 'fluent-research §22 B-3, read off sys_security_operation', confidence: 0.95 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'acl-name-prefix-matches-siblings',
+    value: 'Querying ACLs with `nameSTARTSWITH<table>` also matches sibling tables — `incident_task` has 43 ACLs of its own that all match "incident". Use `name=<t>^ORnameSTARTSWITH<t>.`: a name belongs to a table only if it equals it or starts with it plus a dot. ACLs are also INHERITED, so a table is governed by its parents rows too; walk the hierarchy and record which table defined each rule.',
+    provenance: 'fluent-research §22 B-3, measured 43 contaminating rows', confidence: 0.95 },
+
+  { scope: UNIVERSAL, kind: 'decision', key: 'acl-read-only-never-authored',
+    value: 'NowForge READS and EXPLAINS access control and never writes it. There is no ACL authoring tool and none should be simulated with create_record on sys_security_acl — an ACL is the one artifact class where a confidently wrong write is a security incident rather than a bug. Two reporting rules follow: an empty ACL result may mean the tables are not readable on this connection rather than that no rules exist (the report carries a `visibility` field saying which, and it must be quoted), and a role diff shows which rules NAME each role, never what those users can do.',
+    provenance: 'fluent-research §22 B-3, the scope decision for Track B', confidence: 0.95 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'admin-overrides-inverts-a-role-diff',
+    value: 'admin_overrides on an ACL means the rule is SKIPPED for admin. Since most OOB rules set it (21 of 27 record ACLs on incident here), `admin` appears by name on almost none of them — and a role diff read naively concludes admin has LESS access than itil, which is backwards. Not being named is the grant.',
+    provenance: 'fluent-research §22 B-3, admin vs itil on incident', confidence: 0.9 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'model-repetition-loop-at-http-200',
+    value: 'A weak model can return HTTP 200 with correct prose that collapses into a repetition loop — measured on gpt-oss:120b-cloud, four role names cycling about sixty times inside one sentence. Printed beside an accurate structured report it reads as a finding about the instance rather than as the generation breaking down. Check generated text for consecutive n-gram loops and low lexical variety before showing it; retry once WITH the repeated fragment quoted as evidence, then refuse loudly.',
+    provenance: 'fluent-research §22 B-3, the first live run of the ACL explanation', confidence: 0.9 },
+
   // --- Measured on THIS instance, and scoped to it ---
   { scope: 'instance', kind: 'mapping', key: 'incident.problem-link-absent',
     value: 'This instance has no `problem_id`, `rfc` or `caused_by` on incident, and NO field on incident/task references `problem` at all. A request to "link the problem back to the incident" cannot be satisfied here. The available task-to-task links are `incident.parent` and `problem.first_reported_by_task`.',
