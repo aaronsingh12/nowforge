@@ -38,12 +38,19 @@ const QUICK_TIMEOUT_MS = 2 * 60 * 1000;
  * deploys the ENTIRE application every time (there is no per-file deploy):
  *   (a) only build-validated sources may sit in src/fluent when install runs;
  *   (b) a generation candidate that never compiles is deleted before the error
- *       is returned, and the workspace is rebuilt to resync keys.ts;
+ *       is returned, and the workspace is rebuilt to resync keys.ts. src/ is
+ *       snapshotted before each request and diffed after a failure, so this is
+ *       an assertion the pipeline reports on, not an intention;
  *   (c) every build/install runs through one serialized queue — concurrent runs
  *       would race on the shared dist/ output and on keys.ts;
  *   (d) one source file per artifact family, named by a deterministic slug, so
  *       regenerating a spec overwrites the same file and Now.ID keeps sys_ids
- *       stable instead of creating duplicates.
+ *       stable instead of creating duplicates. Within a request every retry
+ *       writes one fingerprint-named candidate, so a model that renames the
+ *       flow mid-retry cannot strand a second file;
+ *   (e) element identity is a PROJECT-WIDE namespace. A Now.ID key already
+ *       declared anywhere in src/ is a live record owned by that flow, so every
+ *       candidate is validated against every other source before it is built.
  *
  * The CLI is only ever invoked with fixed literal arguments — no user input is
  * ever passed to it — and it is spawned as `node <sdk entry>` rather than
@@ -207,6 +214,243 @@ async function findSourceByFingerprint(fingerprint) {
     if (src.includes(`${SPEC_MARKER} ${fingerprint}`)) return { file: f, source: src };
   }
   return null;
+}
+
+/* ------------------------------------------------------------------ *
+ * Element identity — guards against the CLASS C duplicate-identity abort
+ *
+ * `keys.ts` is a FLAT, PROJECT-WIDE map from a Now.ID key to one sys_id. A key
+ * is therefore not "an element inside this flow" — it is a live record claimed
+ * by whichever flow declared it first. A second flow declaring the same key
+ * does not get a fresh record; it collides, and `now-sdk build` aborts with
+ *
+ *     Record sys_hub_action_instance_v2.<sys_id> is defined 2 times in the project
+ *
+ * which names a sys_id the model never wrote and cannot map back to its own
+ * source. Guard 1 catches the collision BEFORE the SDK runs and hands the model
+ * a diagnostic in its own vocabulary — the key, and both definition sites.
+ *
+ * Uniqueness must come from a NAMESPACE, never from entropy: timestamped or
+ * random keys would make every regeneration mint new sys_ids, which is exactly
+ * the identity defect in docs/fluent-research.md §6.
+ * ------------------------------------------------------------------ */
+
+const ID_RE = /Now\.ID\[\s*['"]([^'"]+)['"]\s*\]/g;
+const LITERAL_ID_RE = /\$id\s*:\s*['"]([0-9a-f]{32})['"]/g;
+
+/** Placeholder shape used to neutralise real keys in prompt context (guard 3). */
+const PLACEHOLDER_RE = /^__ID_\d+__$/;
+
+/** Every Now.ID key a source declares, with the 1-based line it sits on. */
+export function collectElementIds(source) {
+  const out = [];
+  String(source || '').split(/\r?\n/).forEach((line, i) => {
+    for (const m of line.matchAll(ID_RE)) out.push({ key: m[1], line: i + 1 });
+  });
+  return out;
+}
+
+/** Short per-flow key prefix suggested in diagnostics, e.g. "Vendor Hold" -> "vh_". */
+function suggestPrefix(source) {
+  const name = parseArtifacts(source).find((a) => a.kind === 'flow')?.name || '';
+  const initials = String(name).split(/\s+/).filter(Boolean).map((w) => w[0]).join('').toLowerCase().slice(0, 4);
+  return initials ? `${initials}_` : 'flow_';
+}
+
+/**
+ * Guard 1 — static pre-build validation of one candidate against the project.
+ *
+ * Rejects, before `now-sdk build` is ever spawned:
+ *   - the same Now.ID key declared twice inside the candidate;
+ *   - a key already declared by another source file in the project;
+ *   - a literal sys_id used as an $id (identity the SDK cannot track);
+ *   - a leftover `__ID_n__` placeholder the model failed to resolve.
+ *
+ * `others` is [{ file, source }] for every OTHER source in the project.
+ */
+export function validateCandidateIds(candidateSource, others = [], { file = 'candidate.now.ts' } = {}) {
+  const errors = [];
+  const ids = collectElementIds(candidateSource);
+
+  // Where each key is first declared in the candidate.
+  const mine = new Map();
+  for (const { key, line } of ids) {
+    if (mine.has(key)) {
+      errors.push(
+        `Duplicate $id: Now.ID['${key}'] is defined 2 times in ${file} ` +
+        `(line ${mine.get(key)} and line ${line}). Every element needs its OWN key — ` +
+        `give the second one a distinct, descriptive key.`
+      );
+    } else {
+      mine.set(key, line);
+    }
+  }
+
+  for (const { key, line } of ids) {
+    if (PLACEHOLDER_RE.test(key)) {
+      errors.push(
+        `Unresolved placeholder $id: Now.ID['${key}'] at ${file}:${line}. ` +
+        `Placeholders stand for existing records and must be kept exactly as given, ` +
+        `or replaced with a freshly minted descriptive key for a NEW element.`
+      );
+    }
+  }
+
+  for (const m of String(candidateSource || '').matchAll(LITERAL_ID_RE)) {
+    errors.push(`Literal sys_id used as an $id: '${m[1]}'. Every $id must be Now.ID['snake_case_key'].`);
+  }
+
+  // Cross-source collisions — the failure that actually fired.
+  for (const other of others) {
+    if (!other || other.file === file) continue;
+    const seenHere = new Set();
+    for (const { key, line } of collectElementIds(other.source)) {
+      if (!mine.has(key) || seenHere.has(key)) continue;
+      seenHere.add(key);
+      errors.push(
+        `Duplicate $id across the project: Now.ID['${key}'] is defined 2 times — ` +
+        `${file}:${mine.get(key)} and ${other.file}:${line}. ` +
+        `Now.ID keys are a PROJECT-WIDE namespace: this key already identifies a live record ` +
+        `owned by ${other.file}, so reusing it collides instead of creating a new element. ` +
+        `Mint a fresh key unique to this flow (prefix every key with a short slug of this ` +
+        `flow's name, e.g. '${suggestPrefix(candidateSource)}${key}').`
+      );
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    // Shaped like compiler output so the retry prompt feeds it back unchanged.
+    diagnostic: errors.length
+      ? `ERROR: identity validation failed before build.\n${errors.map((e) => `ERROR: ${e}`).join('\n')}`
+      : null,
+  };
+}
+
+/** Read every source in the project except one, for cross-file validation. */
+async function readProjectSources({ except = null } = {}) {
+  const out = [];
+  for (const f of await listSourceFiles()) {
+    if (f === except) continue;
+    out.push({ file: f, source: await fsp.readFile(path.join(FLOWS_DIR, f), 'utf8').catch(() => '') });
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * Guard 3 — context sanitation
+ *
+ * Any source fed back into the codegen prompt has its Now.ID keys replaced with
+ * neutral placeholders. Two things follow:
+ *   - the model never SEES a live key, so it cannot copy one into a new flow
+ *     (the CLASS C vector);
+ *   - identity of the artifact being regenerated is preserved MECHANICALLY, by
+ *     substituting the real keys back into the model's output, instead of being
+ *     asked for politely in prose. Names are never touched — the verbatim-name
+ *     survival mechanism is what keeps the platform matching the same records.
+ * ------------------------------------------------------------------ */
+
+/** Replace real Now.ID keys with placeholders, extending a shared map. */
+export function sanitizeIds(source, map = new Map()) {
+  const byKey = new Map([...map].map(([ph, key]) => [key, ph]));
+  const text = String(source || '').replace(ID_RE, (full, key) => {
+    if (PLACEHOLDER_RE.test(key)) return full;
+    let ph = byKey.get(key);
+    if (!ph) {
+      ph = `__ID_${map.size + 1}__`;
+      map.set(ph, key);
+      byKey.set(key, ph);
+    }
+    return `Now.ID['${ph}']`;
+  });
+  return { text, map };
+}
+
+/** Substitute real keys back for placeholders. Unknown keys are left alone. */
+export function restoreIds(source, map) {
+  if (!map || !map.size) return source;
+  return String(source || '').replace(ID_RE, (full, key) => (map.has(key) ? `Now.ID['${map.get(key)}']` : full));
+}
+
+/**
+ * Neutralise the syntax examples the cheatsheet ships. Its snippets are real,
+ * build-verified sources, so their keys are LIVE keys — copying one reproduces
+ * the collision exactly. Prefixing marks them as examples and keeps the
+ * cheatsheet readable.
+ */
+export function sanitizeExampleIds(text) {
+  return String(text || '').replace(ID_RE, (full, key) => (key.startsWith('ex_') ? full : `Now.ID['ex_${key}']`));
+}
+
+/* ------------------------------------------------------------------ *
+ * Guard 2 — retry hygiene
+ *
+ * Every attempt for one request targets ONE filename derived from the spec
+ * fingerprint, never from the model's chosen flow name (a renamed flow used to
+ * strand a second file, fresh keys and duplicate records). The candidate is
+ * renamed to its slug only once it has actually built.
+ * ------------------------------------------------------------------ */
+
+const CANDIDATE_RE = /^candidate-[0-9a-f]{16}\.now\.ts$/;
+const candidatePath = (fingerprint) => path.join(FLOWS_DIR, `candidate-${fingerprint}.now.ts`);
+
+/**
+ * Sweep src/ of every candidate file. A candidate is by definition not a
+ * managed artifact: if one is on disk, a previous request died without
+ * cleaning up and invariant (b) is already violated.
+ */
+async function sweepCandidates() {
+  const swept = [];
+  for (const f of await fsp.readdir(FLOWS_DIR).catch(() => [])) {
+    if (!CANDIDATE_RE.test(f)) continue;
+    await fsp.rm(path.join(FLOWS_DIR, f), { force: true });
+    swept.push(f);
+  }
+  return swept;
+}
+
+/**
+ * Content-addressed snapshot of src/, so cleanup can be PROVEN, not assumed.
+ * `dir` is a parameter purely so the regression test can exercise this exact
+ * code against a temp directory rather than a copy of it.
+ */
+export async function snapshotSources(dir = FLOWS_DIR) {
+  const snap = new Map();
+  for (const f of (await fsp.readdir(dir).catch(() => [])).sort()) {
+    const src = await fsp.readFile(path.join(dir, f), 'utf8').catch(() => null);
+    if (src !== null) snap.set(f, src);
+  }
+  return snap;
+}
+
+/**
+ * Put src/ back exactly as the snapshot found it. This also repairs a latent
+ * bug: the terminal-failure cleanup used to `rm` the candidate path, which on a
+ * REGENERATION is the deployed artifact's own source — deleting it would have
+ * removed a live flow from the instance on the next install.
+ */
+export async function restoreSources(snap, dir = FLOWS_DIR) {
+  for (const f of await fsp.readdir(dir).catch(() => [])) {
+    if (!snap.has(f)) await fsp.rm(path.join(dir, f), { force: true });
+  }
+  for (const [f, content] of snap) {
+    const target = path.join(dir, f);
+    const current = await fsp.readFile(target, 'utf8').catch(() => null);
+    if (current !== content) await fsp.writeFile(target, content, 'utf8');
+  }
+}
+
+/** Assertion, not a comment: what still differs from the pre-request state. */
+export async function diffAgainstSnapshot(snap, dir = FLOWS_DIR) {
+  const now = await snapshotSources(dir);
+  const drift = [];
+  for (const [f, content] of snap) {
+    if (!now.has(f)) drift.push(`missing: ${f}`);
+    else if (now.get(f) !== content) drift.push(`modified: ${f}`);
+  }
+  for (const f of now.keys()) if (!snap.has(f)) drift.push(`left behind: ${f}`);
+  return drift;
 }
 
 /* ------------------------------------------------------------------ *
@@ -481,7 +725,7 @@ async function buildLiveContext(intent) {
 
 const HARD_RULES = `HARD RULES — a violation fails the build:
 1. Output ONE complete TypeScript source file and NOTHING else. No prose, no markdown fences, no explanation.
-2. Every $id must be Now.ID['snake_case_key'], unique within the file. NEVER write a literal sys_id as an $id.
+2. Every $id must be Now.ID['snake_case_key'], and keys are a PROJECT-WIDE namespace, not a per-file one: one key = one live record, so a key reused from another flow COLLIDES instead of creating a new element. Every key you write must be unique across the WHOLE project and freshly minted for THIS flow: prefix all of them with a short slug of this flow's name (a \"Vendor Hold Problem\" flow uses vhp_trigger, vhp_create_problem, vhp_if_critical). NEVER copy a key from the syntax examples below (they are prefixed ex_ and are already taken), and NEVER write a literal sys_id as an $id. A Now.ID['__ID_n__'] placeholder in a source you are given is an existing record's identity — keep it exactly, never invent a new one.
 3. NEVER assign a data pill to a variable. wfa.dataPill(...) goes inline in an action parameter. Capturing an ACTION RESULT in a const is required and correct.
 4. TemplateValue, Time, Duration and Now.ID are globals — using them is fine, importing them is an error.
 5. Conditions are encoded queries inside template literals: \`\${wfa.dataPill(x, 'string')}=1\`. No JavaScript, no ==, no &&.
@@ -502,7 +746,15 @@ async function readCheatsheet() {
  * `priorError` carries build diagnostics back into the prompt on a retry.
  */
 export async function generate(spec, { intent, context, priorSource, priorError, existingSource } = {}) {
-  const cheatsheet = await readCheatsheet();
+  // Guard 3: the model never sees a live Now.ID key. Every source fed back into
+  // the prompt is neutralised through ONE shared map, so the same record keeps
+  // the same placeholder across the deployed source and the retry source, and
+  // the real keys are substituted back into the output mechanically.
+  const idMap = new Map();
+  const existingSan = existingSource ? sanitizeIds(existingSource, idMap).text : null;
+  const priorSan = priorSource ? sanitizeIds(priorSource, idMap).text : null;
+
+  const cheatsheet = sanitizeExampleIds(await readCheatsheet());
   const system = [
     'You are a ServiceNow Fluent SDK code generator. You emit ServiceNow Flow Designer flows as TypeScript for @servicenow/sdk v4.',
     HARD_RULES,
@@ -512,28 +764,36 @@ export async function generate(spec, { intent, context, priorSource, priorError,
 
   const userParts = [`AUTOMATION REQUEST:\n${spec}`];
   if (context?.text) userParts.push(`--- LIVE INSTANCE CONTEXT ---\n${context.text}`);
-  if (existingSource) {
+  if (existingSan) {
     // Regeneration of a request already deployed: this must UPDATE the existing
-    // records, not create new ones. keys.ts is keyed on the Now.ID strings and
-    // the platform on the artifact names, so both must survive verbatim.
+    // records, not create new ones. The platform matches artifacts on their
+    // names, so every `name:` must survive verbatim. Identity of the individual
+    // elements rides on the __ID_n__ placeholders, which are swapped back for
+    // the real keys after generation — keeping one is what updates a record in
+    // place instead of creating a duplicate.
     userParts.push(
-      `THIS REQUEST WAS ALREADY IMPLEMENTED. Below is the deployed source.\n` +
-      `You MUST reuse it as the base and keep EVERY name: value and EVERY Now.ID['...'] key exactly as they appear — ` +
-      `they are the stable identity of live records, and changing one creates a duplicate on the instance instead of updating it. ` +
-      `Change only what the request now requires; if nothing changed, return it essentially unchanged.\n\n--- DEPLOYED SOURCE ---\n${existingSource}`
+      `THIS REQUEST WAS ALREADY IMPLEMENTED. Below is the deployed source, with each element's ` +
+      `$id replaced by a stable placeholder.\n` +
+      `You MUST reuse it as the base and keep EVERY name: value verbatim, and EVERY ` +
+      `Now.ID['__ID_n__'] placeholder exactly as it appears on the element it belongs to — ` +
+      `they are the stable identity of live records, and changing one creates a duplicate on the ` +
+      `instance instead of updating it. Never invent a new __ID_n__ placeholder: an element that ` +
+      `is genuinely NEW gets a freshly minted descriptive key instead (see HARD RULE 2). ` +
+      `Change only what the request now requires; if nothing changed, return it essentially unchanged.` +
+      `\n\n--- DEPLOYED SOURCE ---\n${existingSan}`
     );
   } else if (intent?.name) {
     userParts.push(`Use this as the artifact name: "${intent.name}"`);
   }
-  if (priorSource && priorError) {
+  if (priorSan && priorError) {
     userParts.push(
-      `YOUR PREVIOUS ATTEMPT FAILED TO COMPILE. Fix it.\n\n--- PREVIOUS SOURCE ---\n${priorSource}\n\n--- COMPILER DIAGNOSTICS ---\n${priorError}\n\nReturn the COMPLETE corrected file, not a patch.`
+      `YOUR PREVIOUS ATTEMPT FAILED. Fix it.\n\n--- PREVIOUS SOURCE ---\n${priorSan}\n\n--- DIAGNOSTICS ---\n${priorError}\n\nReturn the COMPLETE corrected file, not a patch.`
     );
   }
   userParts.push('Return only the TypeScript source.');
 
   const raw = await chatOnce({ system, user: userParts.join('\n\n'), maxTokens: 12000 });
-  return extractSource(raw);
+  return restoreIds(extractSource(raw), idMap);
 }
 
 /** Models fence code despite instructions; take the fenced block when present. */
@@ -558,14 +818,28 @@ async function build() {
 }
 
 /**
- * Write a candidate into src/ and compile it. Retries with the compiler's own
- * diagnostics fed back to the model. On terminal failure the candidate file is
- * removed and the workspace rebuilt, so a failed generation leaves nothing
- * behind in src/ and never reaches the instance — invariants (a) and (b).
+ * Write a candidate into src/ and compile it. Retries with diagnostics fed back
+ * to the model — its own identity check first, then the compiler's.
+ *
+ * Every attempt of one request targets a SINGLE filename derived from the spec
+ * fingerprint (guard 2), and each candidate is statically checked for duplicate
+ * element identity before the SDK is spawned (guard 1). On terminal failure
+ * src/ is restored to its pre-request state and the restoration is ASSERTED,
+ * not assumed, so a failed generation provably leaves nothing behind and never
+ * reaches the instance — invariants (a), (b) and (d).
  */
 export async function generateAndValidate(spec, emit = () => {}, { updates = null } = {}) {
   const settings = getSettings();
   emit({ type: 'generating' });
+
+  // Guard 2, first half: a candidate on disk means a previous request died
+  // without cleaning up. Sweep BEFORE snapshotting, so the snapshot records the
+  // clean pre-request state this run is accountable for restoring.
+  const swept = await sweepCandidates();
+  if (swept.length) {
+    emit({ type: 'hygiene_swept', files: swept, note: `Removed ${swept.length} stale candidate file(s) left by an earlier request.` });
+  }
+  const preRequest = await snapshotSources();
 
   const intent = await extractIntent(spec);
   emit({ type: 'intent', intent });
@@ -597,8 +871,13 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
     if (existing) emit({ type: 'regenerating', file: existing.file, note: 'Updating the artifact this request already deployed.' });
   }
 
+  // Guard 2, second half: ONE filename for every attempt of this request.
+  // Regeneration writes the artifact's own source; a new artifact writes a
+  // fingerprint-named candidate and is renamed to its slug only once it builds.
+  // The model's chosen flow name never selects the file it is written to.
+  const targetFile = existing ? path.join(FLOWS_DIR, existing.file) : candidatePath(fingerprint);
+
   let source = null;
-  let file = null;
   let lastDiagnostics = null;
   const attempts = [];
 
@@ -616,30 +895,70 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
 
     const artifacts = parseArtifacts(source);
     const name = artifacts.find((a) => a.kind === 'flow')?.name || artifacts[0]?.name || intent.name || 'Generated Flow';
-    // Reuse this request's existing file when it has one, so regeneration
-    // overwrites in place instead of creating a second artifact family.
-    const nextFile = existing ? path.join(FLOWS_DIR, existing.file) : sourcePath(name);
-    if (file && file !== nextFile) { await fsp.rm(file, { force: true }); }
-    file = nextFile;
+
+    // Guard 1: reject duplicate identity BEFORE the SDK runs. The SDK's own
+    // abort names a sys_id the model never wrote; this names the key and both
+    // definition sites, which is a diagnostic it can actually act on.
+    const others = await readProjectSources({ except: path.basename(targetFile) });
+    const idCheck = validateCandidateIds(source, others, { file: path.basename(targetFile) });
+    if (!idCheck.ok) {
+      lastDiagnostics = idCheck.diagnostic;
+      attempts.push({ attempt, stage: 'identity', diagnostics: lastDiagnostics });
+      emit({ type: 'identity_rejected', attempt, errors: idCheck.errors });
+      continue; // never written to src/, never built
+    }
 
     await fsp.mkdir(FLOWS_DIR, { recursive: true });
-    await fsp.writeFile(file, source, 'utf8');
+    await fsp.writeFile(targetFile, source, 'utf8');
 
-    emit({ type: 'building', attempt, file: path.basename(file) });
+    emit({ type: 'building', attempt, file: path.basename(targetFile) });
     const res = await build();
 
     if (res.ok) {
       emit({ type: 'built', attempt });
+      let file = targetFile;
+      // A brand-new artifact now earns its readable slug. Renaming is safe only
+      // once it has built, and only onto a free name: clobbering another spec's
+      // source would delete that artifact from the instance on the next install.
+      if (!existing) {
+        const finalPath = sourcePath(name);
+        if (finalPath !== targetFile) {
+          if (fs.existsSync(finalPath)) {
+            await restoreSources(preRequest);
+            const drift = await diffAgainstSnapshot(preRequest);
+            return {
+              ok: false,
+              stage: 'naming',
+              attempts: attempt,
+              diagnostics: `A different source already occupies ${path.basename(finalPath)}.`,
+              hygiene: { restored: drift.length === 0, drift },
+              message:
+                `"${name}" collides with the existing source ${path.basename(finalPath)}, which belongs to a ` +
+                `different request. Nothing was deployed. Re-run naming this artifact as the one to update, ` +
+                `so it is superseded in place instead of duplicated.`,
+            };
+          }
+          await fsp.rename(targetFile, finalPath);
+          file = finalPath;
+        }
+      }
       return { ok: true, source, file, name, artifacts, intent, context, attempts: attempt };
     }
 
     lastDiagnostics = extractDiagnostics(res);
-    attempts.push({ attempt, diagnostics: lastDiagnostics });
+    attempts.push({ attempt, stage: 'build', diagnostics: lastDiagnostics });
     emit({ type: 'build_failed', attempt, diagnostics: lastDiagnostics });
   }
 
-  // Terminal failure — clean up so src/ holds only build-validated sources.
-  if (file) await fsp.rm(file, { force: true });
+  // Terminal failure — restore src/ to exactly its pre-request state. This is a
+  // restore, not a delete: on a regeneration `targetFile` IS the deployed
+  // artifact's source, and removing it would drop a live flow from the instance
+  // on the next install.
+  await restoreSources(preRequest);
+  const drift = await diffAgainstSnapshot(preRequest);
+  if (drift.length) {
+    emit({ type: 'hygiene_violation', drift, note: 'src/ did not return to its pre-request state.' });
+  }
   const cleanup = await build();
 
   const hint = settings.llm.provider === 'ollama'
@@ -654,8 +973,12 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
     lastSource: source,
     cleanedUp: cleanup.ok,
     cleanupError: cleanup.ok ? null : extractDiagnostics(cleanup),
+    // Invariant (b), asserted rather than asserted-in-a-comment.
+    hygiene: { restored: drift.length === 0, drift, sweptOnEntry: swept },
     hint,
-    message: `Generation failed after ${MAX_ATTEMPTS} attempts. The candidate was removed and nothing was deployed.`,
+    message: drift.length
+      ? `Generation failed after ${MAX_ATTEMPTS} attempts, and src/ did NOT return to its pre-request state: ${drift.join('; ')}. Nothing was deployed, but the workspace needs inspection.`
+      : `Generation failed after ${MAX_ATTEMPTS} attempts. The candidate was removed, src/ was verified back to its pre-request state, and nothing was deployed.`,
   };
 }
 

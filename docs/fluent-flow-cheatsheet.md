@@ -11,8 +11,8 @@ Every example here compiles under `now-sdk build` (SDK 4.10.1).
 ## 0. Non-negotiable rules
 
 1. Output **one file**, valid TypeScript, ending in `.now.ts`, placed in `src/fluent/flows/`.
-2. Every `$id` is `Now.ID['snake_case_key']`. **Never invent a sys_id.** Keys must be unique
-   within the file.
+2. Every `$id` is `Now.ID['snake_case_key']`. **Never invent a sys_id.** Every key must be
+   **unique across the whole project and freshly minted** — see the HARD RULE below.
 3. **Never assign a data pill to a variable.** `wfa.dataPill(...)` is written inline inside an
    action parameter. Capturing an *action's return value* in a `const` is required and correct:
    `const g = wfa.action(...)` ✅ / `const p = wfa.dataPill(...)` ❌
@@ -27,6 +27,48 @@ Every example here compiles under `now-sdk build` (SDK 4.10.1).
 9. **`noUnusedParameters` is enforced** (`TS6133`). If the body never reads `params` — which is
    always the case for scheduled triggers — declare the callback as `() => {`, not
    `(params) => {`, or the build fails.
+
+### HARD RULE — `$id` keys are a project-wide namespace ⚠️
+
+`keys.ts` is a **flat map for the entire application**, not a per-file one:
+
+```typescript
+add_work_note: { table: 'sys_hub_action_instance_v2', id: '10c0ec9dcf0c486ab1e40f73c0edbe8d' }
+```
+
+One key = **one live record**. A second flow that writes `Now.ID['add_work_note']` does not get
+a new action — it resolves to *that same sys_id*, and the build aborts:
+
+```
+Record sys_hub_action_instance_v2.10c0ec9dcf0c486ab1e40f73c0edbe8d is defined 2 times in the project
+```
+
+So:
+
+- **Every element `$id` must be unique and freshly minted for the flow you are writing.**
+- **Never reuse a key** from the examples in this file, from another flow's source, or from any
+  source you were shown as context. Every key in every example below is a **live key already
+  taken** by a deployed record.
+- **Mint format** — prefix every key in a flow with a short slug of that flow's own name, then a
+  descriptive suffix:
+
+  ```typescript
+  // Flow "Vendor Hold Problem"  → prefix vhp_
+  $id: Now.ID['vhp_trigger']            // the trigger
+  $id: Now.ID['vhp_create_problem']     // an action
+  $id: Now.ID['vhp_if_critical']        // a flow-logic block
+  $id: Now.ID['vhp_else_standard']
+  ```
+
+  The prefix is what makes the key unique; the suffix is what makes it readable. Bare keys like
+  `log`, `note`, `set`, `add_work_note` or `if_priority_critical` are the ones that collide.
+
+- **Do not use randomness or timestamps to force uniqueness.** `Now.ID` stability is the whole
+  idempotency mechanism: the same spec redeployed must resolve to the same sys_ids and update
+  its records in place. A key that changes per run creates duplicates on every deploy.
+- If you are given a source containing `Now.ID['__ID_1__']` placeholders, those are **existing
+  records' identities**. Keep each one exactly where it is. Never invent a new `__ID_n__`; a
+  genuinely new element gets a freshly minted descriptive key instead.
 
 ---
 
