@@ -20,6 +20,10 @@ const DEFAULTS = {
     apiKey: '',
     baseUrl: '',                      // optional override; ollama default http://localhost:11434/v1
     model: '',                        // blank = provider default
+    // Local embedding model for semantic recall (A-5), reached through the same
+    // baseUrl. Blank = nomic-embed-text. If it is not pulled, recall degrades to
+    // keyword search and says so — it never pretends to be semantic.
+    embedModel: '',
   },
   agent: {
     autoApprove: false,               // when false, every mutating tool call requires user approval
@@ -127,6 +131,7 @@ export function publicSettings() {
       hasApiKey: Boolean(s.llm.apiKey),
       baseUrl: s.llm.baseUrl,
       model: s.llm.model,
+      embedModel: s.llm.embedModel,
     },
     agent: { autoApprove: s.agent.autoApprove },
   };

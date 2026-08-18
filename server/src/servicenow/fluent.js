@@ -17,6 +17,7 @@ import {
   RetryLedger,
 } from './codegen-guards.js';
 import { getSchema, referenceLookup } from './schema.js';
+import { factBlock } from '../memory/facts.js';
 import { flows } from './flows.js';
 import { table } from './client.js';
 
@@ -691,6 +692,14 @@ async function resolveReference(tbl, name) {
 async function buildLiveContext(intent) {
   const parts = [];
   const resolved = [];
+
+  // A-4 read path. The traps in the ledger are exactly the ones that produce a
+  // flow which compiles, installs, activates 10/10 and does the wrong thing, so
+  // they belong in front of the model BEFORE it writes the source rather than
+  // in a diagnostic afterwards. Preferences are left out: they are about how to
+  // talk to the user, not how to write a flow.
+  const ledger = factBlock({ kinds: ['trap', 'mapping', 'decision'] });
+  if (ledger) parts.push(ledger);
 
   if (intent.trigger_table) {
     try {

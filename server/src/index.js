@@ -6,6 +6,8 @@ import { catalogRouter } from './routes/catalog.js';
 import { flowsRouter } from './routes/flows.js';
 import { agentRouter } from './routes/agent.js';
 import { SnowError } from './servicenow/client.js';
+import { getDb } from './memory/db.js';
+import { seedLedger } from './memory/facts.js';
 
 const app = express();
 app.use(cors());
@@ -27,6 +29,14 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = Number(process.env.PORT) || 4000;
+
+// Storage comes up before the listener: migrations are idempotent, and a
+// database that cannot open should stop the server rather than fail the first
+// chat turn with something unrecognisable.
+getDb();
+const seeded = seedLedger();
+
 app.listen(PORT, () => {
   console.log(`NowForge server listening on http://localhost:${PORT}`);
+  console.log(`  memory: ${seeded.seeded} ledger facts for ${seeded.instance}`);
 });

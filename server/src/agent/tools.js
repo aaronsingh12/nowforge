@@ -3,6 +3,8 @@ import { getSchema, referenceLookup, tableLookup } from '../servicenow/schema.js
 import { catalog } from '../servicenow/catalog.js';
 import { flows, designFlowBlueprint } from '../servicenow/flows.js';
 import { capability, createLiveFlow, listManaged, removeManaged, smokeRun, verify } from '../servicenow/fluent.js';
+import { search } from '../memory/recall.js';
+import { recordCalculatedFields, listFacts, recordFact } from '../memory/facts.js';
 
 /**
  * Tool registry — the agent's hands.
@@ -27,7 +29,14 @@ export const TOOLS = [
       properties: { table: { type: 'string', description: 'Table name, e.g. incident, sc_cat_item' } },
       required: ['table'],
     },
-    execute: ({ table: t }) => getSchema(t),
+    execute: async ({ table: t }) => {
+      const schema = await getSchema(t);
+      // A-4 write path: fields the platform computes accept a write and then
+      // discard it (trap #5's family). Recording them here means the next
+      // session starts knowing, instead of rediscovering it by shipping a bug.
+      try { recordCalculatedFields(t, schema); } catch { /* the ledger is never load-bearing for a read */ }
+      return schema;
+    },
   },
   {
     name: 'lookup_reference',
@@ -310,6 +319,52 @@ export const TOOLS = [
       required: ['table', 'values'],
     },
     execute: ({ table: t, values, wait_ms }) => smokeRun({ table: t, values, waitMs: wait_ms || 45000 }),
+  },
+  {
+    name: 'recall_memory',
+    description:
+      'Search every past conversation and the instance knowledge ledger. Use this whenever the user refers to earlier work — "what did we decide about vendor-hold incidents", "the flow we built last week", "that sys_id from before" — instead of guessing or saying you cannot know. Read-only. The response states which mode answered: "semantic" (embeddings) or "keyword" (the embedding model is not pulled), so report the mode if the results look thin.',
+    mutating: false,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'What to look for, in plain language' },
+        limit: { type: 'number', description: 'Max results (default 8)' },
+        session_id: { type: 'string', description: 'Restrict to one session; omit to search all of them' },
+      },
+      required: ['query'],
+    },
+    execute: ({ query, limit, session_id }) =>
+      search(query, { limit: Math.min(limit || 8, 25), sessionId: session_id || null }),
+  },
+  {
+    name: 'list_instance_facts',
+    description:
+      'Read the instance knowledge ledger: traps, measured facts about this instance, established decisions, and user preferences. These are already injected into your system prompt — call this only when you need the full list or a specific provenance.',
+    mutating: false,
+    inputSchema: {
+      type: 'object',
+      properties: { kind: { type: 'string', description: 'trap | mapping | decision | preference' } },
+      required: [],
+    },
+    execute: ({ kind }) => listFacts({ kind: kind || undefined }),
+  },
+  {
+    name: 'remember_fact',
+    description:
+      'Store something durable in the instance knowledge ledger, so future sessions start knowing it. Use for a measured fact about this instance, a decision the user made, or a preference they stated. Give provenance — how it was established. Not a mutation on the instance, but it does change future behaviour, so only record things you actually verified or the user actually said.',
+    mutating: false,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', description: 'trap | mapping | decision | preference' },
+        key: { type: 'string', description: 'Short kebab-case identifier, e.g. incident-problem-link-absent' },
+        value: { type: 'string', description: 'The fact itself, stated so a future session can act on it' },
+        provenance: { type: 'string', description: 'How this was established (a read-back, a failed verification, the user said so)' },
+      },
+      required: ['kind', 'key', 'value'],
+    },
+    execute: ({ kind, key, value, provenance }) => recordFact({ kind, key, value, provenance }),
   },
 ];
 

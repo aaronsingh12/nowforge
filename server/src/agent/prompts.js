@@ -1,8 +1,14 @@
 import { getSettings } from '../config/store.js';
+import { factBlock } from '../memory/facts.js';
 
-export function buildSystemPrompt() {
+/**
+ * `digestNote` carries the compressed earlier turns (A-3) and the fact ledger
+ * carries what this project has measured about the instance (A-4). Both are
+ * system-side: established context, not forged conversational turns.
+ */
+export function buildSystemPrompt({ digestNote = '' } = {}) {
   const { connection } = getSettings();
-  return `You are the NowForge Agent — an autonomous ServiceNow development copilot connected to ${connection.instanceUrl || '(no instance configured yet)'}.
+  const base = `You are the NowForge Agent — an autonomous ServiceNow development copilot connected to ${connection.instanceUrl || '(no instance configured yet)'}.
 
 You build and manage real artifacts on this instance through tools: incidents, service catalog (items, variables, variable sets, order guides, record producers), and Flow Designer (read, design, and LIVE authoring via the ServiceNow SDK).
 
@@ -23,5 +29,13 @@ Operating rules:
 7. Compiling proves a flow is well-formed, not correct — a flow can compile, install, and still do the wrong thing. After a successful build, OFFER verify_flow_live, which fires the flow on a real record and asserts the effects the user asked for. It writes real data, so it is never automatic and needs its own approval. smoke_test_flow is the cruder version: it only proves the flow fired, not that it did the right thing.
 8. After any mutation, report back the record number / name and sys_id so the user can find it on the instance.
 9. Keep replies tight. Use display values when talking to the user; sys_ids only where they add precision.
-10. If a tool errors, read the error, adjust (wrong field name, missing mandatory field, ACL), and retry once before asking the user.`;
+10. If a tool errors, read the error, adjust (wrong field name, missing mandatory field, ACL), and retry once before asking the user.
+11. The user can say "remember: ..." to store a durable preference. Confirm briefly when that happens; it is kept across sessions and instances.
+12. recall_memory searches every past session and the knowledge ledger. Use it when the user refers to earlier work ("what did we decide about...", "the flow we built last week") rather than guessing or claiming you cannot know.`;
+
+  const parts = [base];
+  const facts = factBlock();
+  if (facts) parts.push(facts);
+  if (digestNote) parts.push(digestNote);
+  return parts.join('\n\n---\n\n');
 }
