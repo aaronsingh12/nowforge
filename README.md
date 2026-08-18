@@ -170,7 +170,8 @@ That surfaced a worse failure that was **ours**: the field check told the model 
 |---|---|
 | Conversations survive navigation **and** a server restart | server SIGKILLed mid-session; transcript identical across the restart, and the agent answered a sys_id from two turns earlier **with no tool call** (§21) |
 | Compaction into structured digests | synthetic 100-turn session folded under budget; a probe about turn 5 still answerable because its sys_id survived into the digest |
-| Compaction never loses data on failure | a summariser that throws, or returns an empty digest, discards nothing and says so |
+| Compaction never loses data on failure | a summariser that throws, returns an empty digest, or is **cut off mid-generation** discards nothing and says so |
+| Compaction verified against the real model | live 60-turn run: 36,958 → 2,502 tokens, flow name and sys_id preserved verbatim, 55 query results collapsed to one line, zero padding leaked (§21) |
 | Tool-event audit trail outlives compaction | asserted: messages are rewritten, `tool_events` are not |
 | Instance knowledge ledger drives behaviour | on the agent path — where the ledger is the **only** carrier of the fact — a P1 payload came back as `impact: 1` + `urgency: 1`, priority never written |
 | Recall in both modes | keyword (no embed model) **5.48** vs 1.41; semantic (`nomic-embed-text`, 768d) **0.79** vs 0.56 — right session first in each |

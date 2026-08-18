@@ -1600,6 +1600,89 @@ empty digest, discards **nothing** and says so. Tested both ways.
 Acceptance: a synthetic 100-turn session compacts under budget, and a probe
 about turn 5 is answerable because its sys_id survives into the digest.
 
+### A-3 again, live — where the offline test was lying to me ⚠️
+
+The offline acceptance passed from the start. Running the same thing against
+the real model did not, and the failure is the most instructive one in Part A
+because **nothing reported an error**.
+
+First live run, 60 turns of realistic traffic (query results dominating, one
+flow deployed at turn 5):
+
+```
+history before: 36958 tokens (budget 24000), 120 entries
+compacted: true  (76.5s)
+tokens: 36958 -> 2502, under budget: true
+
+ARTIFACTS AND IDENTIFIERS
+- INC0010000 — incident — sys_id N/A — state 2
+- INC0010001 — incident — sys_id N/A — state 2
+- INC0010002 — incident — sys_id N/A — state 2
+… 100+ more …
+
+sys_id from turn 5 survived: false
+flow name survived:          false
+```
+
+Green on every measurable signal — compacted, under budget, no error — and
+**completely useless**. Told to "copy every record number and sys_id", the model
+did exactly that: it enumerated a hundred padding incident numbers from query
+*results*, hit its 6000-token cap, and never reached the one flow sys_id that
+mattered. The digest was truncated, and a truncated digest is well-formed text
+that simply stops.
+
+The offline test passed because its stand-in summariser was a regex that pulled
+out 32-hex strings. It was testing the splice, the budget arithmetic and the
+failure paths correctly — and it could not test the only thing that failed,
+because a regex is not a language model. **That is the general shape of the
+lesson: a test double cannot exhibit the failure mode of the thing it doubles.**
+
+Three fixes, in order of how much each mattered:
+
+1. **Collapse list-shaped tool results before the model sees them.** A
+   query result of 12 rows becomes `[12 rows returned; first row: …]`. Asking
+   the model not to copy 700 record numbers is strictly weaker than not showing
+   them to it. This is also what took the run from 76.5s to 8.8s.
+2. **Separate the two kinds of identifier in the prompt.** `ARTIFACTS BUILT OR
+   CHANGED` (created/updated/deleted — must be verbatim) versus `RECORDS ONLY
+   LOOKED AT` (transient — a count, never a list). The old single heading
+   invited exactly the confusion that occurred.
+3. **Refuse a truncated digest.** All four headings must be present, or the
+   generation was cut off and whatever came after it is gone. Without this,
+   silent loss is indistinguishable from success — and this guard immediately
+   caught two of my own test doubles, which is the right kind of noisy.
+
+Same fixture, after:
+
+```
+compacted: true  (8.8s)
+tokens: 36958 -> 2502, under budget: true
+
+ARTIFACTS BUILT OR CHANGED
+- Create Problem for On Hold Vendor Incidents — flow — sys_id 39acb67eac164650a6b15f5e724cae76 — active
+
+RECORDS ONLY LOOKED AT
+- 55 queries on Incident table for unassigned critical incidents
+
+DECISIONS
+- Deployed the "Create Problem for On Hold Vendor Incidents" flow to address vendor-hold incidents
+
+OPEN THREADS
+none
+
+sys_id survived : true
+flow name       : true
+padding INC numbers leaked into the digest: 0
+```
+
+The adapter's reasoning-token error never fired in any run, which was the
+specific risk this budget was sized against.
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 16 | **A truncated LLM response is well-formed text that stops** | a summary that is fluent, plausible and silently missing its tail | Require a structural marker from the END of the expected output. Length and "no error" prove nothing |
+| 17 | **A test double cannot exhibit the failure mode of the thing it doubles** | a green offline suite over a live path that is broken | Doubles test the plumbing. Run the real thing against the acceptance criterion at least once, or the criterion is untested |
+
 ### A-4 — the instance knowledge ledger
 
 Seeded from §16 and §19. Everything this project learned the hard way was

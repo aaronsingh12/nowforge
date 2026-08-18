@@ -193,9 +193,12 @@ test('A-3: the acceptance case — a 100-turn session compacts under budget and 
   const summarize = (transcript) => {
     const ids = [...transcript.matchAll(/\b[0-9a-f]{32}\b/g)].map((m) => m[0]);
     const names = [...transcript.matchAll(/deployed ([A-Z][A-Za-z0-9 ]+), sys_id/g)].map((m) => m[1]);
+    // Emits all four headings, because the real digest contract requires them —
+    // a stand-in that skips one would be testing a shape nothing produces.
     return [
-      'ARTIFACTS AND IDENTIFIERS',
+      'ARTIFACTS BUILT OR CHANGED',
       ...(ids.length ? ids.map((s, i) => `- ${names[i] || 'artifact'} — flow — sys_id ${s} — active`) : ['- none']),
+      'RECORDS ONLY LOOKED AT', '- none',
       'DECISIONS', '- none',
       'OPEN THREADS', '- none',
     ].join('\n');
@@ -252,7 +255,9 @@ test('A-3: compaction rewrites messages but NEVER the tool-event audit trail', a
     recordToolEvent(id, { kind: 'tool_call', name: 'create_record', resultStatus: 'ok', mutating: true, approval: 'approved' });
   }
   const eventsBefore = loadToolEvents(id).length;
-  const res = await compactIfNeeded(id, { summarize: async () => 'ARTIFACTS AND IDENTIFIERS\n- none\nDECISIONS\n- none\nOPEN THREADS\n- none' });
+  const res = await compactIfNeeded(id, {
+    summarize: async () => 'ARTIFACTS BUILT OR CHANGED\n- none\nRECORDS ONLY LOOKED AT\n- none\nDECISIONS\n- none\nOPEN THREADS\n- none',
+  });
   assert.equal(res.compacted, true);
   assert.equal(loadToolEvents(id).length, eventsBefore, 'what was DONE to the instance is not summarisable');
 });
@@ -493,4 +498,56 @@ test('A-5: a question made only of stopwords still produces a query rather than 
   const { toFtsQuery } = await import('../src/memory/recall.js');
   const q = toFtsQuery('what did we do');
   assert.ok(q && q.includes('"what"'), 'falls back to the raw terms rather than returning null');
+});
+
+test('A-3: a digest cut off mid-generation is refused, not silently accepted', async () => {
+  // Measured live: gpt-oss enumerated 100+ query-result record numbers, hit its
+  // token cap, and dropped the one flow sys_id that mattered — while reporting
+  // success. A truncated digest is well-formed text that simply stops, so the
+  // only way to catch it is to require every heading.
+  const id = 'sess-truncated-digest';
+  createSession({ id });
+  for (let i = 0; i < 40; i++) appendMessage(id, { role: 'user', text: `turn ${i} ` + 't'.repeat(3000) });
+  const before = loadHistory(id).length;
+
+  const res = await compactIfNeeded(id, {
+    summarize: async () => 'ARTIFACTS BUILT OR CHANGED\n- Flow X — flow — sys_id abc — active\nRECORDS ONLY LOOKED AT\n- 12 incid',
+  });
+  assert.equal(res.compacted, false);
+  assert.match(res.error, /incomplete digest/);
+  assert.match(res.error, /DECISIONS/);
+  assert.match(res.error, /No history was discarded/);
+  assert.equal(loadHistory(id).length, before);
+});
+
+test('A-3: list-shaped tool results are collapsed before the model ever sees them', async () => {
+  // The fix that actually solved the live failure. Asking the model not to copy
+  // 700 record numbers is weaker than not showing them to it.
+  const id = 'sess-noisy-results';
+  createSession({ id });
+  const rows = Array.from({ length: 12 }, (_, k) => ({ number: `INC00${10000 + k}`, short_description: 'padding' }));
+  for (let i = 0; i < 40; i++) {
+    appendMessage(id, { role: 'user', text: `turn ${i}` });
+    appendMessage(id, { role: 'tool', results: [{ id: `t${i}`, name: 'query_records', output: JSON.stringify(rows), isError: false }] });
+  }
+  appendMessage(id, {
+    role: 'tool',
+    results: [{ id: 'keep', name: 'create_flow_live', isError: false,
+      output: JSON.stringify({ verified: { sys_id: '39acb67eac164650a6b15f5e724cae76' } }) }],
+  });
+  for (let i = 0; i < 40; i++) appendMessage(id, { role: 'user', text: `pad ${i} ` + 'z'.repeat(2000) });
+
+  let seen = '';
+  await compactIfNeeded(id, {
+    summarize: async (transcript) => {
+      seen = transcript;
+      return 'ARTIFACTS BUILT OR CHANGED\n- none\nRECORDS ONLY LOOKED AT\n- none\nDECISIONS\n- none\nOPEN THREADS\n- none';
+    },
+  });
+
+  assert.ok(seen.includes('rows returned'), 'query results must reach the model as a count');
+  const numbers = (seen.match(/INC00\d+/g) || []).length;
+  assert.ok(numbers <= 40, `too many raw record numbers survived into the prompt: ${numbers}`);
+  // The identifier that matters is NOT collapsed away — it is not a list.
+  assert.ok(seen.includes('39acb67eac164650a6b15f5e724cae76'), 'a created artifact sys_id must survive into the prompt');
 });

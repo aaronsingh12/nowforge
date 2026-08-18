@@ -61,9 +61,13 @@ const DIGEST_SYSTEM = `You compress the opening of a ServiceNow engineering conv
 
 Respond with ONLY this shape, no prose outside it, no markdown fences:
 
-ARTIFACTS AND IDENTIFIERS
-- <name> — <type> — sys_id <the sys_id> — <state, e.g. active / deleted / failed>
-(every record number, sys_id, flow name, table name and file name that appeared. This section is the most important one: identifiers cannot be reconstructed and are what gets asked for later. If none appeared, write "none".)
+ARTIFACTS BUILT OR CHANGED
+- <name> — <type> — sys_id <the sys_id> — <state: active / deleted / failed>
+(ONLY records this conversation CREATED, UPDATED or DELETED. These identifiers cannot be reconstructed and are what gets asked for later, so this section matters more than the rest combined. If none, write "none".)
+
+RECORDS ONLY LOOKED AT
+- <one line: how many, from which table, and what the query was for>
+(Query RESULTS are transient. Summarise them as a COUNT — never list them. Twenty incident numbers from a search are noise; that a search for unassigned criticals returned twenty is the fact worth keeping.)
 
 DECISIONS
 - <what was decided, and why, in one line>
@@ -74,12 +78,38 @@ OPEN THREADS
 (anything asked for and not yet delivered, anything that failed and was not retried. If none, write "none".)
 
 RULES:
-1. Copy every sys_id, record number and exact artifact name CHARACTER FOR CHARACTER. A mistyped sys_id is worse than an omitted one — it will be used.
+1. Copy every sys_id, record number and exact artifact name in the FIRST section CHARACTER FOR CHARACTER. A mistyped sys_id is worse than an omitted one — it will be used.
 2. Never summarise an identifier as "the incident" or "the flow created earlier". Name it.
-3. Record what FAILED as carefully as what succeeded, including the reason.
-4. Do not add anything that is not in the transcript. If a section is empty, write "none".`;
+3. Do NOT enumerate records that were merely read. If a tool returned a list, give the count and the intent, nothing more. Listing them crowds out the identifiers that matter and is the one way this digest can fail while looking complete.
+4. Record what FAILED as carefully as what succeeded, including the reason.
+5. Do not add anything that is not in the transcript. If a section is empty, write "none".
+6. Emit all four headings, in this order, always.`;
 
-/** The transcript text handed to the summariser. */
+/** All four headings must be present, or the digest was cut off mid-generation. */
+const REQUIRED_HEADINGS = ['ARTIFACTS BUILT OR CHANGED', 'RECORDS ONLY LOOKED AT', 'DECISIONS', 'OPEN THREADS'];
+
+/**
+ * The transcript text handed to the summariser.
+ *
+ * List-shaped tool results are collapsed to a count and one sample row. A live
+ * run against gpt-oss showed why this belongs here rather than in the prompt:
+ * handed 60 query results of 12 records each, the model dutifully copied 100+
+ * record numbers, hit its token cap, and dropped the one flow sys_id that
+ * actually mattered. Asking it not to is weaker than not showing it.
+ */
+function summariseOutput(output) {
+  const text = String(output || '');
+  if (text.length < 400) return text;
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      const sample = parsed.length ? JSON.stringify(parsed[0]).slice(0, 220) : '';
+      return `[${parsed.length} rows returned; first row: ${sample}]`;
+    }
+  } catch { /* not JSON — fall through to a plain trim */ }
+  return `${text.slice(0, 1200)}…[trimmed]`;
+}
+
 function renderSpan(entries) {
   const parts = [];
   for (const m of entries) {
@@ -91,7 +121,7 @@ function renderSpan(entries) {
       }
     } else if (m.role === 'tool') {
       for (const r of m.results || []) {
-        parts.push(`RESULT ${r.name}${r.isError ? ' [ERROR]' : ''}: ${String(r.output || '').slice(0, 1500)}`);
+        parts.push(`RESULT ${r.name}${r.isError ? ' [ERROR]' : ''}: ${summariseOutput(r.output)}`);
       }
     }
   }
@@ -166,6 +196,23 @@ export async function compactIfNeeded(
   const text = String(digest || '').trim();
   if (text.length < 40) {
     return { compacted: false, tokens: before, budget, error: 'Compaction produced an empty digest; no history was discarded.' };
+  }
+
+  // A digest that ran out of tokens mid-generation looks perfectly fine — it is
+  // well-formed text that simply stops, and the part it dropped is the tail.
+  // Measured live: one run enumerated 100+ query-result record numbers, hit the
+  // cap, and lost the flow sys_id entirely, while reporting success. Requiring
+  // every heading turns that silent loss into a refusal.
+  const missing = REQUIRED_HEADINGS.filter((h) => !text.includes(h));
+  if (missing.length) {
+    return {
+      compacted: false,
+      tokens: before,
+      budget,
+      error:
+        `Compaction produced an incomplete digest — missing ${missing.join(', ')} — which means it was cut off ` +
+        `before the end and would have silently dropped whatever came after. No history was discarded.`,
+    };
   }
 
   replaceSpanWithDigest(sessionId, fromSeq, toSeq, text);
