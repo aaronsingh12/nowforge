@@ -2198,6 +2198,34 @@ request afterwards produced a clean, usable explanation on the first attempt —
 which is trap #13 restated: nothing here is reproducible, so the guard has to
 hold rather than the generation.
 
+#### The assertion inside a real flow spec ✅
+
+The two halves above — the evaluator and `verifySla` — were proven separately,
+which leaves the runner's own dispatch unproven. So an SLA assertion was added
+to the live spec for `Escalate Network P1 Incident` (a deployed flow whose setup
+raises a P1) and the whole spec run:
+
+```
+verify_setup_done   INC0010036
+verify_execution    IN_PROGRESS -> COMPLETE
+verify_assert       incident.work_notes    PASS
+verify_assert       incident.assigned_to   PASS  (Bow Ruggeri)
+verify_assert       sla:P1 resolve in 4h   PASS
+verify_cleanup
+
+ok: true — 3/3 assertions passed
+clock  { mode: "24x7", startUtc: "2026-08-18 11:43:07",
+         plannedEndUtc: "2026-08-18 15:43:07", expectedSec: 14400,
+         observedSec: 14400, driftSec: 0, toleranceSec: 120 }
+others [ "Priority 1 resolution (1 hour)",
+         "Priority 1 response (15 minutes)",
+         "Network group resolution" ]
+```
+
+Three rival SLAs that run this time, not two — the flow assigns the Network
+group, which brings a third definition with it. The spec file was restored
+byte-for-byte afterwards and the working tree is clean.
+
 ---
 
 ### Trap ledger additions
