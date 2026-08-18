@@ -25,7 +25,12 @@ import {
   RetryLedger,
   promptHash,
 } from '../src/servicenow/codegen-guards.js';
-import { buildRejectionEvidence } from '../src/servicenow/fluent.js';
+import {
+  buildRejectionEvidence,
+  validateVerifySpec,
+  validateUnverifiableShape,
+  checkUnverifiableClaims,
+} from '../src/servicenow/fluent.js';
 
 /* ------------------------------------------------------------------ *
  * Fixtures — shaped like the sources this pipeline actually produced.
@@ -431,4 +436,185 @@ test('A5: an unreadable schema produces no evidence rather than a fabricated one
   const schemaFor = async () => { throw new Error('instance unreachable'); };
   const spec = { assert: [{ table: 'incident', field: 'whatever', locate: { bySetupRecord: true }, expect: { value: 'x' } }] };
   assert.deepEqual(await buildRejectionEvidence(spec, { schemaFor }), []);
+});
+
+/* ================================================================== *
+ * CLASS D — the verified escape hatch for unsatisfiable promises
+ *
+ * Measured in docs/fluent-research.md §20: the field-existence check told the
+ * model to drop two impossible assertions, and the coverage rule then rejected
+ * it for dropping them. Mutually unsatisfiable guards, and no model could have
+ * passed. The hatch resolves it WITHOUT weakening coverage — every excuse is
+ * checked against the live instance.
+ * ================================================================== */
+
+const SIX_PROMISES = [
+  'creates a Problem record',
+  'sets short description prefixed with "Vendor issue: "',
+  'assigns the Problem to the Hardware group',
+  'links the Problem back to the Incident',
+  'adds a work note containing the problem number',
+  'assigns the Problem to the Hardware group manager when Critical',
+];
+
+const baseSpec = (assertCount, unverifiable) => ({
+  setup: { table: 'incident', payload: { short_description: 'probe' } },
+  wait: { flowName: 'Create Problem for On Hold Vendor Incidents', timeoutSec: 90 },
+  assert: Array.from({ length: assertCount }, (_, i) => ({
+    table: 'problem',
+    locate: { byQuery: `parent={{setup.sys_id}}` },
+    field: 'short_description',
+    expect: { value: `probe ${i}` },
+  })),
+  cleanup: [{ table: 'incident', locate: { bySetupRecord: true } }],
+  ...(unverifiable ? { unverifiable } : {}),
+});
+
+test('CLASS D: the exact deadlock — 4 assertions for 6 promises, no excuses, is rejected', () => {
+  const r = validateVerifySpec(baseSpec(4), { promisedEffects: SIX_PROMISES });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /only 4 assertion\(s\)/.test(e)));
+  // The rejection must now TEACH the way out, or the model cannot escape it.
+  assert.ok(r.errors.some((e) => /list it under "unverifiable"/.test(e)));
+});
+
+const TWO_REAL_EXCUSES = [
+  { effect: 'links the Problem back to the Incident', kind: 'field_absent', table: 'incident', field: 'problem', note: 'no such field here' },
+  { effect: 'assigns the Problem to the Hardware group manager when Critical', kind: 'source_empty', table: 'sys_user_group', field: 'manager', sys_id: '8a5055c9c61122780043563ef53438e3', note: 'group has no manager' },
+];
+
+test('CLASS D: the same 4 assertions PASS coverage once two excuses are CONFIRMED', () => {
+  const r = validateVerifySpec(baseSpec(4, TWO_REAL_EXCUSES), {
+    promisedEffects: SIX_PROMISES,
+    verifiedExcuses: 2, // what checkUnverifiableClaims actually confirmed
+  });
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.ok, true);
+});
+
+test('CLASS D: claiming an excuse is not enough — an unconfirmed one buys no coverage', () => {
+  // The §20 bug: a spec listed two excuses, only one held up against the
+  // instance, and the requirement dropped by two anyway. Counting claims rather
+  // than confirmations let a promise vanish on the strength of an assertion
+  // about the wrong table.
+  const r = validateVerifySpec(baseSpec(4, TWO_REAL_EXCUSES), {
+    promisedEffects: SIX_PROMISES,
+    verifiedExcuses: 1,
+  });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /1 excused as unverifiable, CONFIRMED/.test(e)));
+});
+
+test('CLASS D: the default is to subtract nothing, so an unchecked caller cannot be fooled', () => {
+  const r = validateVerifySpec(baseSpec(4, TWO_REAL_EXCUSES), { promisedEffects: SIX_PROMISES });
+  assert.equal(r.ok, false, 'no verifiedExcuses passed => no excuse counts');
+});
+
+test('CLASS D: an excuse with no checkable reason is refused', () => {
+  const r = validateVerifySpec(
+    baseSpec(4, [{ effect: 'links the Problem back to the Incident', kind: 'too_hard', table: 'incident', field: 'problem' }]),
+    { promisedEffects: SIX_PROMISES }
+  );
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /kind must be one of/.test(e)));
+});
+
+test('CLASS D: a source_empty excuse must say WHICH record, or it cannot be checked', () => {
+  const r = validateVerifySpec(
+    baseSpec(4, [{ effect: 'x', kind: 'source_empty', table: 'sys_user_group', field: 'manager' }]),
+    { promisedEffects: SIX_PROMISES }
+  );
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /must say on WHICH record/.test(e)));
+});
+
+test('CLASS D: a TRUE field_absent excuse is confirmed against the dictionary', async () => {
+  const schemaFor = async () => ({ fields: [{ name: 'sys_id' }, { name: 'work_notes' }, { name: 'parent' }] });
+  const r = await checkUnverifiableClaims(
+    { unverifiable: [{ effect: 'links back', kind: 'field_absent', table: 'incident', field: 'problem' }] },
+    { schemaFor }
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.verified.length, 1);
+  assert.match(r.verified[0].confirmedBy, /no field named "problem"/);
+});
+
+test('CLASS D: a FALSE field_absent excuse is rejected — the dangerous direction', async () => {
+  // If this were accepted, a promise the flow was supposed to keep would be
+  // dropped silently and the run would still report a clean pass.
+  const schemaFor = async () => ({ fields: [{ name: 'sys_id' }, { name: 'work_notes' }] });
+  const r = await checkUnverifiableClaims(
+    { unverifiable: [{ effect: 'adds a work note', kind: 'field_absent', table: 'incident', field: 'work_notes' }] },
+    { schemaFor }
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.errors[0], /but it DOES exist/);
+  assert.match(r.errors[0], /assert it instead of excusing it/);
+});
+
+test('CLASS D: a TRUE source_empty excuse is confirmed by reading the record', async () => {
+  const readRecord = async () => ({ manager: { display_value: '', value: '' } });
+  const r = await checkUnverifiableClaims(
+    { unverifiable: [{ effect: 'assign to manager', kind: 'source_empty', table: 'sys_user_group', field: 'manager', sys_id: '8a50' }] },
+    { readRecord }
+  );
+  assert.equal(r.ok, true);
+  assert.match(r.verified[0].confirmedBy, /is empty on the referenced record/);
+});
+
+test('CLASS D: a FALSE source_empty excuse is rejected, quoting what the field actually reads', async () => {
+  const readRecord = async () => ({ manager: { display_value: 'Beth Anglin', value: '46d44a23a9fe19810012d100cca80666' } });
+  const r = await checkUnverifiableClaims(
+    { unverifiable: [{ effect: 'assign to manager', kind: 'source_empty', table: 'sys_user_group', field: 'manager', sys_id: '8a50' }] },
+    { readRecord }
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.errors[0], /46d44a23a9fe19810012d100cca80666|Beth Anglin/);
+  assert.match(r.errors[0], /so assert it/);
+});
+
+test('CLASS D: an excuse we could not check fails CLOSED — the deliberate asymmetry', async () => {
+  // checkVerifySpecFields never fails a spec on our own outage, because that
+  // rule protects a correct ASSERTION from being blocked by our downtime.
+  // This runs the opposite direction: an excuse REMOVES a requirement, so one
+  // we could not verify must not quietly count. Two different rules, because
+  // the two failure modes are not symmetric.
+  const schemaFor = async () => { throw new Error('instance unreachable'); };
+  const r = await checkUnverifiableClaims(
+    { unverifiable: [{ effect: 'x', kind: 'field_absent', table: 'incident', field: 'problem' }] },
+    { schemaFor }
+  );
+  assert.equal(r.verified.length, 0, 'must never confirm a claim it could not check');
+  assert.equal(r.ok, false);
+  assert.match(r.errors[0], /could not be checked/);
+  assert.match(r.errors[0], /does not count toward coverage/);
+});
+
+test('CLASS D: an excuse naming the wrong table is caught, not swallowed', async () => {
+  // Measured live in §20: the model excused a promise with table "problem" and
+  // field "assigned_to" while passing the sys_id of a sys_user_group record.
+  // The read failed, the error was swallowed by a bare catch, and the claim
+  // silently reduced the coverage requirement anyway.
+  const readRecord = async (t, id) => {
+    if (t === 'problem') throw new Error(`No record found in problem for sys_id ${id}`);
+    return { manager: { display_value: '', value: '' } };
+  };
+  const r = await checkUnverifiableClaims(
+    {
+      unverifiable: [
+        { effect: 'assign to manager', kind: 'source_empty', table: 'problem', field: 'assigned_to', sys_id: '8a5055c9c61122780043563ef53438e3' },
+      ],
+    },
+    { readRecord }
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.verified.length, 0);
+  assert.match(r.errors[0], /no problem record with sys_id 8a5055c9/);
+  assert.match(r.errors[0], /the table the value is READ FROM/);
+});
+
+test('CLASS D: a spec with no unverifiable block is unaffected', () => {
+  const r = validateVerifySpec(baseSpec(6), { promisedEffects: SIX_PROMISES });
+  assert.equal(r.ok, true);
+  assert.equal(validateUnverifiableShape(undefined).ok, true);
 });

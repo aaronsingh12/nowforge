@@ -1253,8 +1253,21 @@ export async function createLiveFlow(spec, emit = () => {}, { updates = null } =
     );
     if (vr.ok) {
       await fsp.writeFile(verifyPath(gen.name), JSON.stringify(vr.spec, null, 2), 'utf8');
-      verification = { available: true, file: path.basename(verifyPath(gen.name)), attempts: vr.attempts, assertions: vr.spec.assert.length };
-      emit({ type: 'verify_spec_ready', assertions: vr.spec.assert.length, attempts: vr.attempts });
+      verification = {
+        available: true,
+        file: path.basename(verifyPath(gen.name)),
+        attempts: vr.attempts,
+        assertions: vr.spec.assert.length,
+        // Promises this instance cannot show, each confirmed by measurement.
+        // Reported so a partial proof never reads as a complete one.
+        unverifiable: vr.unverifiable || [],
+      };
+      emit({
+        type: 'verify_spec_ready',
+        assertions: vr.spec.assert.length,
+        attempts: vr.attempts,
+        unverifiable: (vr.unverifiable || []).length,
+      });
     } else {
       // Loud, not silent: the flow still deploys, but the gap is reported.
       verification = { available: false, reason: `Could not produce a valid verification spec in ${vr.attempts} attempts.`, errors: vr.errors };
@@ -1466,6 +1479,13 @@ You are given the automation request, the compiled Fluent source of the flow, an
                  "note": "<what promise of the request this proves>" } ],
   "cleanup": [ { "table": "<table>", "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" } } ],
 
+  // ONLY for a promised effect that CANNOT be observed on this instance. Omit when there are none.
+  "unverifiable": [ { "effect": "<the promised effect, quoted exactly from PROMISED EFFECTS>",
+                      "kind": "field_absent" | "source_empty",
+                      "table": "<table>", "field": "<field>",
+                      "sys_id": "<record the empty value would come from — required for source_empty>",
+                      "note": "<why this instance cannot show the effect>" } ],
+
   // ONLY for flows that pause (Ask For Approval, Wait For Condition). Omit otherwise.
   "resume":            { "table": "sysapproval_approver",
                          "locate": { "byQuery": "document_id={{setup.sys_id}}" },
@@ -1480,6 +1500,7 @@ RULES:
 2. Every assertion must test an effect the REQUEST PROMISED (a field the flow writes, a record the flow creates, a note the flow adds).
 3. FORBIDDEN: asserting a field that setup.payload itself sets. That is trivially true and proves nothing about the flow. If the request promises "set assigned_to when empty", then setup.payload must NOT set assigned_to, and the assertion checks assigned_to afterwards.
 3b. COVER EVERY PROMISE: produce one assertion for EACH observable effect listed under PROMISED EFFECTS below. If three effects are promised, the spec needs three assertions. Asserting fewer than the request promises is incomplete and will be rejected.
+3c. UNVERIFIABLE PROMISES — the ONE exception to 3b, and it is checked. A request can promise something this instance has no way to show: the field it would be written to does not exist here, or the value it would be copied from is EMPTY on the record it comes from. Do not fake such an effect, and do not silently drop it either. List it under "unverifiable" with the effect quoted, kind "field_absent" (name the table and the missing field) or "source_empty" (name the table, the field, and the sys_id of the record it would be read from), and a short note. Each excuse is CHECKED against the live instance: if the field turns out to exist, or the value turns out to be non-empty, the excuse is rejected and you must assert the effect instead. Excusing an effect you simply found hard to assert will therefore fail. Use this only when the LIVE INSTANCE CONTEXT or the evidence below shows the effect is impossible here.
 4. Use "display" for reference fields and choice fields (a person's name, a group's name); use "value" for raw strings, numbers and journal text.
 5. For journal fields (work_notes, comments) assert the distinctive text the flow writes — a substring match is applied.
 6. In byQuery you may use the token {{setup.sys_id}}, which is replaced with the created record's sys_id. Use it to find records the flow created (e.g. "parent={{setup.sys_id}}").
@@ -1543,9 +1564,22 @@ async function generateVerifySpec({ spec, source, context, flowName, promisedEff
  * HERE rather than trusted to the prompt: an assertion that reads a field the
  * setup payload already wrote would pass no matter what the flow does.
  */
-export function validateVerifySpec(v, { promisedEffects = [] } = {}) {
+export function validateVerifySpec(v, { promisedEffects = [], verifiedExcuses = 0 } = {}) {
   const errors = [];
   if (!v || typeof v !== 'object') return { ok: false, errors: ['Not a JSON object.'] };
+
+  // A promise this instance cannot store may be excused from coverage, but only
+  // with a reason that has been CHECKED against the live instance.
+  //
+  // `verifiedExcuses` is the count checkUnverifiableClaims actually confirmed,
+  // and it defaults to 0 so an unchecked caller subtracts nothing. Counting the
+  // CLAIMED excuses here instead was a real bug, measured in §20: a spec listed
+  // two excuses, only one held up, and the coverage requirement dropped by two
+  // anyway — letting a promise disappear on the strength of a claim about the
+  // wrong table.
+  const shape = validateUnverifiableShape(v.unverifiable);
+  errors.push(...shape.errors);
+  const excused = Math.max(0, Number(verifiedExcuses) || 0);
 
   const setupTable = v.setup?.table;
   const payload = v.setup?.payload;
@@ -1580,11 +1614,23 @@ export function validateVerifySpec(v, { promisedEffects = [] } = {}) {
     // Every promised effect needs its own assertion, or the run proves only
     // part of what the request asked for while reporting a clean pass.
     // Post-resume assertions count toward coverage.
+    //
+    // Promises this instance CANNOT store are subtracted, but only when they
+    // were formally excused with a checkable reason. Without that subtraction
+    // this rule and the field-existence check are mutually unsatisfiable —
+    // measured live in §20, where the model correctly dropped two impossible
+    // promises and was rejected for it on every remaining attempt.
     const totalAssertions = v.assert.length + afterResume.length;
-    if (promisedEffects.length > 1 && totalAssertions < promisedEffects.length) {
+    const required = promisedEffects.length - excused;
+    if (promisedEffects.length > 1 && totalAssertions < required) {
       errors.push(
-        `The request promises ${promisedEffects.length} observable effects but only ${totalAssertions} assertion(s) were written. ` +
-        `Add one assertion per promised effect: ${promisedEffects.map((e, i) => `(${i + 1}) ${e}`).join('; ')}.`
+        `The request promises ${promisedEffects.length} observable effects` +
+        (excused ? ` (${excused} excused as unverifiable, CONFIRMED against this instance, leaving ${required})` : '') +
+        ` but only ${totalAssertions} assertion(s) were written. ` +
+        `Add one assertion per promised effect: ${promisedEffects.map((e, i) => `(${i + 1}) ${e}`).join('; ')}. ` +
+        `If one of them genuinely CANNOT be observed on this instance — the field does not exist, or the ` +
+        `value it would be copied from is empty here — do not fake it and do not silently drop it: list it ` +
+        `under "unverifiable" with a reason that can be checked.`
       );
     }
     v.assert.forEach((a, i) => {
@@ -1787,6 +1833,132 @@ export async function buildRejectionEvidence(v, { schemaFor = getSchema } = {}) 
   return parts;
 }
 
+/* ------------------------------------------------------------------ *
+ * Unsatisfiable promises — the verified escape hatch (CLASS D fix)
+ *
+ * Two guards used to contradict each other, and no model could satisfy both:
+ *
+ *   - the field-existence check told the model "`incident.problem` does not
+ *     exist here, so DROP that assertion rather than faking it";
+ *   - the coverage rule then rejected the result for writing fewer assertions
+ *     than the request had promised effects.
+ *
+ * Measured live (§20): the model obeyed the first, was punished by the second,
+ * and both remaining attempts re-sent the identical spec. A5 caught the loop
+ * and named it correctly as OUR defect.
+ *
+ * The fix is not to weaken coverage. A promise may be excused ONLY if the model
+ * says which promise, why, and in a form this code can CHECK against the live
+ * instance. An unproven excuse is rejected exactly like an unproven assertion —
+ * otherwise the hatch becomes a way to quietly assert nothing, which is the
+ * false green all over again, wearing different clothes.
+ * ------------------------------------------------------------------ */
+
+const UNVERIFIABLE_KINDS = ['field_absent', 'source_empty'];
+
+/** Structural shape of the `unverifiable` block. Pure; no instance access. */
+export function validateUnverifiableShape(list) {
+  const errors = [];
+  if (list === undefined) return { ok: true, errors };
+  if (!Array.isArray(list)) return { ok: false, errors: ['unverifiable, when present, must be an array.'] };
+
+  list.forEach((u, i) => {
+    const at = `unverifiable[${i}]`;
+    if (!u || typeof u !== 'object') { errors.push(`${at} must be an object.`); return; }
+    if (!u.effect || typeof u.effect !== 'string') {
+      errors.push(`${at}.effect must quote the promised effect being excused, exactly as it appears in PROMISED EFFECTS.`);
+    }
+    if (!UNVERIFIABLE_KINDS.includes(u.kind)) {
+      errors.push(`${at}.kind must be one of ${UNVERIFIABLE_KINDS.join(' | ')} — the two reasons this code can actually check.`);
+      return;
+    }
+    if (!u.table || typeof u.table !== 'string') errors.push(`${at}.table is required so the claim can be checked.`);
+    if (!u.field || typeof u.field !== 'string') errors.push(`${at}.field is required so the claim can be checked.`);
+    if (u.kind === 'source_empty' && !u.sys_id && !u.query) {
+      errors.push(
+        `${at} claims a field is EMPTY on this instance, so it must say on WHICH record: give sys_id ` +
+        `(preferred — the live context lists resolved sys_ids) or query.`
+      );
+    }
+  });
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Check every excuse against the live instance. An excuse that turns out to be
+ * FALSE is the more dangerous direction — it would silently drop a promise the
+ * flow was supposed to keep — so a claim that does not hold is rejected with
+ * the measurement that refutes it.
+ *
+ * `schemaFor` and `readRecord` are injectable so the offline test can drive
+ * both outcomes without an instance.
+ */
+export async function checkUnverifiableClaims(v, { schemaFor = getSchema, readRecord = table.get } = {}) {
+  const errors = [];
+  const verified = [];
+  const list = Array.isArray(v?.unverifiable) ? v.unverifiable : [];
+
+  for (const [i, u] of list.entries()) {
+    const at = `unverifiable[${i}]`;
+    if (!u?.kind || !u?.table || !u?.field) continue; // shape check already reported it
+
+    if (u.kind === 'field_absent') {
+      let fields;
+      try { fields = new Set((await schemaFor(u.table)).fields.map((f) => f.name)); }
+      catch (err) {
+        // NOTE the deliberate difference from checkVerifySpecFields, which
+        // never fails a spec on our own outage. That rule protects a correct
+        // ASSERTION from being blocked. This is the opposite direction: an
+        // excuse REMOVES a requirement, so an excuse we could not check must
+        // not quietly count. Fail closed, and say why.
+        errors.push(`${at} could not be checked: the schema for ${u.table} was unreadable (${err.message}). An unchecked excuse does not count toward coverage.`);
+        continue;
+      }
+      if (fields.has(u.field)) {
+        errors.push(
+          `${at} excuses "${u.effect}" on the grounds that "${u.field}" does not exist on ${u.table}, ` +
+          `but it DOES exist. The promise is verifiable here, so assert it instead of excusing it.`
+        );
+        continue;
+      }
+      verified.push({ ...u, confirmedBy: `${u.table} has no field named "${u.field}"` });
+      continue;
+    }
+
+    // source_empty — the field exists, but the record it must be read from has
+    // no value, so the effect produces nothing observable on THIS instance.
+    let rec = null;
+    let readError = null;
+    try { rec = u.sys_id ? await readRecord(u.table, u.sys_id) : null; }
+    catch (err) { readError = err.message; }
+    if (!rec) {
+      // Measured live (§20): the model excused a promise with table "problem"
+      // and field "assigned_to" while giving the sys_id of a sys_user_group
+      // record. The read fails, and swallowing that would let a claim about
+      // the wrong table silently remove a requirement.
+      errors.push(
+        `${at} claims "${u.field}" is empty on ${u.table}, but ${u.sys_id ? `no ${u.table} record with sys_id ${u.sys_id} could be read` : 'no sys_id was given'}` +
+        `${readError ? ` (${readError})` : ''}. Check that "table" is the table the value is READ FROM and that "sys_id" ` +
+        `identifies a record on that same table — the live context lists resolved sys_ids with their tables. ` +
+        `An excuse that cannot be checked does not count toward coverage.`
+      );
+      continue;
+    }
+    const cell = rec[u.field];
+    const value = cell && typeof cell === 'object' ? (cell.value ?? cell.display_value) : cell;
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      errors.push(
+        `${at} excuses "${u.effect}" on the grounds that ${u.table}.${u.field} is empty, but it reads ` +
+        `"${String(value).slice(0, 60)}" on this instance. The promise is verifiable here, so assert it.`
+      );
+      continue;
+    }
+    verified.push({ ...u, confirmedBy: `${u.table}.${u.field} is empty on the referenced record` });
+  }
+
+  return { ok: errors.length === 0, errors, verified };
+}
+
 /** Generate a verification spec, rejecting and regenerating invalid ones. */
 async function generateVerification(args, emit = () => {}) {
   let priorErrors = null;
@@ -1821,10 +1993,21 @@ async function generateVerification(args, emit = () => {}) {
       emit({ type: 'verify_spec_rejected', attempt, errors: priorErrors });
       continue;
     }
-    const check = validateVerifySpec(candidate, { promisedEffects: args.promisedEffects || [] });
+    // Order matters: every excuse is measured against the instance FIRST, and
+    // only the ones that hold up are allowed to reduce the coverage
+    // requirement. An excuse that does not hold is rejected exactly like an
+    // unproven assertion — otherwise the hatch becomes a way to assert nothing
+    // and still report a clean pass.
+    const excuseCheck = await checkUnverifiableClaims(candidate);
+    const check = validateVerifySpec(candidate, {
+      promisedEffects: args.promisedEffects || [],
+      verifiedExcuses: excuseCheck.verified.length,
+    });
     const fieldCheck = check.ok ? await checkVerifySpecFields(candidate) : { ok: true, errors: [] };
-    if (check.ok && fieldCheck.ok) return { ok: true, spec: candidate, attempts: attempt };
-    priorErrors = [...check.errors, ...fieldCheck.errors];
+    if (check.ok && fieldCheck.ok && excuseCheck.ok) {
+      return { ok: true, spec: candidate, attempts: attempt, unverifiable: excuseCheck.verified };
+    }
+    priorErrors = [...check.errors, ...fieldCheck.errors, ...excuseCheck.errors];
 
     let added = 0;
     if (!fieldCheck.ok) {
@@ -2100,6 +2283,67 @@ export async function verify(name, emit = () => {}) {
 }
 
 /**
+ * Regenerate a verification spec for an ALREADY-DEPLOYED managed flow, without
+ * rebuilding or reinstalling anything.
+ *
+ * This exists because a deploy can legitimately succeed while spec generation
+ * fails (docs/fluent-research.md §14: the flow shipped, no spec could be
+ * written, and `createLiveFlow` reported the gap honestly). Before this, the
+ * only way to retry was to redeploy the flow — which ships the whole
+ * application and moves every artifact's `sys_updated_on` for nothing.
+ *
+ * Reads only: the instance is touched for schema and reference lookups, never
+ * written. Running the resulting spec is still a separate, approved step.
+ */
+export async function regenerateVerification(name, spec, emit = () => {}) {
+  const file = sourcePath(name);
+  const source = await fsp.readFile(file, 'utf8').catch(() => null);
+  if (!source) {
+    return { ok: false, message: `No managed source for "${name}". listManaged() shows what is managed here.` };
+  }
+
+  // The same context the build path would have had: real schema for the
+  // trigger table, real sys_ids for every proper noun the spec names.
+  const intent = await extractIntent(spec, codegenDecoding(specFingerprint(spec), 0));
+  emit({ type: 'intent', intent });
+  const context = await buildLiveContext(intent);
+  if (context.resolved.length) emit({ type: 'resolved', resolved: context.resolved });
+
+  const promisedEffects = intent?.promised_effects || [];
+  const vr = await generateVerification({ spec, source, context, flowName: name, promisedEffects }, emit);
+
+  if (!vr.ok) {
+    emit({ type: 'verify_spec_failed', errors: vr.errors });
+    return {
+      ok: false,
+      attempts: vr.attempts,
+      stalled: Boolean(vr.stalled),
+      errors: vr.errors,
+      promisedEffects,
+      message: `No valid verification spec after ${vr.attempts} attempt(s).`,
+    };
+  }
+
+  const target = verifyPath(name);
+  await fsp.writeFile(target, JSON.stringify(vr.spec, null, 2), 'utf8');
+  emit({
+    type: 'verify_spec_ready',
+    assertions: vr.spec.assert.length,
+    attempts: vr.attempts,
+    unverifiable: (vr.unverifiable || []).length,
+  });
+  return {
+    ok: true,
+    file: path.basename(target),
+    attempts: vr.attempts,
+    assertions: vr.spec.assert.length,
+    promisedEffects,
+    unverifiable: vr.unverifiable || [],
+    spec: vr.spec,
+  };
+}
+
+/**
  * Scheduled flows cannot be verified by firing them: there is no supported
  * manual-execute path. `now-sdk --help` exposes no run command (only ATF via
  * cicd), and sn_fd.FlowAPI is server-side script only, reachable solely by
@@ -2163,5 +2407,5 @@ export async function verifySchedule(name, expected = {}) {
 export const fluent = {
   capability, createLiveFlow, generateAndValidate, deploy,
   listManaged, removeManaged, smokeRun, slugify, parseArtifacts,
-  verify, verifySchedule, validateVerifySpec,
+  verify, verifySchedule, validateVerifySpec, regenerateVerification,
 };

@@ -1357,3 +1357,145 @@ Verification attempts were raised 3 → 4. Raising a budget is only worth anythi
 |---|---|---|---|
 | 12 | **Ollama accepts `seed` and ignores it** | no error, no warning; the parameter is simply inert on `*-cloud` models, on both `/v1` and the native `/api/chat` | Never assume reproducibility. Verify with two identical seeded calls at temperature > 0 — if they differ, the seed is decorative |
 | 13 | **`temperature: 0` is only approximately deterministic** | repeated identical calls agree for a while, then diverge mid-output | Batched inference re-orders floating-point reductions. Guards must hold under non-determinism; a "we pinned the seed" comment is not a guarantee |
+
+---
+
+## 20. Test 1 Step 1 resume — it closes, after the guards stopped contradicting each other
+
+§14 left Test 1 with a deployed flow and **no verification spec**: three attempts running, the
+model insisted on `sys_id={{setup.sys_id}}^problemISNOTEMPTY`, a locator on a field that exists
+nowhere on this instance. Resumed here with the attempt budget at 4 and A5's measured evidence in
+play.
+
+**Result: closed. `ok: true`, 2 attempts, 3 assertions + 2 confirmed-unverifiable promises.**
+
+Getting there took finding two bugs in the guards themselves, both of which mattered more than
+the original failure.
+
+### Provenance, stated plainly
+
+The original spec text was **never persisted** — only its fingerprint, `0a8c04f64afd4b31`, and
+none of three careful reconstructions reproduces it. The spec used here was rebuilt from the
+deployed source's own `description` plus the five promises measured in §14.
+
+So this is a re-run of the same **problem**, not a byte-identical replay of the same **request**.
+That is a real limitation of the result and it is also the first concrete argument for Track A:
+a pipeline that cannot say what it was asked to build cannot reproduce its own work. Sessions and
+specs are now persisted (§A-1), so the next resume will not have this asterisk.
+
+### The old failure class is gone
+
+Attempt 1 reached for `^problemISNOTEMPTY` exactly as before. A5 attached one measured evidence
+block — the actual reference-field inventory of `incident`, every field and the table it points
+at — and **attempt 2 never returned to it, in any run.**
+
+Three attempts of prose ("that field does not exist") had failed to move this model. One
+dictionary listing moved it immediately. That is the whole thesis of A5, and it is the single
+clearest measurement in this document: *the model does not need to be told again, it needs to be
+shown once.*
+
+### CLASS D — two guards that could not both be satisfied ⚠️
+
+The first resume run did not close. It failed differently, and worse:
+
+```
+attempt 1  rejected: locator on `problem`, which does not exist        (evidence +1)
+attempt 2  rejected: 6 promised effects, only 4 assertions written     (evidence +0)
+attempt 3  rejected: 6 promised effects, only 4 assertions written     (evidence +0)
+attempt 4  REFUSED by A5 — this prompt is byte-identical to attempt 3
+```
+
+The model had done exactly as instructed. The field-existence check told it to **drop** the two
+assertions this instance cannot support; the coverage rule then rejected it for **dropping**
+them. Two guards in direct contradiction, and **no model could have satisfied both.** More
+attempts, a better model, a different prompt — none of it would have helped.
+
+A5 caught it and named it correctly, in its own message: *"This is a defect in the evidence
+builder, not a model failure."* Before A5, this would have quietly burned attempt 4 and reported
+"could not produce a spec in 4 attempts", filing a bug in our own logic under the model's name.
+That is the guard doing precisely the job it was built for.
+
+Both dropped promises were independently re-measured and are genuinely unsatisfiable here:
+
+```
+incident.problem exists?                 false
+incident.problem_id exists?              false
+incident fields referencing `problem`:   NONE
+Hardware group manager                   {"display_value":"","value":""}
+```
+
+**gpt-oss identified exactly the two promises §14's hand-run counter-probe found impossible, and
+dropped exactly those two.** It was right, and the pipeline punished it for being right.
+
+### The fix: a verified escape hatch, not a weaker rule
+
+Coverage was not relaxed. A promise may now be excused only by naming itself, in a form this code
+**checks against the live instance**:
+
+```json
+"unverifiable": [
+  { "effect": "link the new problem back to the incident",
+    "kind": "field_absent",  "table": "incident", "field": "problem" },
+  { "effect": "assign the problem to the Hardware group manager when Critical",
+    "kind": "source_empty",  "table": "sys_user_group", "field": "manager",
+    "sys_id": "8a5055c9c61122780043563ef53438e3" }
+]
+```
+
+`field_absent` is confirmed against the dictionary; `source_empty` by reading the named record.
+An excuse that does **not** hold is rejected with the measurement refuting it — if the field turns
+out to exist, or the value turns out to be non-empty, the model is told to assert the effect
+instead. Without that, the hatch would be a way to assert nothing and still report a clean pass:
+the false green of §14 in different clothes.
+
+### Two bugs in the hatch, caught by running it
+
+The first implementation of the hatch was itself wrong, in both of the ways this repo keeps
+having to learn:
+
+**1. A bare `catch` swallowed unverifiable claims.** The model excused a promise with
+`table: "problem", field: "assigned_to"` while passing the sys_id of a **sys_user_group** record.
+The read threw, `catch { continue; }` ate it, and the claim counted anyway. A silent fallback,
+straight into the house rule. It now fails closed and says which table it could not read.
+
+**2. Coverage subtracted CLAIMED excuses, not CONFIRMED ones.** A spec listed two excuses, only
+one held up, and the requirement dropped by two regardless — a promise vanishing on the strength
+of a claim about the wrong table. `validateVerifySpec` now takes `verifiedExcuses`, the count
+`checkUnverifiableClaims` actually confirmed, and **defaults it to 0** so an unchecked caller
+subtracts nothing.
+
+The deliberate asymmetry is worth stating, because it looks like an inconsistency: the field
+checker *never* fails a spec on our own outage, while an unverified *excuse* always fails closed.
+Those protect opposite things. An unreadable schema must not block a correct **assertion**; an
+unverified excuse must not silently remove a **requirement**. The failure modes are not
+symmetric, so the rules are not either.
+
+### The closing run
+
+```
+attempt 1  rejected: locator on `problem`             (evidence +1)
+attempt 2  ready:    3 assertions, 2 excuses CONFIRMED
+```
+
+3 asserted + 2 confirmed-unverifiable = 5, exactly the 5 promised effects. The setup is a proper
+create-then-update transition, and priority is driven through `impact` + `urgency` rather than
+written directly — trap #5 respected without being reminded.
+
+### Non-determinism, visible in the results themselves
+
+Across three runs of the identical spec the intent extractor produced **6, 6 and 5** promised
+effects, and the flow name came back as *"…Vendor Incidents"* once and *"…Vendor Issues"* twice.
+Same input, same temperature 0, same seed. This is §19's finding showing up in ordinary
+operation rather than in a probe, and it is why A2 imposes the name instead of asking for it.
+
+### What remains, precisely
+
+- **The deployed flow still carries trap #10.** `create-problem-for-on-hold-vendor-incidents.now.ts`
+  sets no `trigger_strategy`, so it inherits `once` and fires **once ever** per incident.
+  A4 now blocks new flows from shipping this defect, but it does not retro-fix a deployed one.
+  Regenerating this flow would trip A4 and force the fix — that is a deliberate, separate change,
+  not something to slip into a verification resume.
+- **A3's ceiling is the intent extractor.** Grounding proves a literal is in the request, never
+  that it is text the flow must write. A mislabelled choice label would reject a correct flow.
+- **The spec is proven, not run.** `regenerateVerification` reads schema and calls the model; it
+  writes nothing to the instance. Executing the spec is still a separate, approved step.
