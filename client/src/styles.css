@@ -337,3 +337,69 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; margin: 0; }
 
 /* The chat column now lives inside .agent-layout and owns its own height. */
 .agent-layout .chat-wrap { height: auto; min-height: 0; }
+
+/* ── Catalog: policy builder and variable editor (Track C) ──────────────
+   Every colour, radius, font and spacing step below already exists in the
+   token block at the top of this file. Nothing here introduces a new one,
+   and nothing above was changed — these are compositions, in the same
+   vocabulary the rest of the app is written in. */
+
+.policy-card {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+/* A condition or action reads as one sentence, so it wraps as one. */
+.policy-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 0;
+}
+.policy-row .select, .policy-row .input { width: auto; min-width: 130px; flex: 1 1 130px; }
+.policy-row .policy-op { flex: 0 0 130px; min-width: 130px; }
+
+.policy-join {
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--muted);
+  min-width: 42px; flex: none;
+}
+.policy-when { color: var(--verdigris); }
+
+.policy-state { display: flex; flex-direction: column; gap: 3px; flex: 0 0 116px; }
+.policy-state > span {
+  font-size: 10.5px; font-weight: 600; color: var(--muted); letter-spacing: 0.3px;
+}
+/* `.policy-row .select` grows on the row's main axis, which is horizontal —
+   but inside .policy-state the main axis is VERTICAL, so the same rule stretched
+   these three selects to the height of the row. Reset it where it inverts. */
+.policy-state .select { flex: none; width: 100%; padding: 5px 8px; font-size: 12px; }
+
+.policy-readout { margin-top: 8px; font-size: 13px; line-height: 1.7; }
+.policy-then { color: var(--text); margin-top: 2px; }
+.policy-note { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+
+.policy-diagnostics {
+  margin: 0; padding: 10px 12px; background: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--muted);
+  white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto;
+}
+
+/* The expanded editor for one variable, below its row in the table. */
+.variable-panel {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px 14px; margin-top: 10px;
+}
+.variable-edit { margin-top: 4px; }
+
+.reorder { display: flex; flex-direction: column; gap: 2px; }
+.reorder .btn { padding: 0 6px; line-height: 1.4; font-size: 11px; }
+
+.choice-editor { margin-top: 4px; }
+.choice-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.choice-row .input { flex: 1; }
+
+@media (max-width: 1100px) {
+  .policy-row .select, .policy-row .input { flex-basis: 100%; }
+  .policy-state { flex: 1 1 100px; }
+}

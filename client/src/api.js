@@ -20,12 +20,18 @@ export const api = {
   del: (p) => request('DELETE', p),
 };
 
-/** POST + read Server-Sent Events from the response body. */
-export async function sse(path, body, onEvent) {
+/**
+ * Send a request and read Server-Sent Events off the response body.
+ *
+ * `method` exists because deleting a catalog UI policy is also a build and an
+ * install — it removes the Fluent source and reinstalls the application — so it
+ * streams progress exactly like the create does.
+ */
+export async function sse(path, body, onEvent, method = 'POST') {
   const res = await fetch(BASE + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok || !res.body) {
     let msg = 'Stream failed';

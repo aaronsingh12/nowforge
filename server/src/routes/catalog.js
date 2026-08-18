@@ -128,12 +128,8 @@ catalogRouter.post('/policies', async (req, res) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}
-
-`); } catch { /* client gone */ } };
-  const keepAlive = setInterval(() => { try { res.write(': ping
-
-'); } catch { /* noop */ } }, 15000);
+  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
     const result = await createPolicy(req.body || {}, emit);
     emit({ type: 'done', result });
@@ -156,12 +152,8 @@ catalogRouter.patch('/policies/:sysId', async (req, res) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}
-
-`); } catch { /* client gone */ } };
-  const keepAlive = setInterval(() => { try { res.write(': ping
-
-'); } catch { /* noop */ } }, 15000);
+  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
     emit({ type: 'done', result: await updatePolicy(req.params.sysId, req.body || {}, emit) });
   } catch (err) {
@@ -180,12 +172,8 @@ catalogRouter.delete('/policies/:sysId', async (req, res) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}
-
-`); } catch { /* client gone */ } };
-  const keepAlive = setInterval(() => { try { res.write(': ping
-
-'); } catch { /* noop */ } }, 15000);
+  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
     emit({ type: 'done', result: await deletePolicy(req.params.sysId, emit) });
   } catch (err) {

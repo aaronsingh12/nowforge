@@ -100,6 +100,7 @@ declare global {
                     cuip_5a17b5d5_hide_justification_unless_approval_is_needed: {
                         table: 'catalog_ui_policy'
                         id: '2f01bb49e4db4edba8bc3410972a718b'
+                        deleted: false
                     }
                     cuip_8b3ae7fe_require_justification_when_duration_is_permanent: {
                         table: 'catalog_ui_policy'
@@ -927,6 +928,7 @@ declare global {
                     {
                         table: 'catalog_ui_policy_action'
                         id: 'f18bec18711946c3a3bd55564de9b40d'
+                        deleted: false
                         key: {
                             ui_policy: '2f01bb49e4db4edba8bc3410972a718b'
                             catalog_variable: 'IO:3617b5d583bacf10b939cc65eeaad3f5'

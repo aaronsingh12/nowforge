@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { api, val, disp } from '../api.js';
 import ReferenceField, { TableField } from '../components/ReferenceField.jsx';
+import VariableEditor from '../components/VariableEditor.jsx';
+import PolicyBuilder from '../components/PolicyBuilder.jsx';
+import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 
 const CHOICE_TYPES = [3, 5, 18, 22];
 const REF_TYPES = [8, 21];
@@ -94,7 +97,7 @@ function VariableTable({ variables, typeLabel, onDelete }) {
 }
 
 /* ── Items tab ── */
-function ItemsTab({ meta, categories, catalogs, typeLabel }) {
+function ItemsTab({ meta, categories, catalogs, typeLabel, openItemId, onOpened, onCategoriesChanged }) {
   const [items, setItems] = useState([]);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(null); // deep view
@@ -104,9 +107,21 @@ function ItemsTab({ meta, categories, catalogs, typeLabel }) {
   const [attachSet, setAttachSet] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [itemTab, setItemTab] = useState('variables');
+  const [newCategory, setNewCategory] = useState(null);
 
   const load = () => api.get(`/catalog/items?search=${encodeURIComponent(search)}`).then(setItems).catch((e) => setError(e.message));
   useEffect(() => { load(); api.get('/catalog/variable-sets').then(setSets).catch(() => {}); /* eslint-disable-next-line */ }, []);
+
+  // The producers tab hands an item over rather than duplicating the editor —
+  // a record producer IS a catalog item, so managing its variables should not
+  // mean finding it again by hand.
+  useEffect(() => {
+    if (!openItemId) return;
+    openItem(openItemId);
+    onOpened?.();
+    /* eslint-disable-next-line */
+  }, [openItemId]);
 
   const openItem = (sysId) => {
     setError('');
@@ -138,10 +153,28 @@ function ItemsTab({ meta, categories, catalogs, typeLabel }) {
     finally { setBusy(false); }
   };
 
-  const deleteVariable = async (sysId) => {
-    if (!window.confirm('Delete this variable?')) return;
-    try { await api.del(`/catalog/variables/${sysId}`); openItem(val(selected.item, 'sys_id')); }
-    catch (e) { setError(e.message); }
+  const reload = () => openItem(val(selected.item, 'sys_id'));
+
+  /** C-3: an item that cannot be switched off has to be deleted to be retired. */
+  const toggleActive = async () => {
+    const id = val(selected.item, 'sys_id');
+    const next = val(selected.item, 'active') !== 'true';
+    setBusy(true); setError('');
+    try {
+      await api.patch(`/catalog/items/${id}`, { active: String(next) });
+      reload(); load();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const createCategory = async () => {
+    setBusy(true); setError('');
+    try {
+      await api.post('/catalog/categories', { title: newCategory.title, sc_catalog: newCategory.sc_catalog });
+      setNewCategory(null);
+      onCategoriesChanged?.();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
   };
 
   const doAttach = async () => {
@@ -157,7 +190,10 @@ function ItemsTab({ meta, categories, catalogs, typeLabel }) {
 
   const deleteItem = async () => {
     const id = val(selected.item, 'sys_id');
-    if (!window.confirm(`Delete catalog item "${disp(selected.item, 'name')}"?`)) return;
+    const ok = await confirmDestructive({
+      action: 'Delete catalog item', subject: disp(selected.item, 'name'), detail: CONSEQUENCE.item,
+    });
+    if (!ok) return;
     try { await api.del(`/catalog/items/${id}`); setSelected(null); load(); }
     catch (e) { setError(e.message); }
   };
@@ -176,7 +212,14 @@ function ItemsTab({ meta, categories, catalogs, typeLabel }) {
             <div className="field"><label className="label">Short description</label>
               <input className="input" value={draft.short_description} onChange={(e) => setDraft({ ...draft, short_description: e.target.value })} /></div>
             <div className="grid2">
-              <div className="field"><label className="label">Category</label>
+              <div className="field">
+                <div className="spread">
+                  <label className="label">Category</label>
+                  <button className="rail-btn" type="button"
+                    onClick={() => setNewCategory(newCategory ? null : { title: '', sc_catalog: catalogs[0]?.sys_id || '' })}>
+                    {newCategory ? 'cancel' : '+ new category'}
+                  </button>
+                </div>
                 <select className="select" value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value })}>
                   <option value="">—</option>
                   {categories.map((c) => <option key={val(c, 'sys_id')} value={val(c, 'sys_id')}>{disp(c, 'title')}</option>)}
@@ -187,6 +230,21 @@ function ItemsTab({ meta, categories, catalogs, typeLabel }) {
                   {catalogs.map((c) => <option key={c.sys_id} value={c.sys_id}>{c.title}</option>)}
                 </select></div>
             </div>
+            {newCategory && (
+              <div className="policy-card" style={{ marginBottom: 10 }}>
+                <div className="field">
+                  <label className="label">New category title</label>
+                  <input className="input" value={newCategory.title} onChange={(e) => setNewCategory({ ...newCategory, title: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label className="label">In catalog</label>
+                  <select className="select" value={newCategory.sc_catalog} onChange={(e) => setNewCategory({ ...newCategory, sc_catalog: e.target.value })}>
+                    {catalogs.map((c) => <option key={c.sys_id} value={c.sys_id}>{c.title}</option>)}
+                  </select>
+                </div>
+                <button className="btn sm" onClick={createCategory} disabled={busy || !newCategory.title}>Create category</button>
+              </div>
+            )}
             <button className="btn primary sm" onClick={createItem} disabled={busy || !draft.name}>Create item</button>
           </div>
         )}
@@ -218,33 +276,63 @@ function ItemsTab({ meta, categories, catalogs, typeLabel }) {
           <>
             <div className="spread">
               <h3 style={{ fontSize: 16 }}>{disp(selected.item, 'name')}</h3>
-              <button className="btn danger sm" onClick={deleteItem}>Delete item</button>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn sm" onClick={toggleActive} disabled={busy}>
+                  {val(selected.item, 'active') === 'true' ? 'Deactivate' : 'Activate'}
+                </button>
+                <button className="btn danger sm" onClick={deleteItem}>Delete item</button>
+              </div>
             </div>
             <p style={{ color: 'var(--muted)', marginTop: 4 }}>{disp(selected.item, 'short_description')}</p>
-            <p className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>sys_id {val(selected.item, 'sys_id')}</p>
-
-            <div className="card-title" style={{ marginTop: 16 }}>Variables</div>
-            <VariableTable variables={selected.variables} typeLabel={typeLabel} onDelete={deleteVariable} />
-
-            <div className="card-title" style={{ marginTop: 16 }}>Add variable</div>
-            <VariableForm types={meta.variableTypes} onSubmit={addVariable} busy={busy} />
-
-            <div className="card-title" style={{ marginTop: 18 }}>Variable sets</div>
-            {selected.variableSets.length === 0 && <div className="empty">No sets attached.</div>}
-            {selected.variableSets.map((s) => (
-              <div key={val(s, 'sys_id')} style={{ marginBottom: 10 }}>
-                <div className="row"><span className="badge blue">{disp(s, 'title')}</span>
-                  <span className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>{disp(s, 'internal_name')}</span></div>
-                <VariableTable variables={s._variables} typeLabel={typeLabel} />
-              </div>
-            ))}
-            <div className="row">
-              <select className="select" style={{ maxWidth: 280 }} value={attachSet} onChange={(e) => setAttachSet(e.target.value)}>
-                <option value="">Attach existing set…</option>
-                {sets.map((s) => <option key={val(s, 'sys_id')} value={val(s, 'sys_id')}>{disp(s, 'title')}</option>)}
-              </select>
-              <button className="btn sm" onClick={doAttach} disabled={!attachSet || busy}>Attach</button>
+            <div className="row" style={{ marginBottom: 6 }}>
+              <span className={`badge ${val(selected.item, 'active') === 'true' ? 'green' : ''}`}>
+                {val(selected.item, 'active') === 'true' ? 'active' : 'inactive'}
+              </span>
+              <span className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>sys_id {val(selected.item, 'sys_id')}</span>
             </div>
+
+            <div className="tabs" style={{ marginBottom: 12 }}>
+              <button className={`tab ${itemTab === 'variables' ? 'active' : ''}`} onClick={() => setItemTab('variables')}>Variables</button>
+              <button className={`tab ${itemTab === 'policies' ? 'active' : ''}`} onClick={() => setItemTab('policies')}>UI policies</button>
+              <button className={`tab ${itemTab === 'sets' ? 'active' : ''}`} onClick={() => setItemTab('sets')}>Variable sets</button>
+            </div>
+
+            {itemTab === 'variables' && (
+              <>
+                <VariableEditor
+                  catItemId={val(selected.item, 'sys_id')}
+                  variables={selected.variables}
+                  typeLabel={typeLabel}
+                  onChanged={reload}
+                />
+                <div className="card-title" style={{ marginTop: 16 }}>Add variable</div>
+                <VariableForm types={meta.variableTypes} onSubmit={addVariable} busy={busy} />
+              </>
+            )}
+
+            {itemTab === 'policies' && (
+              <PolicyBuilder catItemId={val(selected.item, 'sys_id')} meta={meta} />
+            )}
+
+            {itemTab === 'sets' && (
+              <>
+                {selected.variableSets.length === 0 && <div className="empty">No sets attached.</div>}
+                {selected.variableSets.map((s) => (
+                  <div key={val(s, 'sys_id')} style={{ marginBottom: 10 }}>
+                    <div className="row"><span className="badge blue">{disp(s, 'title')}</span>
+                      <span className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>{disp(s, 'internal_name')}</span></div>
+                    <VariableTable variables={s._variables} typeLabel={typeLabel} />
+                  </div>
+                ))}
+                <div className="row">
+                  <select className="select" style={{ maxWidth: 280 }} value={attachSet} onChange={(e) => setAttachSet(e.target.value)}>
+                    <option value="">Attach existing set…</option>
+                    {sets.map((s) => <option key={val(s, 'sys_id')} value={val(s, 'sys_id')}>{disp(s, 'title')}</option>)}
+                  </select>
+                  <button className="btn sm" onClick={doAttach} disabled={!attachSet || busy}>Attach</button>
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
@@ -353,6 +441,19 @@ function GuidesTab() {
     finally { setBusy(false); }
   };
 
+  const removeGuide = async (g) => {
+    const ok = await confirmDestructive({
+      action: 'Delete order guide', subject: disp(g, 'name'), detail: CONSEQUENCE.guide,
+    });
+    if (!ok) return;
+    setError('');
+    try {
+      await api.del(`/catalog/order-guides/${val(g, 'sys_id')}`);
+      if (selected && val(selected, 'sys_id') === val(g, 'sys_id')) setSelected(null);
+      load();
+    } catch (e) { setError(e.message); }
+  };
+
   const addGuideItem = async () => {
     setBusy(true); setError('');
     try {
@@ -396,7 +497,10 @@ function GuidesTab() {
           <div className="empty">Select a guide to manage its rule-base items.</div>
         ) : (
           <>
-            <h3 style={{ fontSize: 15 }}>{disp(selected, 'name')}</h3>
+            <div className="spread">
+              <h3 style={{ fontSize: 15 }}>{disp(selected, 'name')}</h3>
+              <button className="btn danger sm" onClick={() => removeGuide(selected)}>Delete guide</button>
+            </div>
             <div className="note warn" style={{ margin: '10px 0' }}>
               Rule-base entries write to <span className="mono">sc_cat_item_guide_items</span>. If adds fail on your
               release, verify the table name via Settings → table lookup and adjust GUIDE_RULE_TABLE in the server.
@@ -435,7 +539,7 @@ function GuidesTab() {
 }
 
 /* ── Record producers tab ── */
-function ProducersTab() {
+function ProducersTab({ onOpenItem }) {
   const [producers, setProducers] = useState([]);
   const [draft, setDraft] = useState({ name: '', table: null, short_description: '', script: '' });
   const [busy, setBusy] = useState(false);
@@ -444,6 +548,16 @@ function ProducersTab() {
 
   const load = () => api.get('/catalog/record-producers').then(setProducers).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
+
+  const remove = async (p) => {
+    const ok = await confirmDestructive({
+      action: 'Delete record producer', subject: disp(p, 'name'), detail: CONSEQUENCE.producer,
+    });
+    if (!ok) return;
+    setError('');
+    try { await api.del(`/catalog/record-producers/${val(p, 'sys_id')}`); load(); }
+    catch (e) { setError(e.message); }
+  };
 
   const create = async () => {
     setBusy(true); setError(''); setNotice('');
@@ -480,18 +594,26 @@ function ProducersTab() {
       <div className="card">
         <div className="card-title">Record producers</div>
         <table className="table">
-          <thead><tr><th>Name</th><th>Target table</th><th>Active</th></tr></thead>
+          <thead><tr><th>Name</th><th>Target table</th><th>Active</th><th /></tr></thead>
           <tbody>
             {producers.map((p) => (
               <tr key={val(p, 'sys_id')}>
                 <td>{disp(p, 'name')}</td>
                 <td className="mono">{disp(p, 'table_name')}</td>
                 <td><span className={`badge ${val(p, 'active') === 'true' ? 'green' : ''}`}>{val(p, 'active') === 'true' ? 'active' : 'off'}</span></td>
+                <td>
+                  <div className="row" style={{ gap: 4, flexWrap: 'nowrap' }}>
+                    {/* A producer IS a catalog item, so managing its variables
+                        and policies is one click, not a second search. */}
+                    <button className="btn ghost sm" onClick={() => onOpenItem(val(p, 'sys_id'))}>Variables &amp; policies</button>
+                    <button className="btn danger sm" onClick={() => remove(p)}>✕</button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
-        {producers.length === 0 && <div className="empty">No record producers yet. Variables can be added from the Items tab (producers are catalog items too).</div>}
+        {producers.length === 0 && <div className="empty">No record producers yet.</div>}
       </div>
     </div>
   );
@@ -503,12 +625,16 @@ export default function Catalog() {
   const [meta, setMeta] = useState({ variableTypes: [] });
   const [categories, setCategories] = useState([]);
   const [catalogs, setCatalogs] = useState([]);
+  const [openItemId, setOpenItemId] = useState(null);
 
+  const loadCategories = () => api.get('/catalog/categories').then(setCategories).catch(() => {});
   useEffect(() => {
     api.get('/catalog/meta').then(setMeta).catch(() => {});
-    api.get('/catalog/categories').then(setCategories).catch(() => {});
+    loadCategories();
     api.get('/catalog/catalogs').then(setCatalogs).catch(() => {});
   }, []);
+
+  const openItem = (sysId) => { setOpenItemId(sysId); setTab('items'); };
 
   const typeLabel = (code) => meta.variableTypes.find((t) => String(t.code) === String(code))?.label || code;
 
@@ -520,10 +646,22 @@ export default function Catalog() {
         <button className={`tab ${tab === 'guides' ? 'active' : ''}`} onClick={() => setTab('guides')}>Order guides</button>
         <button className={`tab ${tab === 'producers' ? 'active' : ''}`} onClick={() => setTab('producers')}>Record producers</button>
       </div>
-      {tab === 'items' && <ItemsTab meta={meta} categories={categories} catalogs={catalogs} typeLabel={typeLabel} />}
+      {/* The variable type codes come from the instance dictionary; when they
+          could not be read the fallback list is stale enough to matter, so it
+          is said rather than served quietly. */}
+      {meta.variableTypeSource === 'fallback' && (
+        <div className="note warn">
+          Variable types could not be read from this instance ({meta.variableTypeFallbackReason}), so NowForge is
+          showing its built-in list. Those codes drift between releases — spot-check any type you create.
+        </div>
+      )}
+      {tab === 'items' && (
+        <ItemsTab meta={meta} categories={categories} catalogs={catalogs} typeLabel={typeLabel}
+          openItemId={openItemId} onOpened={() => setOpenItemId(null)} onCategoriesChanged={loadCategories} />
+      )}
       {tab === 'sets' && <SetsTab meta={meta} typeLabel={typeLabel} />}
       {tab === 'guides' && <GuidesTab />}
-      {tab === 'producers' && <ProducersTab />}
+      {tab === 'producers' && <ProducersTab onOpenItem={openItem} />}
     </div>
   );
 }

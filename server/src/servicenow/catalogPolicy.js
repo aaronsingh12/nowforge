@@ -268,7 +268,7 @@ function shapeAction(a, byId) {
   };
 }
 
-function shapePolicy(p, actions, byId) {
+function shapePolicy(p, actions, byId, managed = null) {
   const conditions = decorateConditions(raw(p.catalog_conditions) || '', byId);
   const uiType = raw(p.ui_type) ?? '';
   return {
@@ -281,6 +281,9 @@ function shapePolicy(p, actions, byId) {
     on_load: raw(p.on_load) === 'true',
     reverse_if_false: raw(p.reverse_if_false) === 'true',
     order: Number(raw(p.order)) || 100,
+    // Only a policy NowForge authored has a Fluent source to edit or remove.
+    // Everything else is read-only here, the same rule flows follow.
+    managed,
     ui_type: String(uiType),
     ui_type_label: { 0: 'Desktop', 1: 'Mobile / Service Portal', 10: 'All' }[String(uiType)] || String(uiType),
     applies_catalog: raw(p.applies_catalog) === 'true',
@@ -313,6 +316,7 @@ export async function listPoliciesForItem(catItemId) {
     query: `catalog_item=${catItemId}^ORDERBYorder`, fields: POLICY_FIELDS, limit: 100,
   });
   if (!policies.length) return { catalog_item: catItemId, variables, policies: [] };
+  const managed = new Set(await managedSlugs());
 
   const ids = policies.map((p) => raw(p.sys_id));
   const actions = await table.query(ACTION_TABLE, {
@@ -327,7 +331,12 @@ export async function listPoliciesForItem(catItemId) {
   return {
     catalog_item: catItemId,
     variables,
-    policies: policies.map((p) => shapePolicy(p, byPolicy.get(raw(p.sys_id)) || [], byId)),
+    policies: policies.map((p) => shapePolicy(
+      p,
+      byPolicy.get(raw(p.sys_id)) || [],
+      byId,
+      managed.has(policySlug(catItemId, shown(p.short_description))),
+    )),
   };
 }
 
@@ -338,7 +347,13 @@ export async function getPolicy(sysId) {
   const variables = catItemId ? await itemVariables(catItemId) : [];
   const byId = new Map(variables.map((v) => [v.sys_id, v]));
   const actions = await table.query(ACTION_TABLE, { query: `ui_policy=${sysId}^ORDERBYorder`, fields: ACTION_FIELDS, limit: 200 });
-  return shapePolicy(p, actions.map((a) => shapeAction(a, byId)), byId);
+  const managed = new Set(await managedSlugs());
+  return shapePolicy(
+    p,
+    actions.map((a) => shapeAction(a, byId)),
+    byId,
+    catItemId ? managed.has(policySlug(catItemId, shown(p.short_description))) : false,
+  );
 }
 
 /* ------------------------------------------------------------------ *

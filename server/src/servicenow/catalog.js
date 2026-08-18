@@ -238,8 +238,11 @@ export const catalog = {
       question: variableId,
       text,
       // `value` is what a UI policy condition compares against, so an empty one
-      // makes the choice unusable in a policy. Derived rather than left blank.
-      value: value || String(text).toLowerCase().replace(/\s+/g, '_'),
+      // makes the choice unusable in a policy. Derived rather than left blank —
+      // and punctuation is dropped, not underscored: "Contractor (30 days)" was
+      // producing `contractor_(30_days)`, a value nobody wants to type into a
+      // condition and one that reads like a mistake when it turns up there.
+      value: value || String(text).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
       order: String(order ?? next),
       inactive: inactive ? 'true' : 'false',
     }, 'false');

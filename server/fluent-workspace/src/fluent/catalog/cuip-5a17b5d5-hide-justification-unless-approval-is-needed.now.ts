@@ -11,8 +11,9 @@ CatalogUiPolicy({
     active: true,
     onLoad: true,
     reverseIfFalse: true,
-    // 'all' is ui_type 10. The platform's own default is Desktop, which is why
-    // a policy can pass a test on the classic form and do nothing on /sp.
+    // 'all' is ui_type 10 — the SDK's own default, and unambiguous across every
+    // rendering surface. Not a workaround: a policy at ui_type 0 was measured
+    // working on the Service Portal too (see the note at the top of this file).
     runScriptsInUiType: 'all',
     order: 100,
     actions: [
