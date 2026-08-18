@@ -52,6 +52,38 @@ declare global {
                         id: '022121081c3f41808cdd6805658b2298'
                         deleted: false
                     }
+                    cphv_create_problem: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'cdb31f0bfe1f4806afc9fc244b6f9bc4'
+                    }
+                    cphv_flow: {
+                        table: 'sys_hub_flow'
+                        id: 'c8ababc31afa49929182a12b4bdbe0ee'
+                    }
+                    cphv_hw_lookup: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'a8bab536467847c4b5e1988cf5874216'
+                    }
+                    cphv_if_critical: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'e967df809629415d97ab4b57114cc323'
+                    }
+                    cphv_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '5667217123574665ab56f376cb32025a'
+                    }
+                    cphv_update_incident_problem: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '23f6b785829c4848ba07a4cc85e72d66'
+                    }
+                    cphv_update_incident_worknote: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '64e10d01c8c848baa786d3145ab2d8bc'
+                    }
+                    cphv_update_problem_assigned: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '09deaba3814c475a983d37a050ad85ea'
+                    }
                     daily_p1_digest_flow: {
                         table: 'sys_hub_flow'
                         id: 'b2f18c963fd244f6a02895a7a6359536'

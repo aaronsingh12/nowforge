@@ -353,3 +353,45 @@ test('omitting setup.update stays valid — created triggers are unaffected', as
   assert.deepEqual(res.errors, []);
   assert.equal(res.ok, true);
 });
+
+/* ------------------------------------------------------------------ *
+ * Verification specs must not raise FALSE alarms
+ *
+ * Both of these fired on the live run: a correct flow was reported as failing
+ * because the spec asserted something the runner could never satisfy.
+ * ------------------------------------------------------------------ */
+
+test('an unsubstituted {{token}} in an expected value is rejected', async () => {
+  const { validateVerifySpec } = await import('../src/servicenow/fluent.js');
+  const spec = {
+    ...UPDATE_TRIGGERED_SPEC,
+    assert: [
+      { table: 'incident', locate: { bySetupRecord: true }, field: 'work_notes',
+        expect: { value: 'Problem {{lookup.problem_number}} created' }, note: 'work note' },
+      { table: 'incident', locate: { bySetupRecord: true }, field: 'problem',
+        expect: { display: '{{lookup.problem_number}}' }, note: 'link' },
+    ],
+  };
+  const res = validateVerifySpec(spec);
+  assert.equal(res.ok, false);
+  assert.equal(res.errors.length, 2, 'both halves of expect are checked');
+
+  const e = res.errors[0];
+  assert.match(e, /\{\{lookup\.problem_number\}\}/, 'quotes the offending token back');
+  assert.match(e, /compared literally and FAIL a correct flow/);
+  assert.match(e, /only supported token is \{\{setup\.sys_id\}\}/);
+  assert.match(e, /put the proof in the LOCATOR instead/, 'teaches the repair');
+});
+
+test('{{setup.sys_id}} is still allowed in a locator', async () => {
+  const { validateVerifySpec } = await import('../src/servicenow/fluent.js');
+  const res = validateVerifySpec({
+    ...UPDATE_TRIGGERED_SPEC,
+    assert: [
+      { table: 'problem', locate: { byQuery: 'parent={{setup.sys_id}}' }, field: 'short_description',
+        expect: { value: 'Vendor issue: Test incident' }, note: 'created problem' },
+    ],
+  });
+  assert.deepEqual(res.errors, []);
+  assert.equal(res.ok, true);
+});

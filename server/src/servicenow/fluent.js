@@ -698,16 +698,28 @@ async function buildLiveContext(intent) {
         // and without this the model invents a plausible display name — which
         // fails the assertion for a flow that is actually correct.
         const related = [];
+        const empties = [];
         try {
           const rec = await table.get(l.table, hits[0].sys_id);
           for (const f of ['name', 'manager', 'email', 'user_name', 'parent', 'assignment_group']) {
             const cell = rec?.[f];
-            if (!cell) continue;
+            // Distinguish "absent from this table" from "present but EMPTY".
+            // Silently dropping an empty field is what let a verification spec
+            // assert a group manager named "John Doe" on a group that has no
+            // manager at all: the model was told nothing, so it invented one.
+            if (cell === undefined || cell === null) continue;
             const dv = typeof cell === 'object' ? (cell.display_value ?? cell.value) : cell;
             const rv = typeof cell === 'object' ? cell.value : cell;
             if (dv) related.push(`    ${f} = "${dv}"${rv && rv !== dv ? ` (sys_id ${rv})` : ''}`);
+            else empties.push(f);
           }
         } catch { /* related fields are a bonus, never required */ }
+        if (empties.length) {
+          related.push(
+            `    EMPTY on this instance (the field exists but has no value): ${empties.join(', ')}. ` +
+            `Any effect that depends on one of these produces NOTHING here — never invent a placeholder value for it.`
+          );
+        }
         parts.push(
           `RESOLVED REFERENCE "${l.name}" on ${l.table}:\n${hits.map((h) => `  sys_id=${h.sys_id} display=${h.display}`).join('\n')}` +
           (related.length ? `\n  fields on "${hits[0].display}" — use these exact display values, do not invent names:\n${related.join('\n')}` : '')
@@ -1327,6 +1339,8 @@ RULES:
 4. Use "display" for reference fields and choice fields (a person's name, a group's name); use "value" for raw strings, numbers and journal text.
 5. For journal fields (work_notes, comments) assert the distinctive text the flow writes — a substring match is applied.
 6. In byQuery you may use the token {{setup.sys_id}}, which is replaced with the created record's sys_id. Use it to find records the flow created (e.g. "parent={{setup.sys_id}}").
+6b. {{setup.sys_id}} is the ONLY token, and it works ONLY inside locate.byQuery. NEVER put {{...}} in expect.value or expect.display — nothing substitutes it there, it is compared literally, and it fails a flow that is working. If an expected value is not knowable when you write the spec (a generated number like PRB0012345, a sys_id), do not guess it: move the proof into the LOCATOR. Locate with a query that can only match when the effect happened, then assert a field whose value you DO know. A locator that matches nothing is reported as a failed assertion, so the locator carries the proof.
+6c. Never assert a field that is not in the REAL SCHEMA below, and never assume a value for a field the live context reports as EMPTY on this instance — an effect that depends on an empty field produces nothing here, so asserting a made-up value fails a correct flow.
 7. cleanup MUST include the setup record ({ "bySetupRecord": true }) plus every record the flow creates.
 8. Keep setup.payload minimal: only what the trigger condition requires, plus a short_description so the record is identifiable.
 9. DERIVED FIELDS — critical. On task tables (incident, problem, change_request, sc_task) "priority" is CALCULATED from "impact" and "urgency". Writing priority directly is silently overwritten on insert: {"priority":"1"} lands as 4 - Low. To create a P1 record set {"impact":"1","urgency":"1"} and do NOT set priority at all. The same applies to any field the platform computes — set the inputs, not the result.
@@ -1426,6 +1440,26 @@ export function validateVerifySpec(v, { promisedEffects = [] } = {}) {
       }
       const hasExpect = a?.expect && (a.expect.value !== undefined || a.expect.display !== undefined);
       if (!hasExpect) errors.push(`${at}.expect needs a value or display.`);
+
+      // {{setup.sys_id}} is the ONLY token the runner substitutes, and only
+      // inside locate.byQuery. A token anywhere in an expected VALUE is
+      // compared literally and fails a flow that is behaving correctly — a
+      // false alarm, which is worse than no assertion at all.
+      for (const half of ['value', 'display']) {
+        const raw = a?.expect?.[half];
+        if (typeof raw !== 'string') continue;
+        const bad = raw.match(/\{\{[^}]*\}\}/g);
+        if (!bad) continue;
+        errors.push(
+          `${at}.expect.${half} contains ${bad.join(', ')}, which the runner does not substitute — ` +
+          `it would be compared literally and FAIL a correct flow. The only supported token is ` +
+          `{{setup.sys_id}}, and only inside locate.byQuery. To prove a field references a record ` +
+          `the flow created, put the proof in the LOCATOR instead: locate the record with a query ` +
+          `that only matches when the link exists (e.g. ` +
+          `"sys_id={{setup.sys_id}}^<ref_field>.short_description=<the value the flow wrote>") and ` +
+          `assert a field whose value you already know. If the locator matches, the link exists.`
+        );
+      }
 
       // The anti-trivial rule — setup.update writes count too, or a spec could
       // smuggle the effect it claims to prove into the transition step.

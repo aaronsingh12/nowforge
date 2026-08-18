@@ -1,0 +1,91 @@
+{
+  "setup": {
+    "table": "incident",
+    "payload": {
+      "short_description": "Test incident",
+      "impact": "1",
+      "urgency": "1",
+      "incident_state": "2",
+      "hold_reason": "1"
+    },
+    "update": {
+      "incident_state": "3",
+      "hold_reason": "4"
+    }
+  },
+  "wait": {
+    "flowName": "Create Problem for On Hold Vendor Incident",
+    "timeoutSec": 90
+  },
+  "assert": [
+    {
+      "table": "problem",
+      "locate": {
+        "byQuery": "short_description=Vendor issue: Test incident"
+      },
+      "field": "short_description",
+      "expect": {
+        "value": "Vendor issue: Test incident"
+      },
+      "note": "Problem record is created with prefixed short description"
+    },
+    {
+      "table": "problem",
+      "locate": {
+        "byQuery": "short_description=Vendor issue: Test incident"
+      },
+      "field": "assignment_group",
+      "expect": {
+        "display": "Hardware"
+      },
+      "note": "Problem is assigned to the Hardware group"
+    },
+    {
+      "table": "incident",
+      "locate": {
+        "bySetupRecord": true
+      },
+      "field": "problem",
+      "expect": {
+        "display": "{{lookup.problem_number}}"
+      },
+      "note": "Incident's Problem field references the newly created problem"
+    },
+    {
+      "table": "incident",
+      "locate": {
+        "bySetupRecord": true
+      },
+      "field": "work_notes",
+      "expect": {
+        "value": "Problem {{lookup.problem_number}} created"
+      },
+      "note": "Work note added to incident referencing the new problem"
+    },
+    {
+      "table": "problem",
+      "locate": {
+        "byQuery": "short_description=Vendor issue: Test incident"
+      },
+      "field": "assigned_to",
+      "expect": {
+        "display": "John Doe"
+      },
+      "note": "Critical priority incidents set Assigned to the Hardware group's manager"
+    }
+  ],
+  "cleanup": [
+    {
+      "table": "incident",
+      "locate": {
+        "bySetupRecord": true
+      }
+    },
+    {
+      "table": "problem",
+      "locate": {
+        "byQuery": "short_description=Vendor issue: Test incident"
+      }
+    }
+  ]
+}
