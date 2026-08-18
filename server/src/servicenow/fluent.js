@@ -1592,12 +1592,12 @@ export function queryFieldRoots(query) {
  * Every field an assertion reads, and every field its locator constrains on,
  * must exist on the table. Async because it reads the live schema.
  */
-export async function checkVerifySpecFields(v) {
+export async function checkVerifySpecFields(v, { schemaFor = getSchema } = {}) {
   const errors = [];
   const known = new Map();
   const fieldsOf = async (t) => {
     if (!known.has(t)) {
-      try { known.set(t, new Set((await getSchema(t)).fields.map((f) => f.name))); }
+      try { known.set(t, new Set((await schemaFor(t)).fields.map((f) => f.name))); }
       catch { known.set(t, null); }
     }
     return known.get(t);

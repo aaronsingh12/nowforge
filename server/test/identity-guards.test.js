@@ -466,3 +466,70 @@ test('queryFieldRoots extracts the fields an encoded query constrains on', async
   assert.deepEqual(queryFieldRoots(''), []);
   assert.deepEqual(queryFieldRoots(undefined), []);
 });
+
+/* ------------------------------------------------------------------ *
+ * The field-existence checker, offline
+ *
+ * A guard that BLOCKS work has to be as falsifiable as the assertions it
+ * blocks: it must pass a field that exists just as reliably as it fails one
+ * that does not. The schema resolver is injected so this runs with no network.
+ * The field lists mirror what the live instance actually returns.
+ * ------------------------------------------------------------------ */
+
+const FAKE_SCHEMA = {
+  // Measured on dev442675: 91 fields, no problem_id, no rfc, no caused_by.
+  incident: ['sys_id', 'number', 'short_description', 'work_notes', 'state', 'incident_state',
+             'hold_reason', 'impact', 'urgency', 'priority', 'assignment_group', 'assigned_to',
+             'parent', 'parent_incident', 'universal_request'],
+  problem: ['sys_id', 'number', 'short_description', 'assignment_group', 'assigned_to',
+            'first_reported_by_task', 'parent'],
+};
+const schemaFor = async (t) => {
+  if (!FAKE_SCHEMA[t]) throw new Error(`no schema for ${t}`);
+  return { fields: FAKE_SCHEMA[t].map((name) => ({ name })) };
+};
+const specWith = (assertions) => ({
+  setup: { table: 'incident', payload: { short_description: 'x' } },
+  wait: { flowName: 'x' },
+  assert: assertions,
+  cleanup: [{ table: 'incident', locate: { bySetupRecord: true } }],
+});
+
+test('a field that EXISTS passes the checker', async () => {
+  const { checkVerifySpecFields } = await import('../src/servicenow/fluent.js');
+  const r = await checkVerifySpecFields(specWith([
+    { table: 'incident', locate: { byQuery: 'sys_id=abc^work_notesISNOTEMPTY' }, field: 'short_description',
+      expect: { value: 'x' }, note: 'real field in both places' },
+    { table: 'incident', locate: { byQuery: 'sys_id=abc^parentISNOTEMPTY' }, field: 'parent',
+      expect: { display: 'PRB0001' }, note: 'the real link mechanism on this instance' },
+    { table: 'problem', locate: { byQuery: 'first_reported_by_task=abc' }, field: 'assignment_group',
+      expect: { display: 'Hardware' }, note: 'problem side of the link' },
+  ]), { schemaFor });
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.ok, true);
+});
+
+test('a field that is ABSENT fails the checker, in the assertion and in the locator', async () => {
+  const { checkVerifySpecFields } = await import('../src/servicenow/fluent.js');
+  const r = await checkVerifySpecFields(specWith([
+    { table: 'incident', locate: { bySetupRecord: true }, field: 'problem_id',
+      expect: { value: 'x' }, note: 'asserted field does not exist' },
+    { table: 'incident', locate: { byQuery: 'sys_id=abc^problemISNOTEMPTY' }, field: 'short_description',
+      expect: { value: 'x' }, note: 'locator field does not exist' },
+  ]), { schemaFor });
+  assert.equal(r.ok, false);
+  assert.equal(r.errors.length, 2);
+  assert.match(r.errors[0], /"problem_id" does not exist on incident/);
+  assert.match(r.errors[1], /constrains on "problem", which does not exist on incident/);
+  assert.match(r.errors[1], /passes vacuously/);
+});
+
+test('an unreadable schema never fails a spec — the guard does not block on our own outage', async () => {
+  const { checkVerifySpecFields } = await import('../src/servicenow/fluent.js');
+  const r = await checkVerifySpecFields(specWith([
+    { table: 'sc_req_item', locate: { byQuery: 'anythingISNOTEMPTY' }, field: 'whatever',
+      expect: { value: 'x' }, note: 'schemaFor throws for this table' },
+  ]), { schemaFor });
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.ok, true);
+});

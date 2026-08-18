@@ -901,3 +901,124 @@ name every time, dropped the `"Vendor issue: "` prefix on one regeneration, and 
 malformed assertion on nearly every verification attempt. Each guard added here catches a real
 class of that damage; none of them can make a weak model competent. `fluent.js` already surfaces
 this as a hint, and it is the first lever to pull before reading anything else into these results.
+
+---
+
+## 15. Step 0 audit — is the field-existence checker lying?
+
+The checker blocked a verification spec three attempts running and left Test 1 unverified. A
+guard that blocks work has to meet the same falsifiability bar as the assertions it blocks, so
+the claim *"`problem_id` has zero `sys_dictionary` rows on any table"* was re-tested from
+scratch. The suspicion was reasonable: `problem_id` is standard OOB on `incident`, and this
+instance plainly has a `problem` table — the flow created `PRB0040006` on it.
+
+### Verdict: **the checker is correct. `incident.problem_id` does not exist on this instance.**
+
+Four independent lines of evidence, one of which never touches `sys_dictionary`.
+
+**(a) Raw `sys_dictionary`**
+
+```
+  0 rows | name=incident^element=problem_id
+  0 rows | nameINincident,task^element=problem_id      (full hierarchy: incident -> task)
+  0 rows | element=problem_id                          (ANY table)
+  0 rows | nameINincident,task^element=problem
+  0 rows | nameINincident,task^elementSTARTSWITHproblem
+```
+
+**(a2) …and the dictionary read is neither blocked nor truncated.** The same query path returns
+**92 rows** for the chain (`task` 70, `incident` 22) against a limit of 2000, with ordinary
+elements coming back (`hold_reason`, `caller_id`, `category`, `child_incidents`, …). The reader
+works; there is simply no `problem_id` row to find.
+
+**(b) `getSchema('incident')`** — 91 fields, `problem_id` absent, `problem` absent, and **zero**
+reference fields pointing at `problem`.
+
+**(c) The checker's own path**, exercised directly — and it is *not* over-generalising the
+model's word "problem". It independently rejects `problem_id`, and it **passes** the real
+control:
+
+```
+FAIL | assert field problem_id            FAIL | locator on bare problem
+FAIL | locator on problem_id              PASS | locator on work_notes   <- real field, accepted
+FAIL | assert made_up_field_xyz (control)
+```
+
+**(d) Independent of `sys_dictionary` entirely — the Table API itself.** A full record GET
+returns **89 fields**; `problem_id` is not among them. Asking for it by name gets it dropped
+exactly like an invented field, while a real field comes back:
+
+```
+sysparm_fields=sys_id,problem_id        -> ["sys_id"]
+sysparm_fields=sys_id,made_up_field_xyz -> ["sys_id"]
+sysparm_fields=sys_id,work_notes        -> ["sys_id","work_notes"]
+```
+
+And the silent-drop signature is unambiguous — a condition on an absent field matches *both*
+`ISNOTEMPTY` and `ISEMPTY`, while a real field constrains:
+
+```
+problem_id         ISNOTEMPTY=match ISEMPTY=match   <- dropped
+problem            ISNOTEMPTY=match ISEMPTY=match   <- dropped
+rfc                ISNOTEMPTY=match ISEMPTY=match   <- dropped
+caused_by          ISNOTEMPTY=match ISEMPTY=match   <- dropped
+work_notes         ISNOTEMPTY=none  ISEMPTY=none    <- constrains
+```
+
+`rfc` and `caused_by` are absent too. That is a coherent pattern, not a random hole: **this PDI
+does not carry the ITSM incident↔problem/change linkage fields at all.**
+
+### So the model's three-attempt insistence was WRONG, and the guard was right
+
+The hypothesis going in was that the guard had starved a valid assertion. It had not. The model
+kept proposing `^problemISNOTEMPTY` for a field that does not exist, which would have passed
+vacuously — the false green the guard was built to stop. `createLiveFlow` refusing to emit a
+verification spec, and saying so, was the correct outcome.
+
+The guard is now held to the bar it imposes: an **offline** regression test injects a schema
+resolver and asserts that a field which exists passes (in both the asserted position and the
+locator), that an absent field fails in both, and that an unreadable schema never fails a spec —
+the guard must not block on our own outage.
+
+### The link mechanism that DOES exist here
+
+`problem` extends `task`, and so does `incident`, which leaves two real reference fields — both
+verified to constrain properly:
+
+| field | → | label | direction |
+|---|---|---|---|
+| `incident.parent` | `task` | Parent | incident → problem |
+| `problem.first_reported_by_task` | `task` | Origin task | problem → incident |
+
+```
+incident.parent                ISNOTEMPTY=none ISEMPTY=match   <- constrains
+problem.first_reported_by_task ISNOTEMPTY=none ISEMPTY=match   <- constrains
+```
+
+`task_rel_task`, `incident_problem` and `m2m_incident_problem` are all absent, so there is no m2m
+route either.
+
+**Test 1's third promise is therefore restated, not dropped:** *"link it back by setting the
+incident's Problem field"* becomes **set `incident.parent` to the new problem** — the nearest
+mechanism this instance actually provides, and one a verification spec can prove without faking
+it. Writing `problem:` was never going to work; ServiceNow accepts writes to unknown fields
+silently, which is why the flow reported success while the effect never landed.
+
+---
+
+## 16. Trap ledger
+
+Instance and SDK behaviours that produce a *confidently wrong* result rather than an error.
+Each one cost a debugging cycle here.
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 1 | **`keys.ts` is a flat project-wide map** | `Record <table>.<sys_id> is defined 2 times in the project`, naming a sys_id absent from your source | `$id` keys are global. Prefix every key with a per-flow slug; never copy one from an example |
+| 2 | **Encoded queries silently DROP conditions on unknown fields** | `^fooISNOTEMPTY` and `^fooISEMPTY` both match the same record | Check every queried field against the live schema before trusting a locator |
+| 3 | **Writes to unknown fields are silently accepted** | flow completes, `activation 10/10`, effect never happens | Read the effect back off the instance; never infer it from a green deploy |
+| 4 | **`sysparm_fields` drops unknown names without complaint** | requested 2 fields, got 1, no error | Compare returned keys against requested keys |
+| 5 | **`priority` is computed** | `{"priority":"1"}` lands as `4 - Low` | Drive `impact` + `urgency`; never write the result |
+| 6 | **`lookUpRecord` on a query matching nothing ERRORS the flow** | build green, every execution fails | Resolve proper nouns against the instance first; a miss is a loud failure, not a fallback |
+| 7 | **Journal fields are invisible to a plain GET** | `work_notes` reads empty on a record that has notes | Read `sys_journal_field` by `element_id` + `element` |
+| 8 | **`now-sdk install` ships the WHOLE application** | one artifact requested, every artifact's `sys_updated_on` moves | Measure idempotency as *same sys_id, no new rows* — never as unchanged timestamps |
+| 9 | **This PDI lacks `problem_id`, `rfc`, `caused_by`** | "the standard field" isn't there | `incident.parent` / `problem.first_reported_by_task` are the available task-to-task links |
