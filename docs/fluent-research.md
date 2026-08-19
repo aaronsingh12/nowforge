@@ -3186,3 +3186,199 @@ own deployed identity.
 | 52 | **A capability the UI has and the agent does not** | the agent solves an "edit this" request by creating a second artifact, and collides with the first | `updates` existed on the function and on the HTTP route for two tracks before the tool exposed it. When a pipeline grows an option, check every caller — a tool schema is a caller |
 | 53 | **A good diagnostic is not a fix** | the error names the key, both files and the remedy, and the model repeats the mistake until the budget is gone | If a rule can be enforced mechanically, enforce it. Asking is for things that need judgement; a namespace collision needs a rename |
 | 54 | **Retryable is not the same as "retry soon"** | a cold start correctly marked transient, then abandoned inside 2.4s while the model was still loading | Back-off has to match what is being waited for. Loading a 120b model and recovering from a 502 are not the same wait |
+
+---
+
+## 31. Three digests in one turn — the budget was 4% of the window
+
+### The report
+
+One long spec (19 requirements) through the agent produced, in a SINGLE turn:
+three compaction digests (9,629 → 4,308, 7,209 → 3,774, 6,298 → 2,476 tokens),
+several blank assistant rows between them, and finally
+`ollama returned an empty completion (finish reason: load) (after 3 attempts)`.
+
+Three hypotheses, all settled by measurement before anything was changed. Two
+were confirmed; the third was confirmed but is fuel rather than cause.
+
+### Step 1 verdicts
+
+**The window was never the constraint.** Read off the daemon rather than
+assumed:
+
+```
+$ curl -s localhost:11434/api/show -d '{"model":"gpt-oss:120b-cloud"}'
+  "gptoss.context_length": 131072
+```
+
+**H2 — the compactor is thrashing. CONFIRMED, and it is the cause.** Measured
+against the real system prompt and the real 37 tool schemas:
+
+```
+system prompt   20,586 chars ->  5,882 tokens
+tool schemas    23,330 chars ->  6,666 tokens
+FIXED OVERHEAD                  12,548 tokens
+REQUEST_TOKEN_BUDGET            18,000
+=> HISTORY BUDGET                5,452 tokens
+```
+
+5,452 tokens on a 131,072-token model — 4% of the window. Every "before" number
+in the report is above that line and every "after" is below it. That is not a
+coincidence, it is the budget.
+
+It also **ratcheted**. Digests are appended to the SYSTEM PROMPT, so the fixed
+overhead grows with every compaction and the next turn's allowance shrinks.
+Three digests cost roughly 1,500 tokens of overhead, dropping the budget from
+5,452 to about 3,950 — which is why each fold landed just under a line that the
+next tool result immediately pushed back over. And `compactIfNeeded` ran on
+**every iteration** of a 15-iteration tool loop, so nothing stopped it happening
+again inside the same turn.
+
+**H3 — oversized tool results. CONFIRMED as the fuel.** Measured live against
+dev442675:
+
+```
+incident: 91 fields (incident -> task)
+FULL schema: 29,152 chars -> 8,330 tokens
+```
+
+One `get_table_schema('incident')` is **153% of the entire history budget**. The
+orchestrator's 8,000-character result cap hid that instead of fixing it, and hid
+it in the worst way available — fields are sorted alphabetically, so the cut
+landed after `company`:
+
+```
+total fields: 91 | survive the 8000-char truncation: 26
+last field the agent sees: company
+dropped: contact_type, contract, description, due_date, escalation, ...
+```
+
+The agent never saw `state`, `priority`, `description` or `assignment_group`.
+And because `u_` fields sort last, **it could not observe that a custom field
+was absent** — which makes "I checked, `u_sla_start` is not there" and "I could
+not see far enough to tell" indistinguishable from the outside. The stress
+spec's whole acceptance criterion was unreachable for a reason that had nothing
+to do with the model.
+
+**H1 — empty completions appended as real turns. CONFIRMED, with a mechanism.**
+§29 already rejected `!res.text && !res.toolCalls?.length`. That test is
+truthiness, and a bare newline is truthy. A whitespace-only completion — which
+this model emits when hidden reasoning eats the token budget — walked past the
+guard, was stored as a real assistant turn, rendered as a blank bubble, and then
+rode along in every outbound request for the rest of the session. That is the
+shape of the blank rows in the screenshot.
+
+**The reliability cliff the old budget was built on has expired.** The 18,000
+constant came from a measured cliff (~27,900 tokens at 4/8, ~20,100 at 8/8).
+Re-measured 2026-08-19, single attempt, no retry, five shots per size:
+
+| estimated | real `prompt_tokens` | result | avg |
+|---|---|---|---|
+| ~8,000 | 5,798 | 5/5 | 1044ms |
+| ~16,000 | 11,502 | 5/5 | 1356ms |
+| ~24,000 | 17,209 | 5/5 | 1456ms |
+| ~32,000 | 22,911 | 5/5 | 1204ms |
+| ~40,000 | 28,614 | 5/5 | 1465ms |
+| ~56,000 | 40,023 | 5/5 | 1526ms |
+| ~72,000 | 51,429 | 5/5 | 1523ms |
+
+35/35, latency flat to 51k real tokens. The cliff did not reproduce. §28's own
+conclusion — that the upstream is flaky rather than limited — is what makes this
+consistent: the retry and the cold-start warm-up added since are what now cover
+the flakiness the small budget was dodging. Note also that the estimator runs
+~40% pessimistic (32,000 estimated = 22,911 real), which is the safe direction
+to be wrong in.
+
+### The three numbers, after
+
+```
+model context 131072 (localhost:11434/api/show, gptoss.context_length)
+capped at      32000   (cost and latency, not reliability)
+fixed overhead 13160   (system prompt + 37 tool schemas, measured per turn)
+output headroom 6144   (> max_tokens 4096: reasoning bills against the same budget)
+=> history budget 12696
+```
+
+5,452 → 12,696, and all three are logged at meta time and shown on the digest
+badge's hover. The fixed overhead is measured **per turn**, so the digest
+ratchet is now visible in the number rather than hidden behind a constant.
+
+### Compaction count per turn, before and after
+
+Replayed over the 18 real sessions the acceptance produced, counting how many
+times the OLD budget-plus-per-iteration-loop would have folded:
+
+```
+Across 18 sessions — compactions the OLD budget+loop would have run: 18
+                            compactions the NEW budget+guard runs:    1
+```
+
+One session (peak history 14,160 tokens) would have compacted **seven times in
+a single turn** — the reported defect, reproduced from real data. It now
+compacts once.
+
+### Acceptance
+
+`docs/stress-prompts/sla-escalation.md`, both sections, live against
+gpt-oss:120b-cloud on dev442675.
+
+**Section 1 — the stress case.** Eight trials on the final build:
+
+| measure | result |
+|---|---|
+| infrastructure errors | **0/8** |
+| compactions | **0/8** (limit was ≤1) |
+| blank assistant bubbles | **0/8** |
+| discovers all five `u_sla_*` fields are absent | **8/8** |
+| stops and asks, per the Important clause | **8/8** |
+| mentions the native SLA route | 5/8 |
+
+The correct output is the clarification question, and that is what arrives.
+
+**Section 2 — the control.** Three trials: `design_flow_blueprint` →
+`create_flow_live` → approval gate, 3/3, with 0 errors, 0 compactions and 0
+blank bubbles. The first draft of this control was itself broken: it said "the
+group that handles payment incidents" without naming one, no such group exists
+on this PDI, and the agent correctly stopped to ask which group to use. Right
+behaviour, useless control — a control that asks a question proves nothing about
+proceeding when nothing is missing. It now names `Service Desk`, read back off
+the instance before the file named it.
+
+### What did not fully land
+
+Two behavioural items, reported as measured rather than as fixed:
+
+- **The native-capability mention is 5/8, not 8/8.** Buried as rule 16 of 17 it
+  fired 2/6; hoisted to the flow-authoring decision point, where the model is
+  already reading, 5/8. Better, and still prose — which §20 already established
+  is the weak lever for this model. A structural guard would be the reliable
+  fix, and is not built here.
+- **The agent sometimes submits a mutation to create the missing fields**
+  despite being told to stop and ask. The approval gate caught it every time and
+  nothing was written, so the safety property holds structurally — but the
+  instruction did not.
+
+### A separate defect this run exposed
+
+When a mutation is rejected at the gate, the tool result says *"The user
+rejected this operation. Do not retry it; ask what they would like to change."*
+Measured in the section 2 control: the model re-submitted the identical
+`create_flow_live` call **nine times in one turn**. The gate held each time, so
+nothing was written — but it burns the iteration budget and inflates history,
+which is the same family as the defect above. A `(tool, input)` pair rejected in
+a turn should not be re-submittable in that turn. Not fixed here: it deserves
+its own measurement, and it changes approval semantics, which is not something
+to change in passing.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 55 | **A budget nobody ever subtracted from** | the constant says 18,000 and reads as generous; the actual allowance is 5,452 because 12,548 of overhead was never counted | Print the three numbers — window, fixed cost, allowance — at runtime. A budget you cannot see is a budget you cannot tell is wrong |
+| 56 | **Truncation that hides the field you were asked about** | the agent reports a field is absent, and it is — but it would have said the same thing either way, because the list was cut off before that letter | If a result is truncated, the truncation is part of the answer. An alphabetical list cut at `company` cannot speak about `u_*` at all |
+| 57 | **Truthiness is not emptiness** | a whitespace-only completion passes `if (!text)`, becomes a stored turn, an empty bubble, and a passenger in every later request | `.trim()`. And enforce it at every layer that can produce the shape, not only the one where it was found |
+| 58 | **A compaction that lands just under the line** | the transcript folds, fits, and is pushed straight back over by the next tool result — three times in one turn | Require a minimum GAIN, not just a threshold breach. A fold that saves less than it costs is an LLM call and a loss of history in exchange for nothing |
+| 59 | **A constant that outlived its measurement** | 18,000 was honestly derived from a real cliff; re-measured a track later, 35/35 succeeded at four times that size | Date the measurement in the comment. When a constant is load-bearing and cheap to re-measure, re-measure it before building on it |
+| 60 | **A restart that silently did not happen** | `pkill` reports nothing, the new process dies on EADDRINUSE, and the old binary serves the "new" measurement | Verify the change is live from OUTSIDE the process — an endpoint that reports the number you just changed. A rising fixed-overhead count nearly passed for a prompt edit that had not loaded |
