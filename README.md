@@ -2,7 +2,7 @@
 
 Connect a ServiceNow PDI and build on it two ways: through clean module UIs, or by telling an AI agent what you want and approving each change it proposes. Bring your own model — Anthropic, OpenAI, or fully-local Ollama. No Now Assist SKUs required.
 
-**Scope (this build):** PDI connection · Incident Management (full CRUD) · Catalog Management (items, all variable types with choices, inline variable editing and reordering, **catalog UI policies**, variable sets, order guides, record producers) · Flow Designer (full read, executions, activate, **live authoring of real flows and subflows via the ServiceNow SDK**, AI blueprint design + classic fallback) · **SLA definitions** (read, create, and semantic verification of the breach clock) · **Access control** (ACL report, two-role diff, plain-language explanation — read-only) · deep reference-field/table handling everywhere · agentic chat with a human approval gate on every mutation.
+**Scope (this build):** PDI connection · Incident Management (full CRUD) · Catalog Management (items, all variable types with choices, inline variable editing and reordering, **catalog UI policies**, variable sets, order guides, record producers) · Flow Designer (full read, executions, activate, **live authoring of real flows and subflows via the ServiceNow SDK**, AI blueprint design + classic fallback) · **SLA definitions** (read, create, and semantic verification of the breach clock) · **Access control** (ACL report, two-role diff, plain-language explanation — read-only) · **Audit** (everything the agent and the module pages did to the instance, with sys_ids, approvals and CSV export) · deep reference-field/table handling everywhere · agentic chat with a human approval gate on every mutation, and markdown-rendered replies.
 
 ---
 
@@ -168,6 +168,9 @@ Three tiers. **LIVE (verified)** means it was exercised end-to-end against a rea
 | **Catalog UI policies, proven on the form** | policy built in NowForge's own UI, installed through the SDK, then driven on `/sp?id=sc_cat_item`: the variable is absent, then rendered, when the checkbox flips. Asserted from the element's bounding box, not its presence in the DOM |
 | **Agent-authored UI policy, one approval** | "make the justification field mandatory only when duration is Permanent" → `get_catalog_item` → `create_ui_policy` (approved) → on the Corp VPN form, `aria-required` goes false → true and the field appears under "Required information" |
 | **Variable reorder, choices, item toggle, category create** | each exercised over HTTP against the live PDI; reorder renumbers the whole list and reads every row back |
+| **The audit trail reconstructs a session** | live on dev442675: agent created `INC0010037` (`c84b2da1…`) through the gate and deleted the same sys_id; an SLA verification ran from the UI path with 8 streamed events and 0 dropped. Every row's sys_ids, approval, instance and account read back from the Audit page alone |
+| **Markdown rendering, measured on a real transcript** | the session carrying the original defect now renders 1 table, 19 `<strong>`, 5 `<code>`, 4 lists — and **0** stray `**`, **0** stray pipe rows |
+| **Keyboard and console sweep** | 9 pages × connected and disconnected: **0** console problems. 14/14 focused controls paint the verdigris indicator; the confirm dialog traps focus and restores it to the button that opened it |
 
 **What semantic verification does and does not cover.** It creates a record matching the flow's own trigger, waits for the execution to settle, asserts the effects the request promised, and always deletes its test data. It **catches**: the flow never firing, firing then erroring, writing the wrong value, writing nothing, an approval routed to the wrong person. It **cannot catch**: an effect nobody asserted; a trigger condition wrong in the same direction as the setup payload (both derived from one misreading); anything timing-dependent past the wait window; and for scheduled flows, whether the schedule *fires* — there is no supported manual-execute path, so those are verified by schedule metadata only, and the result says so.
 
@@ -227,6 +230,52 @@ Storage is the built-in **`node:sqlite`** — probed, not assumed: `DatabaseSync
 
 ---
 
+### Audit
+
+The trust primitive. One timeline over two sources — every tool the agent ran,
+and every build driven by hand from a module page — against the bound instance.
+
+- **Filter by session**, including a real *"driven by hand (no agent session)"*
+  bucket, and a mutations-only toggle.
+- **Approval decisions are visible and never rounded up.** `approved` means a
+  human clicked Approve at the amber gate; `auto · ungated` means auto-approve
+  was on and **nobody saw it**. Those are different facts and the page counts
+  them separately.
+- **Request and result** in collapsible mono blocks, with every sys_id the row
+  touched pulled out and listed — that is what makes "what did this session
+  create" answerable, because a created record's sys_id exists only in the
+  tool's return value.
+- **CSV export** honouring the on-screen filters, not a table dump.
+
+NowForge has no user management, so "who" is recorded as what can be stated
+truthfully: the decision that was made, and the ServiceNow account the write
+landed under. It does not invent a person.
+
+The acceptance test was run live: the agent created `INC0010037`
+(`c84b2da1837a4350b939cc65eeaad385`) through the gate and deleted it again,
+an SLA verification ran from the UI path, and all of it — sys_ids, approvals,
+instance, account — is readable from the Audit page alone.
+
+## The experience layer
+
+- **Markdown in agent replies** — tables, bold, code, lists and links, styled
+  to the same tokens as everything else. Raw HTML from the model stays escaped.
+- **Toasts and one confirmation dialog** — no `window.confirm` anywhere. A
+  destructive dialog shows the exact **sys_id** next to the label (names are
+  not unique on an instance) and states the consequence: deleting a catalog
+  variable does not fail, it silently breaks every UI policy naming it.
+- **Loading, empty and disconnected are three different states.** They used to
+  be one sentence: *"No incidents match. Connect your PDI on the Dashboard
+  first."* The binding is now answered by `/api/system/health` before a page
+  mounts, so an empty list only ever means an empty list, and an unreachable
+  local server blames the server rather than your credentials.
+- **A route-level error boundary** with a copyable stack, so one bad render
+  shows a card instead of a blank screen.
+- Keyboard-verified: 14/14 controls carry the verdigris focus ring, the dialog
+  traps focus and restores it, Enter sends and Shift+Enter still makes a
+  newline. Zero console output across all nine pages, connected *and*
+  disconnected.
+
 ## Reference-field handling (everywhere)
 
 This is the part most homegrown tools skimp on:
@@ -268,6 +317,7 @@ Modeled on Claude Code / opencode:
 /api/sla         meta · validate (dry run) · list · create · :id (GET · PATCH · DELETE)
                  verify (POST, SSE)
 /api/access      acl/:table · diff/:table?a=&b= · explain (POST)
+/api/audit       (GET, filters: session · mutating) · runs/:id · export.csv
 /api/agent       info · chat (SSE) · approve
                  sessions (GET list · POST new) · sessions/:id (GET · PATCH rename · DELETE)
                  sessions/:id/messages
@@ -290,8 +340,9 @@ Modeled on Claude Code / opencode:
 - **Done — memory and sessions:** conversations persist across restarts, compact into structured digests when they outgrow the context budget, and are searchable. A per-instance knowledge ledger carries every trap in `docs/fluent-research.md` into the agent prompt *and* the codegen context.
 - **Done — SLAs and access control:** SLA definitions with conditions checked against the live dictionary before any write, and a breach clock proven by making the platform run it — `task_sla` matched to the *right* definition, planned end asserted in UTC against a tolerance the spec has to state. An ACL analyzer that reads, diffs and explains, and never authors; an unreadable ACL table reports its visibility instead of rendering an empty report.
 - **Done — catalog UI policies and variable editing:** a builder scoped to an item that cannot express a condition the form could never satisfy, variables edited in place and reordered with a full renumber, and agent parity for both. Policies are authored through the SDK because `catalog_ui_policy_action` cannot be written over REST — found by pointing Track B's ACL analyzer at the table that was swallowing the writes.
+- **Done — the experience layer and the audit trail:** agent replies render markdown; every native modal is gone in favour of one dialog that shows the exact sys_id and the consequence; loading, empty and disconnected stopped being the same sentence; and an Audit page reconstructs everything a past session did to the instance — sys_ids, approvals, and whether a human actually saw the gate. The disconnected click-through found three real defects (a gate that gated markup instead of mounting, a `/health` endpoint that shelled out to the SDK for 5.5s, and hover-only controls unreachable by keyboard); all three are fixed and both sweeps are clean.
 - **Next:** exercise application triggers (inbound email, SLA, catalog) so they can leave the unproven tier; ATF test triggering after builds; OAuth refresh flow. Also: the deployed vendor-hold flow still sets no `trigger_strategy` (trap #10) — A4 blocks new flows from shipping that defect but does not retro-fix a deployed one.
-- **Later — productize:** multi-instance workspaces, update-set capture around agent sessions ("everything the agent did in this session" as one exportable set), audit log, packaging/licensing for consultancies.
+- **Later — productize:** multi-instance workspaces, update-set capture around agent sessions ("everything the agent did in this session" as one exportable set — the Audit page now answers the question, an update set would make it *revertible*), packaging/licensing for consultancies.
 
 ## Notes from building this
 
@@ -314,4 +365,12 @@ Things that cost real time and are documented in `docs/fluent-research.md`:
 - `sys_security_acl.operation` mixes two sys_id conventions in one table — `read` and `write` are literally their own sys_ids, `report_view` is 32 hex. Read the raw value and half your report is opaque in a way that looks like bad data.
 - `nameSTARTSWITHincident` also matches `incident_task`, which has 43 ACLs of its own.
 - A weak model can return HTTP 200 with a repetition loop in the middle of otherwise correct prose. Next to an accurate report, the loop reads as a finding. NowForge checks generated text for it, retries once quoting the repeated fragment back, and then refuses.
+- Gating a component's returned JSX does not gate its effects. The page is mounted before it returns, so five "you need an instance" screens were rendering on top of five requests that had already 400'd. Only a route-level gate stops the mount.
+- `/api/system/health` is polled by every page to answer "is an instance bound", and it was `await capability()` — two `now-sdk` spawns, 5.5s on a cold cache, for a field no client read.
+- `display: none` removes an element from the tab order, so adding `:focus-within` to a hover-reveal rule is inert. Clipping keeps the buttons focusable and looks identical.
+- `:focus-visible` deliberately ignores `element.focus()`, so an accessibility probe written with it reports a false gap on components whose focus ring is perfect.
+- A double hyphen is illegal inside an XML comment, and naming CSS custom properties (`--ink`) in an SVG comment is enough to trigger it. The HTML parser forgives it inline; `<img>` and `<link rel=icon>` do not, and fail silently — `naturalWidth` reads 0 while the tab icon still looks fine.
+- `\b` does not bound a hex string inside a URL-encoded one. A sys_id scanner skipped `…sys_id%3D196e6cb2…` — the exact format the agent uses to report what it just created — because the `D` of `%3D` is a word character.
+- Excel and Sheets execute a CSV cell beginning `=`, `+`, `-` or `@`, and an audit export is full of model-authored text.
+- react-markdown passes the mdast `node` into every component override; spreading it renders `node="[object Object]"` and makes React warn on every message.
 - Identity cannot come from an LLM-chosen name. The same spec produced "…Incidents" and then "…Incident", which silently created a duplicate flow *and* a duplicate subflow. Identity now derives from the request itself.

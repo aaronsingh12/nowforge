@@ -2540,3 +2540,261 @@ Chrome directly over the DevTools protocol — launch with
 | 28 | **Hardcoded platform code lists go stale silently** | a variable ships as "Requested For" when you asked for "Rich Text Label" | 31/32/33 all shifted here, and five codes were missing. Read choice lists from `sys_dictionary`; keep any hardcoded list as a loud fallback |
 | 29 | **A stalled agent turn is indistinguishable from a finished one** | correct analysis, correct sys_ids, then "Shall I create this now?" — and nothing happened | The approval gate is only shown by CALLING the tool. Detect a directive answered with a request to proceed and no mutation, and feed that fact back |
 | 30 | **Setting an Angular model directly does not re-evaluate a UI policy** | the variable's value changes on the form and the policy does not fire, so a correct policy looks broken | Drive the real control through the input pipeline. A UI policy is proven by the form, never by the record |
+
+---
+
+## 24. Track D — the experience layer
+
+Six items, all client-side except the audit trail, which needed a fifth
+migration before its page could say anything true. The rule for the whole track
+was that the theme is fixed: the wordmark, the sidebar, and the `ink / panel /
+verdigris / amber` + `Sora / Inter / IBM Plex Mono` token set are extended,
+never replaced. Every selector added below resolves to a value already declared
+at the top of `styles.css`.
+
+The interesting part of this track is not the components. It is that four of
+its six items were shipped with a defect that only a **measurement** exposed,
+in each case after the code read as obviously correct.
+
+### D-1 — markdown in agent bubbles ✅
+
+`react-markdown` + `remark-gfm`. Agent bubbles render; user bubbles stay
+literal, because what you typed is what you should see.
+
+The plugin list and the element overrides live in a plain-JS
+`markdownConfig.js` rather than inside `Markdown.jsx`. That is not tidiness:
+Node cannot import `.jsx`, so anything expressed there is unreachable from the
+offline suite, and "we added react-markdown" is not a claim worth making
+without rendering something. `server/test/markdown.test.js` renders the real
+pipeline through `react-dom/server`.
+
+Two things that rendering found and reading would not have:
+
+- **react-markdown passes the mdast `node` into every component override.**
+  Spreading it onto a DOM element emits `node="[object Object]"` and makes
+  React log *"does not recognize the `node` prop"* on every message. D-6's
+  clean-console requirement would have failed on the agent page alone.
+- **`**Vendor issue: **` is not emphasis.** The first draft of the test used
+  the A3 guard's literal, trailing space and all, and failed. That is
+  CommonMark working as specified — a closing `**` preceded by whitespace is
+  not a closer. Pinned in a test so leftover asterisks there are never read as
+  this feature being broken.
+
+Raw HTML stays escaped; `rehype-raw` is absent and should stay absent, because
+this text is written by a language model.
+
+**Measured on the live page** (session `c9c9be27`, which contains the original
+defect): 1 table inside its scroll wrapper, 19 `<strong>`, 5 `<code>`, 4 lists,
+**0** stray `**`, **0** stray pipe rows, 0 `node=` attributes, user bubbles
+plain, code rendered in IBM Plex Mono on `rgb(27,34,43)` — which is `--panel-2`
+exactly.
+
+### D-2 — toasts and one confirmation dialog ✅
+
+Seven `window.confirm` calls and one `window.prompt` are gone. They already
+routed through `components/confirm.js`, the seam Track C left for this, so the
+swap touched call sites only to give the dialog what the native one could never
+show: **the sys_id next to the label**, because a display name is not unique on
+an instance, and **the stated consequence**, because deleting a catalog
+variable does not fail — it silently breaks every UI policy that names it
+(trap #25).
+
+Cancel takes focus, not the destructive button, so Enter and Escape both mean
+*no* on a dialog someone may have opened by accident.
+
+Toasts are a module-level store rather than a React context, for two reasons
+that are both about correctness rather than convenience. Raises happen in
+`.catch` blocks and SSE callbacks that outlive the render that started them.
+And React runs effects **child-first**, so a page toasting from its own mount
+effect fires before an app-root host could have registered a sink — the store
+queues, so an early toast renders late instead of vanishing.
+
+With no dialog mounted, `confirmDestructive` throws rather than falling back to
+`window.confirm`. A silent fallback would restore the removed behaviour on the
+one code path where being wrong deletes a record.
+
+### D-3 — loading, empty, and disconnected ✅
+
+The honesty defect first, because it is the reason this item exists. Incidents,
+SLA and Flows each rendered **one sentence for two opposite facts**:
+
+> No incidents match. Connect your PDI on the Dashboard first.
+
+That is the failure the ACL analyzer needed a `visibility` field to avoid (§22)
+— an empty result and an unreadable one look identical unless something states
+which it is. Worse, the binding was answered by four sources that disagreed:
+the topbar's private 20s interval, the Dashboard reading `/system/settings`,
+and three pages inferring it from an empty array.
+
+One store, one poller, in-flight coalescing. `/api/system/health` is the only
+answer, and "nothing matched" now only ever means nothing matched.
+
+The rest: skeleton rows shaped like the table they stand in for, with widths
+derived from position rather than random — a skeleton that reshuffles between
+renders reads as content still arriving, and StrictMode's double render in dev
+would make it visibly twitch. Designed empty states carrying a reason and a
+next action. `aria-busy` on 27 async buttons, driving the spinner from the same
+attribute assistive tech reads, so a button cannot be visually busy and
+semantically idle. A route-level `ErrorBoundary` with a copyable stack, keyed
+on the path so one bad page cannot brick the session.
+
+### D-4 — identity ✅
+
+One SVG, loaded by both the browser tab and the sidebar, so the two cannot
+drift. `NF` in verdigris on ink, rounded square, hairline in verdigris-dim. The
+letters are **paths, not `<text>`**: a favicon renders outside the page, cannot
+see the Sora webfont, and would fall back to whatever each OS picked.
+
+The geometry was set by rendering it at 16px rather than by looking at it
+large. The first pass had so much padding that the glyphs closed into a smudge
+in the tab strip; they now occupy 56% of the square.
+
+Two silent failures, both found by measuring `naturalWidth` rather than by
+looking at the tab:
+
+- **A double hyphen is illegal inside an XML comment.** Naming the design
+  tokens the usual way put `--ink` and `--verdigris` in the comment. The HTML
+  parser forgives that when an SVG is inlined; the XML parser does not when the
+  same file is fetched through `<img>` or `<link rel=icon>`. The sidebar drew a
+  broken-image glyph while the tab icon looked fine.
+- **An SVG carrying only a `viewBox` has no intrinsic size**, so `<img>`
+  reports `naturalWidth: 0`. It needs `width`/`height` as well.
+
+And the mark's 35px cost the sidebar subtitle its single line, which pushed
+every nav item down — so the subtitle keeps its own full-width row.
+
+Titles are per route (`Agent — NowForge`). Eight pages behind one title made a
+pinned tab unidentifiable among its own siblings.
+
+### D-5 — the audit page ✅
+
+`tool_events` was named after a job it could not do. Two gaps, both in storage:
+
+1. **Results were never stored.** The sys_id of a created record exists only in
+   the tool's return value, so *"what did this session do to the instance"* was
+   unanswerable from the table whose comment says it is the audit trail.
+2. **It is keyed on an agent session.** Every build driven from a module page —
+   a flow deploy, a catalog UI policy, an SLA verification, each writing to the
+   instance through the SDK — belonged to no session and left no trace at all.
+
+Migration 5 adds `result`, `actor` and `instance` to `tool_events`, plus
+`build_runs` and `build_events`. Instance and account are captured **per
+event** rather than read off the session, because the bound connection can
+change under a long conversation and the trail has to say where a write landed.
+Six SSE routes stream through an audited emitter; `smoke` and `DELETE` are
+recorded too, so the audit has no hole shaped like *"writes we did quickly"*.
+
+Three honesty properties, each asserted in `server/test/audit.test.js`:
+
+| property | why it is not cosmetic |
+|---|---|
+| `auto` stays `auto` | it means auto-approve was on and **no human saw the gate**. Rendering it as "approved" would assert a decision that never happened, on the one page whose entire job is trust |
+| pre-migration rows say *not recorded* | "nothing came back" and "we did not store it" are opposite facts, and an empty cell asserts the first |
+| a run that dropped events says so | an audit write must never kill a deploy already touching the instance, and must never vanish either. The count goes in the row and the page prints "this history is incomplete" |
+
+On *"who approved"*: NowForge has no user management, so naming a person would
+be a lie. What is recorded is what can be stated truthfully — the decision
+(`approved` / `rejected` / `auto` / none) and the ServiceNow account the write
+landed under.
+
+Two bugs the tests caught:
+
+- **sys_id harvesting used `\b`.** A ServiceNow deep link URL-encodes its
+  separator — `catalog_ui_policy.do%3Fsys_id%3D196e6cb2…` — and the `D` of
+  `%3D` is a word character, so `\b` never matched. The page dropped precisely
+  the identifier of the thing that had just been created, in precisely the
+  format the agent uses to report its own work. The boundary is "not more hex",
+  not `\b`.
+- **The CSV neutralises a leading `=`, `+`, `-` or `@`.** Excel and Sheets
+  evaluate those, and these cells carry model-authored text.
+
+#### Live acceptance (dev442675)
+
+Driven end to end against the real PDI, then answered from `/api/audit` alone:
+
+```
+create_record   mutating=true  approval=approved  ok
+                sys_ids  6816f79cc0a8016401c5a33be04be441 (caller)
+                         c84b2da1837a4350b939cc65eeaad385 (INC0010037)
+delete_record   mutating=true  approval=approved  ok
+                sys_ids  c84b2da1837a4350b939cc65eeaad385
+sla_verify      source=build   approval=ui        ok    dropped=0
+                8 streamed events, 6 sys_ids incl. the task_sla rows
+```
+
+The CSV honours the page's filters rather than dumping the table, because an
+export that silently differs from the screen is worse than no export.
+
+### D-6 — the sweep ✅
+
+The connected click-through was clean. The **disconnected** one logged 18
+console errors and exposed two bugs behind them.
+
+**The instance gate gated the wrong thing.** Wrapping a page's returned JSX
+controls what it *draws*, not what it *does* — the component is already mounted
+and its `useEffect` has already fired the request. Every gated page asked an
+unbound instance for data and 400'd before the gate replaced it. The first fix
+attempt got 18 → 14, which is the useful part of the story: gating inside the
+component **cannot** work. Moving the wrapper to the route means React never
+mounts the page. 18 → 0.
+
+**`/api/system/health` blocked on the SDK capability probe** — two `now-sdk`
+shell-outs, ~5.5s on a cold cache — to populate a field no client reads. That is
+the endpoint every page polls to answer *"is an instance bound"*, so the topbar
+read `checking…` for five seconds and the SLA page rendered ungated because the
+answer had not arrived. It now serves the cached probe and refreshes in the
+background: **5.5s → 21ms cold, 2ms warm.** A probe that has not run reports
+`pending`, not `ok: false` — the latter prints fix commands for a problem
+nobody has.
+
+That is also what made it affordable for the gate to hold a page back while
+health is unknown rather than render it optimistically, and the D-3 test
+asserting the opposite was inverted with its reasoning kept.
+
+**The session rail's actions were unreachable by keyboard.** They were revealed
+on hover with `display: none`, which removes an element from the tab order — so
+rename and delete could not be tabbed to on any row but the active one, and
+D-2's dialog could not restore focus to a button that had gone `display: none`
+while it was open. Adding `:focus-within` to that rule was measured and found
+**inert**: nothing can focus into a subtree that is not rendered. Clipping
+keeps them focusable and looks identical.
+
+#### How the keyboard pass was run
+
+Real key events over CDP (`Input.dispatchKeyEvent`), not `element.focus()`.
+The distinction is load-bearing: `:focus-visible` — which is what paints
+NowForge's verdigris ring — deliberately does **not** match programmatic focus,
+so the first probe reported "no focus ring" on components whose ring is fine.
+A probe that only looks for an `outline` also reports a false gap on every
+select and textarea, because this theme gives fields a verdigris **border**
+instead (`.input:focus { outline: none }`, which predates Track D).
+
+Measured:
+
+| check | result |
+|---|---|
+| focus indicator, tabbing every control on the Audit page | **14/14** verdigris (outline on buttons/links, border on fields) |
+| collapsible payload blocks | reached by Tab, opened with Enter, `aria-expanded` flips |
+| rail rename/delete on a non-active row | reachable, revealed on focus |
+| confirm dialog | opens from the keyboard, focus lands on **Cancel**, Tab cycles only inside it, Escape closes, focus returns to the button that opened it |
+| Enter-to-send | plain Enter sends; Shift+Enter still inserts a newline |
+| console, 9 pages × connected and disconnected | **0 problems** |
+
+Browser checks use the same scratchpad CDP driver §23 established — no
+Playwright, no Puppeteer, no new repo dependency.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 31 | **Gating a component's returned JSX does not gate its effects** | a page that "cannot run without an instance" still fires every request and logs 400s behind its own not-connected screen | The component is mounted before it returns. Gate at the ROUTE — or anywhere the child is an unmounted element — so React never mounts it |
+| 32 | **A status endpoint that shells out is a status endpoint that lies** | the topbar reads `checking…` for five seconds; a gate renders the wrong branch because the answer had not arrived | `/health` was `await capability()` — two `now-sdk` spawns, 5.5s cold, for a field no client read. Serve cached, refresh in the background, and report a probe that has not run as `pending` rather than `ok: false` |
+| 33 | **`display: none` removes an element from the tab order, so `:focus-within` can never reveal it** | you add `:focus-within` to a hover-reveal rule, it changes nothing, and the CSS looks correct | Nothing can focus into a subtree that is not rendered. Clip it (`position: absolute; clip: rect(0 0 0 0)`) instead — focusable, and visually identical |
+| 34 | **`:focus-visible` does not match `element.focus()`** | an accessibility probe reports "no focus ring" on components whose ring is perfect | Drive real key events. And read the indicator the design actually paints: this theme rings buttons with an outline and fields with a border |
+| 35 | **A double hyphen inside an XML comment makes an SVG invalid** | the same file renders inlined and silently fails as `<img>` or `<link rel=icon>`; `naturalWidth` is 0 | Naming CSS custom properties in a comment (`--ink`) is enough to do it. The HTML parser forgives, the XML parser does not. Check `naturalWidth`, not the tab |
+| 36 | **An SVG with only a `viewBox` has no intrinsic size** | `<img>` renders it as broken, or at 0×0, with no error anywhere | Ship `width`/`height` alongside `viewBox` |
+| 37 | **`\b` does not bound a hex id inside a URL-encoded string** | a sys_id scanner silently skips `…sys_id%3D196e6cb2…` — the exact format the agent uses to report what it created | The `D` of `%3D` is a word character. Bound with "not more hex" (`(?<![0-9a-f])…(?![0-9a-f])`), and test against a real transcript rather than a tidy example |
+| 38 | **A spreadsheet executes a CSV cell starting with `=`, `+`, `-` or `@`** | an audit export of model-authored text becomes a formula on open | Prefix a single quote. An export is the one artifact that leaves the tool, so it is the one place untrusted text becomes someone else's problem |
+| 39 | **`**bold **` is not bold** | a markdown renderer ships and asterisks are still visible in one spot, so the feature looks broken | CommonMark: a closing `**` preceded by whitespace is not a closer. The source is wrong, not the renderer |
