@@ -1,7 +1,7 @@
 # Fluent Flow Cheatsheet
 
 Dense syntax reference for authoring ServiceNow Flow Designer flows as TypeScript with the
-Fluent SDK (`@servicenow/sdk` v4.x). **This file is embedded verbatim into NowForge's codegen
+Fluent SDK (`@servicenow/sdk` v4.x). **This file is embedded verbatim into NowHelpAssist's codegen
 prompt** — it is written to be read by a model with no ability to fetch docs.
 
 Every example here compiles under `now-sdk build` (SDK 4.10.1).

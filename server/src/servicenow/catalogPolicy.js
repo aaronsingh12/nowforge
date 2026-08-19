@@ -36,7 +36,7 @@ import { buildWorkspace, installWorkspace, extractDiagnostics, WORKSPACE_DIRS } 
  *      installed at ui_type 0 still hid and revealed its variable on
  *      /sp?id=sc_cat_item, identically to the same policy at 10. So the label
  *      is not an exclusion on this release, and no guard may treat it as one.
- *      NowForge still writes 10, because that is the SDK's own default for
+ *      NowHelpAssist still writes 10, because that is the SDK's own default for
  *      `runScriptsInUiType` and it is unambiguous across every surface — not
  *      because 0 was observed to fail.
  *
@@ -174,7 +174,7 @@ export function buildVariableConditions(clauses = []) {
   });
   // The condition builder terminates with ^EQ; policies saved without it work,
   // but every out-of-box row has it and matching that shape keeps a
-  // NowForge-written policy indistinguishable from a hand-written one.
+  // NowHelpAssist-written policy indistinguishable from a hand-written one.
   return parts.length ? `${parts.join('')}^EQ` : '';
 }
 
@@ -297,7 +297,7 @@ function shapePolicy(p, actions, byId, managed = null) {
     on_load: raw(p.on_load) === 'true',
     reverse_if_false: raw(p.reverse_if_false) === 'true',
     order: Number(raw(p.order)) || 100,
-    // Only a policy NowForge authored has a Fluent source to edit or remove.
+    // Only a policy NowHelpAssist authored has a Fluent source to edit or remove.
     // Everything else is read-only here, the same rule flows follow.
     managed,
     ui_type: String(uiType),
@@ -312,7 +312,7 @@ function shapePolicy(p, actions, byId, managed = null) {
       ...conditions.filter((c) => c.valueOffChoiceList)
         .map((c) => `The condition compares ${c.variable.name} with "${c.value}", which is not one of its choices — it can never be true.`),
       ...conditions.filter((c) => c.kind === 'unparsed')
-        .map((c) => `NowForge could not parse the clause "${c.raw}".`),
+        .map((c) => `NowHelpAssist could not parse the clause "${c.raw}".`),
       ...actions.filter((a) => a.noop)
         .map((a) => `The action on "${a.variableLabel}" leaves visible, mandatory and read-only all on "ignore", so it does nothing.`),
       ...actions.filter((a) => a.unknownVariable)
@@ -420,7 +420,7 @@ export async function validatePolicyInput(input, { variablesFor = itemVariables 
     const op = normalizeOperator(c?.operator || '=');
     if (!OPERATOR_SET.has(op)) {
       errors.push(
-        `${at} uses operator "${c?.operator}", which NowForge does not build. Use one of: ` +
+        `${at} uses operator "${c?.operator}", which NowHelpAssist does not build. Use one of: ` +
         `${CONDITION_OPERATORS.map((o) => `${o.op} (${o.label})`).join(', ')}.`
       );
       return;
@@ -531,7 +531,7 @@ export function renderPolicySource(policy, slug) {
 
   return `import { CatalogUiPolicy } from '@servicenow/sdk/core'
 
-// Managed by NowForge. Generated from the policy builder — edit it there.
+// Managed by NowHelpAssist. Generated from the policy builder — edit it there.
 // nowforge-policy: ${slug}
 CatalogUiPolicy({
     $id: Now.ID[${esc(slug.replace(/-/g, '_'))}],
@@ -554,7 +554,7 @@ ${actions}
 `;
 }
 
-/** Sources NowForge manages, so an out-of-box policy is never offered for edit. */
+/** Sources NowHelpAssist manages, so an out-of-box policy is never offered for edit. */
 export async function managedSlugs() {
   try {
     const files = await fsp.readdir(CATALOG_DIR);
@@ -711,7 +711,7 @@ export async function updatePolicy(sysId, patch, emit = () => {}) {
  * Delete a managed policy: remove its source, reinstall, prove it is gone.
  *
  * Removing the source IS the SDK's deletion mechanism — the same one flows use.
- * A policy NowForge did not author has no source to remove, and is refused
+ * A policy NowHelpAssist did not author has no source to remove, and is refused
  * rather than deleted through a REST call that would half-work.
  */
 export async function deletePolicy(sysId, emit = () => {}) {
@@ -720,7 +720,7 @@ export async function deletePolicy(sysId, emit = () => {}) {
   const file = policySourcePath(slug);
   if (!fs.existsSync(file)) {
     throw Object.assign(new Error(
-      `"${policy.short_description}" is not managed by NowForge — there is no Fluent source for it, so removing it here would not be the platform's own deletion mechanism. ` +
+      `"${policy.short_description}" is not managed by NowHelpAssist — there is no Fluent source for it, so removing it here would not be the platform's own deletion mechanism. ` +
       `Delete it in the platform UI, or in the application that owns it.`
     ), { status: 409 });
   }

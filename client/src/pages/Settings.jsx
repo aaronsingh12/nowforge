@@ -115,7 +115,7 @@ export default function Settings() {
           </div>
           <div className="note">
             Conversations, the instance knowledge ledger and recall embeddings live in one SQLite file at{' '}
-            <span className="mono">server/data/nowforge.db</span> (gitignored). Chats survive a server restart, and
+            <span className="mono">server/data/nowhelpassist.db</span> (gitignored). Chats survive a server restart, and
             the ledger carries what this project has measured about your instance into every new session.
           </div>
           <div className="note warn">

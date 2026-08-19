@@ -1,4 +1,4 @@
-# NowForge in five minutes
+# NowHelpAssist in five minutes
 
 A build → verify → show-it-live walkthrough for someone who has never seen this.
 The demo uses a **disposable spec** and ends by deleting what it created, so it
@@ -12,7 +12,7 @@ fix it (see the setup section of the README).
 
 ## The one-sentence pitch
 
-> ServiceNow has no REST API for authoring Flow Designer flows. NowForge writes
+> ServiceNow has no REST API for authoring Flow Designer flows. NowHelpAssist writes
 > them in ServiceNow's own SDK instead: you describe the automation in English,
 > it generates TypeScript, compiles it offline, installs it, and then *fires the
 > flow on a real record to prove it does what you asked*.
@@ -28,7 +28,7 @@ Paste into the **Live build** box on the Flows page and press **Generate & deplo
 
 ```
 When an incident is created with impact High and urgency High for the Service Desk group,
-add a work note saying "NowForge demo: triaged automatically" and set the incident category
+add a work note saying "NowHelpAssist demo: triaged automatically" and set the incident category
 to Network.
 ```
 
@@ -56,7 +56,7 @@ managed app, and the UI is honest about that.
 
 ## Step 2 — Verify (≈40 seconds)
 
-In **NowForge-managed artifacts**, the new row shows a verification badge with
+In **NowHelpAssist-managed artifacts**, the new row shows a verification badge with
 an assertion count. Press **Verify**.
 
 This is the part worth slowing down for. It:
@@ -70,7 +70,7 @@ This is the part worth slowing down for. It:
 
 | | Field | Expected | Actual |
 |---|---|---|---|
-| pass | `incident.work_notes` | NowForge demo: triaged automatically | NowForge demo: triaged automatically |
+| pass | `incident.work_notes` | NowHelpAssist demo: triaged automatically | NowHelpAssist demo: triaged automatically |
 | pass | `incident.category` | Network | Network |
 
 Two things to point out:
@@ -89,9 +89,9 @@ Two things to point out:
 Click **Open in ServiceNow** on the result card. You land on the real flow in
 Flow Designer: trigger, actions, and logic — an ordinary flow a ServiceNow admin
 can open, read, edit, and own. Nothing proprietary, no runtime dependency on
-NowForge.
+NowHelpAssist.
 
-Back in NowForge, open the flow in the right-hand pane to show the same thing
+Back in NowHelpAssist, open the flow in the right-hand pane to show the same thing
 read back through the API: decoded trigger config (table, condition,
 `run_flow_in`), named actions, logic blocks.
 
@@ -110,7 +110,7 @@ The same capability is a tool behind the approval gate. In **Agent**:
 
 ```
 Build a real active flow: when a problem is created with priority 1, add a work note
-saying NowForge escalated it. Check capability first.
+saying NowHelpAssist escalated it. Check capability first.
 ```
 
 It checks capability, proposes the design, and calls `create_flow_live` — which

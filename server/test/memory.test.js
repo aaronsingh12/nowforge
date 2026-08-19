@@ -24,7 +24,7 @@ import { _setDbForTests, migrate, getDb } from '../src/memory/db.js';
  * throwaway file is enough to keep the whole suite off the project database.
  * ------------------------------------------------------------------ */
 
-const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nowforge-mem-'));
+const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nowhelpassist-mem-'));
 const scratchFile = path.join(scratchDir, 'test.db');
 
 _setDbForTests(migrate(new DatabaseSync(scratchFile)));

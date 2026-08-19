@@ -13,7 +13,10 @@ const SAMPLES = [
   'Design a flow: when a P1 incident is created, notify the assignment group manager',
 ];
 
-const SESSION_KEY = 'nowforge.sessionId';
+const SESSION_KEY = 'nowhelpassist.sessionId';
+// Read once, for anyone who had a chat open across the rename. Cleared on the
+// first write, so this is not a key the app keeps two of.
+const LEGACY_SESSION_KEY = 'nowforge.sessionId';
 
 let nextId = 1;
 const uid = () => `m${nextId++}`;
@@ -62,7 +65,9 @@ export default function AgentChat() {
   const [autoApprove, setAutoApprove] = useState(false);
 
   const [sessions, setSessions] = useState(null);   // null = not loaded yet
-  const [sessionId, setSessionId] = useState(() => localStorage.getItem(SESSION_KEY) || crypto.randomUUID());
+  const [sessionId, setSessionId] = useState(
+    () => localStorage.getItem(SESSION_KEY) || localStorage.getItem(LEGACY_SESSION_KEY) || crypto.randomUUID()
+  );
   const [loadingSession, setLoadingSession] = useState(false);
   const [digestCount, setDigestCount] = useState(0);
   const [query, setQuery] = useState('');
@@ -72,7 +77,10 @@ export default function AgentChat() {
   const { connected } = useHealth();
   const msgsRef = useRef(null);
 
-  useEffect(() => { localStorage.setItem(SESSION_KEY, sessionId); }, [sessionId]);
+  useEffect(() => {
+    localStorage.setItem(SESSION_KEY, sessionId);
+    localStorage.removeItem(LEGACY_SESSION_KEY);
+  }, [sessionId]);
 
   const refreshSessions = useCallback(async () => {
     try { setSessions(await api.get('/agent/sessions')); }
@@ -344,7 +352,7 @@ export default function AgentChat() {
 
           {!loadingSession && messages.length === 0 && (
             <div className="card" style={{ maxWidth: 780 }}>
-              <div className="card-title">NowForge Agent</div>
+              <div className="card-title">NowHelpAssist Agent</div>
               <p style={{ margin: '0 0 10px', fontSize: 13.5, color: 'var(--muted)' }}>
                 Talks to your bound instance with schema inspection, reference resolution, record CRUD,
                 catalog composites, flow reading, blueprint design and live authoring. Every mutation stops

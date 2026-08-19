@@ -1,17 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="NowForge">
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="NowHelpAssist">
   <!--
-    The NowForge wordmark compressed to a mark: "NF" in verdigris on ink,
-    rounded square, hairline in verdigris-dim. Same three token values the
-    sidebar logo already uses (ink #0e1116, verdigris #57b57c, verdigris-dim
-    #2c4e3b), so the tab and the app are recognisably one thing.
+    The NowHelpAssist wordmark compressed to a mark: "NH" in verdigris on ink,
+    rounded square, hairline in verdigris-dim. It splits where the wordmark
+    splits — Now | HelpAssist — and uses the same three token values the
+    sidebar logo does (ink #0e1116, verdigris #57b57c, verdigris-dim #2c4e3b),
+    so the tab and the app are recognisably one thing.
 
     The letters are PATHS, not <text>. A favicon renders outside the page, so
     it cannot see the Sora webfont, and a text-based mark would silently fall
     back to whatever the OS picked and look different on every machine.
 
     The geometry was set by rendering it at 16px rather than by looking at it
-    large: the first pass left so much padding that the letters closed into a
-    smudge in the tab strip. Glyphs now occupy 56% of the square.
+    large: an early pass left so much padding that the letters closed into a
+    smudge in the tab strip. Glyphs occupy 72% of the square, with 9px margins
+    either side and a matching 8px counter inside each letter.
 
     width and height are present as well as viewBox, and are load-bearing: an
     SVG with only a viewBox has no intrinsic size, so an img reports
@@ -27,12 +29,12 @@
   <rect x="1" y="1" width="62" height="62" rx="14" fill="none" stroke="#2c4e3b" stroke-width="2"/>
   <g fill="#57b57c">
     <!-- N -->
-    <rect x="12" y="14" width="6" height="36"/>
-    <rect x="26" y="14" width="6" height="36"/>
-    <polygon points="12,14 18,14 32,50 26,50"/>
-    <!-- F -->
-    <rect x="38" y="14" width="6" height="36"/>
-    <rect x="38" y="14" width="14" height="6"/>
-    <rect x="38" y="29" width="11" height="6"/>
+    <rect x="9" y="14" width="6" height="36"/>
+    <rect x="23" y="14" width="6" height="36"/>
+    <polygon points="9,14 15,14 29,50 23,50"/>
+    <!-- H -->
+    <rect x="35" y="14" width="6" height="36"/>
+    <rect x="49" y="14" width="6" height="36"/>
+    <rect x="35" y="29" width="20" height="6"/>
   </g>
 </svg>

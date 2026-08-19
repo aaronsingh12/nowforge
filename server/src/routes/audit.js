@@ -48,7 +48,7 @@ auditRouter.get('/export.csv', (req, res, next) => {
     });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="nowforge-audit-${stamp}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="nowhelpassist-audit-${stamp}.csv"`);
     res.send(auditCsv(rows));
   } catch (err) { next(err); }
 });

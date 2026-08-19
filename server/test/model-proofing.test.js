@@ -248,7 +248,7 @@ test('A3: a literal the model invents cannot become a requirement', () => {
   // The intent extractor is the same weak model this guard polices. If its
   // claim is not in the spec, it is not enforceable — otherwise the guard
   // would block a correct flow, which is worse than not having the guard.
-  const grounded = groundLiterals(VENDOR_SPEC, ['Vendor issue: ', 'Escalated by NowForge', 'URGENT']);
+  const grounded = groundLiterals(VENDOR_SPEC, ['Vendor issue: ', 'Escalated by NowHelpAssist', 'URGENT']);
   assert.deepEqual(grounded, ['Vendor issue: ']);
 });
 

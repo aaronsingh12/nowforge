@@ -297,7 +297,7 @@ export async function validateSlaInput(input, { schemaFor = getSchema } = {}) {
       if (check.unknown.length) errors.push(unknownFieldMessage(`The ${label}`, collection, check.unknown));
       if (check.unparsed.length) {
         errors.push(
-          `The ${label} contains ${check.unparsed.map((u) => `"${u}"`).join(', ')}, which NowForge could not parse as a ` +
+          `The ${label} contains ${check.unparsed.map((u) => `"${u}"`).join(', ')}, which NowHelpAssist could not parse as a ` +
           `condition. It will not be field-checked, and an unchecked clause is exactly where trap #2 hides. ` +
           `Rewrite it in plain encoded-query form.`
         );
@@ -615,7 +615,7 @@ export async function assertTaskSla({
         observedSec: elapsedSec,
         note:
           'Schedule-bound: planned_end is the schedule engine\'s arithmetic over working windows, not start + duration. ' +
-          'NowForge does not recompute it — asserting a 24x7 expectation here fails a correct SLA (measured: 4h against ' +
+          'NowHelpAssist does not recompute it — asserting a 24x7 expectation here fails a correct SLA (measured: 4h against ' +
           '8-5 weekdays landed 7.84h of wall-clock later). Bounds are asserted instead.',
       };
       if (elapsedSec > 0) pass('planned_end is after start');
@@ -690,7 +690,7 @@ export async function verifySla(nameOrId, emit = () => {}, { toleranceSec = SLA_
       message: 'The start condition was NOT run, because it cannot mean what it reads.',
       errors: [
         ...(fieldCheck.unknown.length ? [unknownFieldMessage('The start condition', definition.collection, fieldCheck.unknown)] : []),
-        ...fieldCheck.unparsed.map((u) => `NowForge could not parse the clause "${u}", so it cannot confirm the setup record satisfies it.`),
+        ...fieldCheck.unparsed.map((u) => `NowHelpAssist could not parse the clause "${u}", so it cannot confirm the setup record satisfies it.`),
       ],
     };
   }
@@ -709,7 +709,7 @@ export async function verifySla(nameOrId, emit = () => {}, { toleranceSec = SLA_
 
   const schema = await getSchema(definition.collection);
   const payload = { ...derived.payload };
-  const tag = marker || `NowForge SLA check ${definition.name}`;
+  const tag = marker || `NowHelpAssist SLA check ${definition.name}`;
   if (schema.fields.some((f) => f.name === 'short_description') && !payload.short_description) {
     payload.short_description = tag;
   }

@@ -690,7 +690,7 @@ export default function Catalog() {
           is said rather than served quietly. */}
       {meta.variableTypeSource === 'fallback' && (
         <div className="note warn">
-          Variable types could not be read from this instance ({meta.variableTypeFallbackReason}), so NowForge is
+          Variable types could not be read from this instance ({meta.variableTypeFallbackReason}), so NowHelpAssist is
           showing its built-in list. Those codes drift between releases — spot-check any type you create.
         </div>
       )}

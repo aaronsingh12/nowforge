@@ -205,7 +205,7 @@ test('the fingerprint is stable for one spec and different for another', () => {
 });
 
 test('a failed run restores src/ to its pre-request state, and the diff proves it', async () => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'nowforge-hygiene-'));
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'nowhelpassist-hygiene-'));
   try {
     await fsp.writeFile(path.join(dir, 'deployed.now.ts'), DEPLOYED_ESCALATE, 'utf8');
     await fsp.writeFile(path.join(dir, 'deployed.verify.json'), '{"assert":[]}', 'utf8');

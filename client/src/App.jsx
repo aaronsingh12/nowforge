@@ -53,12 +53,12 @@ function Topbar({ title }) {
  */
 function Shell() {
   const { pathname } = useLocation();
-  const title = TITLES[pathname] || 'NowForge';
+  const title = TITLES[pathname] || 'NowHelpAssist';
 
   // D-4 — the tab says which page you left open. With eight routes behind one
-  // title, a pinned NowForge tab was unidentifiable among its own siblings.
+  // title, a pinned NowHelpAssist tab was unidentifiable among its own siblings.
   useEffect(() => {
-    document.title = pathname === '/' ? 'NowForge — Agentic ServiceNow Studio' : `${title} — NowForge`;
+    document.title = pathname === '/' ? 'NowHelpAssist — Agentic ServiceNow Studio' : `${title} — NowHelpAssist`;
   }, [pathname, title]);
 
   return (
@@ -71,7 +71,7 @@ function Shell() {
         <div className="logo">
           <span className="logo-row">
             <img className="logomark" src="/favicon.svg" alt="" width="26" height="26" aria-hidden="true" />
-            <span>Now<span className="forge">Forge</span></span>
+            <span>Now<span className="assist">HelpAssist</span></span>
           </span>
           <span className="logo-sub">agentic servicenow studio</span>
         </div>

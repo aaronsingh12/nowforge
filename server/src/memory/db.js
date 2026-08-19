@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
 /**
- * One SQLite file for everything NowForge needs to remember: sessions,
+ * One SQLite file for everything NowHelpAssist needs to remember: sessions,
  * messages, tool events, the per-instance knowledge ledger, and recall
  * embeddings.
  *
@@ -25,7 +25,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '../../data');
-const DB_FILE = path.join(DATA_DIR, 'nowforge.db');
+const DB_FILE = path.join(DATA_DIR, 'nowhelpassist.db');
+const LEGACY_DB_FILE = path.join(DATA_DIR, 'nowforge.db');
 
 let handle = null;
 
@@ -228,16 +229,43 @@ export function migrate(db) {
     } catch (err) {
       db.exec('ROLLBACK');
       // Loud: a half-migrated database is worse than one that refuses to open.
-      throw new Error(`NowForge database migration ${v + 1} failed: ${err.message}`);
+      throw new Error(`NowHelpAssist database migration ${v + 1} failed: ${err.message}`);
     }
   }
   return db;
+}
+
+/**
+ * Carry an existing database across the NowForge -> NowHelpAssist rename.
+ *
+ * The file name is an ADDRESS, not a label: every session, tool event, digest
+ * and audit row already lives at the old one. Renaming the product without
+ * this would silently start a fresh database and leave a working history
+ * orphaned next to it, which for the Audit page in particular would be the
+ * exact failure it exists to prevent.
+ *
+ * The WAL is checkpointed into the main file before the rename, so moving one
+ * file cannot strand committed data in a `-wal` nobody will look for again.
+ * Runs once: the moment the new file exists this is a no-op.
+ */
+function adoptLegacyDatabase() {
+  if (fs.existsSync(DB_FILE) || !fs.existsSync(LEGACY_DB_FILE)) return null;
+  const old = new DatabaseSync(LEGACY_DB_FILE);
+  try { old.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } finally { old.close(); }
+  fs.renameSync(LEGACY_DB_FILE, DB_FILE);
+  for (const suffix of ['-wal', '-shm']) {
+    // Empty after the checkpoint, and stale against the new name.
+    try { fs.rmSync(LEGACY_DB_FILE + suffix, { force: true }); } catch { /* nothing to clean */ }
+  }
+  return LEGACY_DB_FILE;
 }
 
 /** Opens the database, applying any migrations this file has not yet seen. */
 export function getDb() {
   if (handle) return handle;
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  const adopted = adoptLegacyDatabase();
+  if (adopted) console.log(`  storage: adopted ${path.basename(adopted)} as ${path.basename(DB_FILE)}`);
   const db = new DatabaseSync(DB_FILE);
 
   // WAL survives a hard kill mid-write, which is exactly the acceptance test

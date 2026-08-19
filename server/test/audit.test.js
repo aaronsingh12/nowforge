@@ -26,7 +26,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { _setDbForTests, migrate, getDb } from '../src/memory/db.js';
 
-const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nowforge-audit-'));
+const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nowhelpassist-audit-'));
 _setDbForTests(migrate(new DatabaseSync(path.join(scratchDir, 'test.db'))));
 
 const { createSession, recordToolEvent } = await import('../src/memory/sessions.js');

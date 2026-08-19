@@ -73,7 +73,7 @@ export function recordBuildEvent(runId, event) {
   } catch (err) {
     // Loud in the log, counted in the row, never fatal to the build in flight.
     dropped.set(runId, (dropped.get(runId) || 0) + 1);
-    console.error(`NowForge audit: dropped a build event for run ${runId}: ${err.message}`);
+    console.error(`NowHelpAssist audit: dropped a build event for run ${runId}: ${err.message}`);
   }
 }
 
@@ -83,7 +83,7 @@ export function finishBuildRun(runId, { status, summary = null }) {
     getDb().prepare('UPDATE build_runs SET status = ?, summary = ?, dropped = ?, finished = ? WHERE id = ?')
       .run(status, summary === null ? null : json(summary), dropped.get(runId) || 0, now(), runId);
   } catch (err) {
-    console.error(`NowForge audit: could not close run ${runId}: ${err.message}`);
+    console.error(`NowHelpAssist audit: could not close run ${runId}: ${err.message}`);
   } finally {
     dropped.delete(runId);
   }

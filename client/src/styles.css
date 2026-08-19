@@ -1,4 +1,4 @@
-/* ── NowForge design tokens ─────────────────────────────────────────────
+/* ── NowHelpAssist design tokens ─────────────────────────────────────────────
    Dark "control room" for ServiceNow builders. Warm off-white text on
    blue-black panels; desaturated verdigris accent (SN heritage without the
    neon); amber reserved for the approval gate — the platform's signature. */
@@ -60,7 +60,7 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; margin: 0; }
    wrapped "studio" onto a second line, which moved every nav item down. */
 .logo-row { display: flex; align-items: center; gap: 9px; }
 .logomark { flex: none; }
-.logo .forge { color: var(--verdigris); }
+.logo .assist { color: var(--verdigris); }
 .logo-sub { display: block; font-family: var(--font-mono); font-size: 10px; color: var(--muted); font-weight: 400; margin-top: 2px; }
 .navlink {
   display: flex; align-items: center; gap: 10px;

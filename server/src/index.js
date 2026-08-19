@@ -43,6 +43,6 @@ getDb();
 const seeded = seedLedger();
 
 app.listen(PORT, () => {
-  console.log(`NowForge server listening on http://localhost:${PORT}`);
+  console.log(`NowHelpAssist server listening on http://localhost:${PORT}`);
   console.log(`  memory: ${seeded.seeded} ledger facts for ${seeded.instance}`);
 });

@@ -1,4 +1,4 @@
-# NowForge — Agentic ServiceNow Studio
+# NowHelpAssist — Agentic ServiceNow Studio
 
 Connect a ServiceNow PDI and build on it two ways: through clean module UIs, or by telling an AI agent what you want and approving each change it proposes. Bring your own model — Anthropic, OpenAI, or fully-local Ollama. No Now Assist SKUs required.
 
@@ -32,7 +32,7 @@ Credentials live only in `server/data/settings.json` on your machine (gitignored
 
 ### Enabling live flow authoring (optional)
 
-Everything above works without this. To let NowForge build *real* flows, install ServiceNow's SDK and give it a credential:
+Everything above works without this. To let NowHelpAssist build *real* flows, install ServiceNow's SDK and give it a credential:
 
 ```bash
 # 1. the CLI (Node 18+)
@@ -40,7 +40,7 @@ npm i -g @servicenow/sdk
 
 # 2. one stored credential — piping the password keeps it non-interactive
 echo "$SN_PASSWORD" | now-sdk auth --add https://devXXXXXX.service-now.com \
-    --type basic --alias nowforge --username admin --password-stdin
+    --type basic --alias nowhelpassist --username admin --password-stdin
 
 # 3. workspace dependencies + instance type definitions
 npm install --prefix server/fluent-workspace
@@ -49,9 +49,17 @@ cd server/fluent-workspace && now-sdk dependencies
 
 The Flows page shows a green banner when this is ready, and the exact fix commands when it isn't. `GET /api/flows/live/capability` returns the same detail (add `?deep=true` to actually round-trip the instance instead of just reading the local credential store).
 
+**On the scope name:** the deployed application is still scoped
+`x_2196302_nwforge` and named "NowForge Flows" — that is an address on the
+instance, not a label, and renaming it in source would install a *second*,
+empty application rather than rename the existing one. Same for the
+`// nowforge-spec:` markers that match a request to its already-deployed
+source. See `docs/fluent-research.md` §25 for the full list of what was and
+was not renamed, and why.
+
 **On credentials:** the SDK keeps its own credential store, addressed by alias — it does **not** read `server/data/settings.json`, and there is no `.env` anywhere in this project. For CI, skip the stored alias and export `SN_SDK_NODE_ENV=SN_SDK_CI_INSTALL`, `SN_SDK_AUTH_TYPE`, `SN_SDK_INSTANCE_URL`, `SN_SDK_USER`, `SN_SDK_USER_PWD` (or the OAuth pair) instead. Note that `keys.ts` — despite living under a docs page called "keys file" — is a **sys_id map, not credentials**; commit it.
 
-Because the SDK and NowForge authenticate separately, they can point at different instances. The capability banner warns you when they do, since flows would deploy somewhere other than the instance you're reading.
+Because the SDK and NowHelpAssist authenticate separately, they can point at different instances. The capability banner warns you when they do, since flows would deploy somewhere other than the instance you're reading.
 
 ---
 
@@ -71,15 +79,15 @@ Four tabs covering the catalog stack top to bottom:
 The item view itself has three tabs:
 
 - **Variables** — add them, edit them in place (question text, order, mandatory, help text, default), reorder with buttons that renumber the whole list server-side and read every row back, and manage choices on choice-type variables. Editing in place matters: a recreated variable gets a new sys_id, and every UI policy naming the old one keeps the reference and silently stops matching.
-- **UI policies** — a builder that reads as a sentence: *when `<variable>` is `<value>` then `<variable>` visible / mandatory / read-only*. Choice-aware — the value control becomes a dropdown of the variable's real choices as soon as you pick a variable that has any, so the commonest way to write a condition that can never be true (comparing a select box against its display label instead of its stored value) is not reachable from the form. Existing policies render the same way, with a badge separating the ones NowForge authored from the platform's own.
+- **UI policies** — a builder that reads as a sentence: *when `<variable>` is `<value>` then `<variable>` visible / mandatory / read-only*. Choice-aware — the value control becomes a dropdown of the variable's real choices as soon as you pick a variable that has any, so the commonest way to write a condition that can never be true (comparing a select box against its display label instead of its stored value) is not reachable from the form. Existing policies render the same way, with a badge separating the ones NowHelpAssist authored from the platform's own.
 - **Variable sets** — attach and inspect.
 
 **Why creating a UI policy takes about a minute.** `catalog_ui_policy_action` cannot be written over REST at all on this platform: a POST returns 201 and silently discards `ui_policy` and `catalog_variable`, the two fields that attach the action to its policy and to its variable. The cause is a field ACL granting only the role `nobody` with `admin_overrides` off — and the Table API drops a field the caller may not write rather than refusing. So policies are authored through the ServiceNow SDK, exactly as flows are and for exactly the same reason, and the result is read back to confirm every action landed attached. See `docs/fluent-research.md` §23.
 
 ### Flows
 - **Read everything:** flows *and subflows* from `sys_hub_flow`, trigger instances, ordered action instances, logic blocks, and execution history from `sys_flow_context`. Activate/deactivate with one click. Trigger configuration (table, condition, run-in) is decoded from the platform's compressed `trigger_inputs` blob, because current releases keep none of it in columns.
-- **Live build (the real thing):** type an automation in plain language → NowForge generates Fluent TypeScript, compiles it **offline**, installs it, and reads the result back. You get an active flow with its sys_id and a link, or a readable compile error and nothing on the instance.
-- **Semantic verification:** press **Verify** and NowForge fires the flow on a real record, asserts the effects your sentence promised, and deletes the test data. Compiling proves a flow is well-formed; this proves it is *correct*. See [docs/demo.md](docs/demo.md) for a five-minute walkthrough.
+- **Live build (the real thing):** type an automation in plain language → NowHelpAssist generates Fluent TypeScript, compiles it **offline**, installs it, and reads the result back. You get an active flow with its sys_id and a link, or a readable compile error and nothing on the instance.
+- **Semantic verification:** press **Verify** and NowHelpAssist fires the flow on a real record, asserts the effects your sentence promised, and deletes the test data. Compiling proves a flow is well-formed; this proves it is *correct*. See [docs/demo.md](docs/demo.md) for a five-minute walkthrough.
 - **Design with AI:** describe an automation → a precise blueprint (trigger, exact actions, configs, reference fields, test plan). Download it, or hit **Deploy as real flow** to feed it straight into the live pipeline.
 - **Classic fallback:** where the SDK can't run, record-triggered blueprints still become an equivalent **Business Rule** (`sys_script`), always created **inactive** for review.
 
@@ -125,7 +133,7 @@ SLA definitions (`contract_sla`) with the two behaviours that make this table
 quietly dangerous handled up front rather than explained afterwards.
 
 - **Create and edit definitions** — table, start/stop/pause conditions as encoded queries, duration, relative-duration type, schedule, retroactive flag, with schedules and relative durations read live off the instance.
-- **Conditions are field-checked before the write.** A start condition naming a field that does not exist is not rejected by the platform, it is *dropped* — so `active=true^prioritee=1` becomes `active=true` and the SLA attaches to every active record on the table. NowForge refuses before anything is written, and a **Check conditions** button runs the same check with no write at all.
+- **Conditions are field-checked before the write.** A start condition naming a field that does not exist is not rejected by the platform, it is *dropped* — so `active=true^prioritee=1` becomes `active=true` and the SLA attaches to every active record on the table. NowHelpAssist refuses before anything is written, and a **Check conditions** button runs the same check with no write at all.
 - **An inert schedule is called out where the mistake is made.** A schedule is ignored unless `schedule_source` is `sla_definition`. Measured on this instance: two definitions identical but for that field, same 4h duration — **4.00h** elapsed against **7.84h**.
 - **Every write is read back field by field**, because unknown fields are accepted and discarded. The response carries `mismatches[]`, not "saved".
 - **Verify** creates a record derived from the definition's *own* start condition, asks the platform whether the stored record really satisfies it, asserts the `task_sla` that attaches, and deletes the record again with a read-back. Its own button, its own approval — it writes real data.
@@ -165,7 +173,7 @@ Three tiers. **LIVE (verified)** means it was exercised end-to-end against a rea
 | **ACL report matches the records** | 143 rules across `incident → task`; three ACLs re-read through a separate code path and compared field by field, 3/3; `incident_task`'s 43 ACLs, 0 leaked |
 | **Two-role diff shows real differences** | admin vs itil: 3 operations only-itil, 36 field-level differences, with the `admin_overrides` inversion stated |
 | **SLA assertions inside a flow verification spec** | `Escalate Network P1 Incident` run with an SLA assertion alongside its field assertions: 3/3, 0s drift, and the three rival SLAs that also attached named in the result |
-| **Catalog UI policies, proven on the form** | policy built in NowForge's own UI, installed through the SDK, then driven on `/sp?id=sc_cat_item`: the variable is absent, then rendered, when the checkbox flips. Asserted from the element's bounding box, not its presence in the DOM |
+| **Catalog UI policies, proven on the form** | policy built in NowHelpAssist's own UI, installed through the SDK, then driven on `/sp?id=sc_cat_item`: the variable is absent, then rendered, when the checkbox flips. Asserted from the element's bounding box, not its presence in the DOM |
 | **Agent-authored UI policy, one approval** | "make the justification field mandatory only when duration is Permanent" → `get_catalog_item` → `create_ui_policy` (approved) → on the Corp VPN form, `aria-required` goes false → true and the field appears under "Required information" |
 | **Variable reorder, choices, item toggle, category create** | each exercised over HTTP against the live PDI; reorder renumbers the whole list and reads every row back |
 | **The audit trail reconstructs a session** | live on dev442675: agent created `INC0010037` (`c84b2da1…`) through the gate and deleted the same sys_id; an SLA verification ran from the UI path with 8 streamed events and 0 dropped. Every row's sys_ids, approval, instance and account read back from the Audit page alone |
@@ -188,13 +196,13 @@ Three tiers. **LIVE (verified)** means it was exercised end-to-end against a rea
 
 | Capability | Status |
 |---|---|
-| Editing pre-existing global or third-party flows | **out of scope** — NowForge only manages artifacts inside its own scoped app |
+| Editing pre-existing global or third-party flows | **out of scope** — NowHelpAssist only manages artifacts inside its own scoped app |
 | Anything when the SDK cannot run | blueprint + inactive `sys_script`, with the capability banner printing the exact fix commands |
 | Application triggers (inbound email, SLA, catalog) | supported by the SDK and documented in the cheatsheet, but **not exercised here** — treat as unproven until verified. Note this is the SLA *flow trigger*; SLA **definitions** are Tier 1 above and go through the Table API, not the SDK |
 | ACL authoring | **out of scope on purpose**, not a gap to close later with a REST write. The SDK route — `sys_security_acl` as managed source, reviewed and installed like any other artifact — is the only defensible way to author one |
-| Editing a catalog UI policy NowForge did not author | read-only here. Without a Fluent source there is nothing to edit or remove through the toolchain, and the REST path cannot write the fields that matter. Marked "platform" in the UI rather than offered and then failing |
+| Editing a catalog UI policy NowHelpAssist did not author | read-only here. Without a Fluent source there is nothing to edit or remove through the toolchain, and the REST path cannot write the fields that matter. Marked "platform" in the UI rather than offered and then failing |
 
-There is still **no supported REST API for writing `sys_hub_*` directly**, and NowForge never attempts it. Live authoring works because it drives ServiceNow's own toolchain.
+There is still **no supported REST API for writing `sys_hub_*` directly**, and NowHelpAssist never attempts it. Live authoring works because it drives ServiceNow's own toolchain.
 
 #### Model-proofing floor (A1–A5)
 
@@ -226,7 +234,7 @@ That surfaced a worse failure that was **ours**: the field check told the model 
 | Recall in both modes | keyword (no embed model) **5.48** vs 1.41; semantic (`nomic-embed-text`, 768d) **0.79** vs 0.56 — right session first in each |
 | Degraded recall is loud | UI banner + API both report `mode: "keyword"` with the exact `ollama pull` command; never a silent downgrade |
 
-Storage is the built-in **`node:sqlite`** — probed, not assumed: `DatabaseSync`, BLOB round-trip for float32 vectors, and FTS5 are all present on Node 24, so the layer is dependency-free (no node-gyp on this Windows machine). One gitignored file, `server/data/nowforge.db`, with idempotent migrations on boot.
+Storage is the built-in **`node:sqlite`** — probed, not assumed: `DatabaseSync`, BLOB round-trip for float32 vectors, and FTS5 are all present on Node 24, so the layer is dependency-free (no node-gyp on this Windows machine). One gitignored file, `server/data/nowhelpassist.db`, with idempotent migrations on boot.
 
 ---
 
@@ -247,7 +255,7 @@ and every build driven by hand from a module page — against the bound instance
   tool's return value.
 - **CSV export** honouring the on-screen filters, not a table dump.
 
-NowForge has no user management, so "who" is recorded as what can be stated
+NowHelpAssist has no user management, so "who" is recorded as what can be stated
 truthfully: the decision that was made, and the ServiceNow account the write
 landed under. It does not invent a person.
 
@@ -351,7 +359,7 @@ Things that cost real time and are documented in `docs/fluent-research.md`:
 - The published SDK CLI page lists **kebab-case flags that don't exist** (`--frozen-keys`, `--app-name`). The shipped CLI is camelCase. `now-sdk explain <topic>` is the reliable reference — it bundles better docs than the website.
 - Modern releases store flow parts in the **`_v2`** tables. The legacy tables still exist and return zero rows, so reading them makes every modern flow look empty.
 - Choice fields must be handed to the model as `value=label` pairs. Passing bare values produced a flow that fired on *Low* risk for a spec that asked for *High*, because `risk=4` means Low on this instance — and it compiled and installed perfectly.
-- Reasoning models (gpt-oss, o-series) bill hidden reasoning tokens against `max_tokens` and return HTTP 200 with empty content when the budget runs out. NowForge now raises a specific error instead of reporting "the model returned nothing".
+- Reasoning models (gpt-oss, o-series) bill hidden reasoning tokens against `max_tokens` and return HTTP 200 with empty content when the budget runs out. NowHelpAssist now raises a specific error instead of reporting "the model returned nothing".
 - `priority` on task tables is **calculated** from `impact` and `urgency`. Writing `{"priority":"1"}` is silently stored as *4 - Low*, so a verification setup that sets priority directly never matches a `priority=1` trigger. Drive calculated fields through their inputs.
 - Schedule times are stored in **UTC**: `Time({hours:7}, 'Asia/Kolkata')` persists as `01:30`. Asserting the local wall-clock time against the stored value fails a perfectly correct flow.
 - `catalog_ui_policy_action` accepts a POST, returns 201, and silently discards the two fields that make the action work. A field ACL grants only the role `nobody`, `admin_overrides` is off, and the Table API drops a field you may not write instead of refusing. The dictionary's `read_only` flag is no guide: on that table the read-only fields store and the writable ones do not.
@@ -364,7 +372,7 @@ Things that cost real time and are documented in `docs/fluent-research.md`:
 - A `contract_sla.schedule` is inert unless `schedule_source` says `sla_definition`. Same schedule, same 4h duration, one field apart: 4.00h against 7.84h.
 - `sys_security_acl.operation` mixes two sys_id conventions in one table — `read` and `write` are literally their own sys_ids, `report_view` is 32 hex. Read the raw value and half your report is opaque in a way that looks like bad data.
 - `nameSTARTSWITHincident` also matches `incident_task`, which has 43 ACLs of its own.
-- A weak model can return HTTP 200 with a repetition loop in the middle of otherwise correct prose. Next to an accurate report, the loop reads as a finding. NowForge checks generated text for it, retries once quoting the repeated fragment back, and then refuses.
+- A weak model can return HTTP 200 with a repetition loop in the middle of otherwise correct prose. Next to an accurate report, the loop reads as a finding. NowHelpAssist checks generated text for it, retries once quoting the repeated fragment back, and then refuses.
 - Gating a component's returned JSX does not gate its effects. The page is mounted before it returns, so five "you need an instance" screens were rendering on top of five requests that had already 400'd. Only a route-level gate stops the mount.
 - `/api/system/health` is polled by every page to answer "is an instance bound", and it was `await capability()` — two `now-sdk` spawns, 5.5s on a cold cache, for a field no client read.
 - `display: none` removes an element from the tab order, so adding `:focus-within` to a hover-reveal rule is inert. Clipping keeps the buttons focusable and looks identical.

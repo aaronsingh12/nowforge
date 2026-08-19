@@ -570,10 +570,10 @@ export async function capability({ deep = false, force = false } = {}) {
 
   // --- auth ---
   const settings = getSettings();
-  const nowforgeHost = (settings.connection.instanceUrl || '').replace(/\/+$/, '');
+  const nowhelpassistHost = (settings.connection.instanceUrl || '').replace(/\/+$/, '');
   const auth = {
     credentials: [], alias: null, host: null, username: null,
-    verified: 'unknown', matchesNowForgeInstance: null, error: null,
+    verified: 'unknown', matchesNowHelpAssistInstance: null, error: null,
   };
   if (cli.present && !cli.error) {
     const a = await runSdk(['auth', '--list']);
@@ -585,14 +585,14 @@ export async function capability({ deep = false, force = false } = {}) {
         auth.host = def.host;
         auth.username = def.username;
         auth.verified = 'stored';
-        if (nowforgeHost && def.host) {
-          auth.matchesNowForgeInstance = def.host.replace(/\/+$/, '') === nowforgeHost;
+        if (nowhelpassistHost && def.host) {
+          auth.matchesNowHelpAssistInstance = def.host.replace(/\/+$/, '') === nowhelpassistHost;
         }
       } else {
         auth.error = 'No stored SDK credentials.';
         fixes.push({
           problem: 'SDK not authenticated',
-          command: `now-sdk auth --add ${nowforgeHost || 'https://<instance>.service-now.com'} --type basic --alias nowforge`,
+          command: `now-sdk auth --add ${nowhelpassistHost || 'https://<instance>.service-now.com'} --type basic --alias nowhelpassist`,
         });
       }
     } else {
@@ -609,7 +609,7 @@ export async function capability({ deep = false, force = false } = {}) {
       auth.error = (probe.stderr || probe.stdout || 'Authenticated probe failed').slice(0, 400);
       fixes.push({
         problem: 'Stored SDK credential rejected by the instance',
-        command: `now-sdk auth --add ${auth.host || nowforgeHost} --type basic --alias ${auth.alias}`,
+        command: `now-sdk auth --add ${auth.host || nowhelpassistHost} --type basic --alias ${auth.alias}`,
       });
     }
   }

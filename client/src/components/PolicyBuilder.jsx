@@ -172,7 +172,7 @@ export default function PolicyBuilder({ catItemId, meta }) {
               <b>{p.short_description}</b>
               {!p.active && <span className="badge" style={{ marginLeft: 6 }}>inactive</span>}
               {p.managed
-                ? <span className="badge green" style={{ marginLeft: 6 }}>NowForge</span>
+                ? <span className="badge green" style={{ marginLeft: 6 }}>NowHelpAssist</span>
                 : <span className="badge" style={{ marginLeft: 6 }} title="No Fluent source — read-only here">platform</span>}
             </div>
             {p.managed && <button className="btn danger sm" onClick={() => removePolicy(p)}>Delete</button>}

@@ -1,6 +1,6 @@
 # ServiceNow Fluent SDK — Research Findings
 
-Phase 0 research for NowForge live Flow Designer authoring.
+Phase 0 research for NowHelpAssist live Flow Designer authoring.
 
 **Status:** pipeline proven end-to-end on `dev442675.service-now.com`.
 Everything below marked ✅ **verified** was executed against the real CLI/instance in this
@@ -87,7 +87,7 @@ Templates: `base`, `javascript.basic|react|aiux|aiux-extension`, `typescript.bas
 - A mismatched prefix only produces a *warning*, then installs into an app that
   "may not install correctly". Get this right the first time.
 
-`x_2196302_nwforge` (17 chars) is what NowForge uses.
+`x_2196302_nwforge` (17 chars) is what NowHelpAssist uses.
 
 ### What `base` actually generates
 
@@ -118,7 +118,7 @@ Two surprises worth knowing:
 
 ## 4. Headless authentication (the part the docs bury)
 
-Two independent mechanisms. NowForge uses (a) today and should support (b) for CI.
+Two independent mechanisms. NowHelpAssist uses (a) today and should support (b) for CI.
 
 ### (a) Stored credential aliases — what this machine uses ✅
 
@@ -165,11 +165,11 @@ OAuth variant (preferred for production): `SN_SDK_AUTH_TYPE=oauth` with
 
 **What Phase 2 actually shipped:** the server drives the SDK through the **stored alias** (a),
 not the env vars. The alias already exists on this machine, works non-interactively, and keeps
-the instance password out of the Node process entirely — NowForge never handles it. Mechanism
+the instance password out of the Node process entirely — NowHelpAssist never handles it. Mechanism
 (b) remains the documented path for CI, where no credential store is present.
 
 Note the two credential stores are independent: the SDK's alias store is separate from
-NowForge's `server/data/settings.json`, so they can point at different instances.
+NowHelpAssist's `server/data/settings.json`, so they can point at different instances.
 `capability()` compares the alias host against the configured instance URL and the UI warns on
 a mismatch, since flows would otherwise deploy somewhere other than the instance being read.
 (There is no `.env` anywhere in this project — see §9.)
@@ -217,7 +217,7 @@ Three things to exploit:
 - **`Flow activation complete: N/N succeeded`** is a parseable success signal.
   `--skip-flow-activation` disables it; do not pass that flag.
 - Every install prints a **rollback URL** (`sys_rollback_context`) — a genuine undo path worth
-  surfacing in the NowForge UI.
+  surfacing in the NowHelpAssist UI.
 - The app URL contains the scope sys_id, so a deep link is derivable without another query.
 
 `-r/--reinstall` uninstalls then reinstalls. It **destroys on-instance metadata not present
@@ -318,7 +318,7 @@ deduplication.
 
 ### Execution proof ✅
 
-Created a P1 incident against the Network group via NowForge's own Table API client, then
+Created a P1 incident against the Network group via NowHelpAssist's own Table API client, then
 watched the flow run:
 
 ```
@@ -334,7 +334,7 @@ downstream of the `wfa.subflow(...)` call at step 2 with `waitForCompletion: tru
 subflow wiring is therefore proven**, not just present. The test incident was deleted and a
 follow-up query confirms it is gone.
 
-### ⚠️ Bug found in NowForge's existing readers — `_v2` tables
+### ⚠️ Bug found in NowHelpAssist's existing readers — `_v2` tables
 
 `flows.detail()` in `server/src/servicenow/flows.js` queries `sys_hub_trigger_instance`,
 `sys_hub_action_instance`, and `sys_hub_flow_logic`. On this release those return **nothing**:
@@ -1193,7 +1193,7 @@ email) is empty, and `sendEmail` with no recipient is a hard error rather than a
 pre-existing and unrelated to the hotfix, but it is a live flow failing on every execution and
 should not stay that way.
 
-### Survey of all 10 NowForge-scoped artifacts
+### Survey of all 10 NowHelpAssist-scoped artifacts
 
 | artifact | type | active | ever run |
 |---|---|---|---|
@@ -1215,7 +1215,7 @@ should not stay that way.
 Phase 4 ended with a working pipeline and an honest problem: *the provider is the weak link
 throughout*. Six live runs of one spec produced six different flow names, one regeneration
 silently dropped a promised text prefix, and three verification attempts re-sent the same
-impossible locator. None of those is a bug in NowForge. All of them shipped, or nearly shipped,
+impossible locator. None of those is a bug in NowHelpAssist. All of them shipped, or nearly shipped,
 a wrong artifact.
 
 The floor is five guards that make each of those failure classes **structurally unable to reach
@@ -1527,7 +1527,7 @@ is **dependency-free**. That matters specifically here: this is a Windows
 machine with no node-gyp toolchain, so better-sqlite3 would have meant trusting
 a prebuilt binary to match this exact Node ABI.
 
-One file, `server/data/nowforge.db`, gitignored. Migrations are idempotent on
+One file, `server/data/nowhelpassist.db`, gitignored. Migrations are idempotent on
 boot, keyed on `PRAGMA user_version`, each in its own transaction — a
 half-migrated database is worse than one that refuses to open. `migrate()` is
 exported so the offline suite builds its scratch database through the **same**
@@ -1813,7 +1813,7 @@ are the ones that came back; where something was not verified, it says so.
 
 Track B adds no storage. The SLA and ACL layers are stateless readers and
 writers over the Table API — there is nothing durable to keep that the instance
-is not already the source of truth for. `server/data/nowforge.db` is unchanged
+is not already the source of truth for. `server/data/nowhelpassist.db` is unchanged
 and no migration was added.
 
 ---
@@ -1889,7 +1889,7 @@ An SLA with **no** start condition is refused for the same reason.
 #### Writes are read back field by field ✅
 
 Trap #3 applies here too, and was re-measured on this table: a deliberate
-`zzz_nowforge_not_a_field` was accepted by the POST and absent from the stored
+`zzz_nowhelpassist_not_a_field` was accepted by the POST and absent from the stored
 record, with no error. So `createSla`/`updateSla` compare every field sent
 against the stored record and return `mismatches[]`; conditions compare modulo
 the `^EQ` end marker, which the platform appends to anything saved through its
@@ -2019,7 +2019,7 @@ silently skipped.
 ```
 sla_verify_definition   P1 resolve in 4h on incident
 sla_verify_setup        incident {active:"true", impact:"1", urgency:"1",
-                                  short_description:"NowForge SLA check ..."}
+                                  short_description:"NowHelpAssist SLA check ..."}
                         note: priority=1 is CALCULATED (trap #5)
 sla_verify_setup_done   INC0010035
 sla_verify_setup_checked satisfies=true  priority=1 - Critical
@@ -2133,7 +2133,7 @@ named is the grant, not the absence of one. The result also carries a standing
 caveat that this compares which rules **name** each role and is not an
 evaluation of access — the platform runs every matching ACL at each level, most
 specific first, and a field ACL, condition, script or security attribute can
-deny what a table-level row appears to allow. NowForge does not run that
+deny what a table-level row appears to allow. NowHelpAssist does not run that
 engine, and a report implying it did would be worse than no report.
 
 #### Read-restricted renders loudly ✅
@@ -2313,7 +2313,7 @@ action  ui_policy        = 668aba2f…   (the installed policy)
         visible          = false
 ```
 
-So NowForge **reads catalog UI policies over the Table API and writes them
+So NowHelpAssist **reads catalog UI policies over the Table API and writes them
 through the SDK**, in one deterministic template — a policy draft is already
 precise, so there is nothing for a model to add and one more way to be wrong.
 `fluent.js` exports a shared build/install surface, because two concurrent
@@ -2350,7 +2350,7 @@ One SDK detail, measured: `variableName` takes the **bare sys_id**. Passing
    and revealed its variable on `/sp?id=sc_cat_item` identically to the same
    policy at 10 — reinstalled at 0, re-driven through the portal, reinstalled
    back at 10, re-checked. The warning is gone; a guard that fires on a
-   distinction which does not exist teaches people to ignore guards. NowForge
+   distinction which does not exist teaches people to ignore guards. NowHelpAssist
    still writes 10, but for a defensible reason rather than a measured one: it
    is the SDK's own default for `runScriptsInUiType` and unambiguous everywhere.
 
@@ -2380,7 +2380,7 @@ and the correct fix (`mandatory: 'false'` in the same action) is one field away.
 The SDK's own guide agrees — "hide mandatory variables that have no value" is on
 its NEVER list.
 
-**Acceptance, live, driven through NowForge's own UI:**
+**Acceptance, live, driven through NowHelpAssist's own UI:**
 
 ```
 policies before the UI run: 0
@@ -2641,7 +2641,8 @@ on the path so one bad page cannot brick the session.
 ### D-4 — identity ✅
 
 One SVG, loaded by both the browser tab and the sidebar, so the two cannot
-drift. `NF` in verdigris on ink, rounded square, hairline in verdigris-dim. The
+drift. `NH` in verdigris on ink, rounded square, hairline in verdigris-dim — it
+splits where the wordmark splits, Now | HelpAssist. The
 letters are **paths, not `<text>`**: a favicon renders outside the page, cannot
 see the Sora webfont, and would fall back to whatever each OS picked.
 
@@ -2663,7 +2664,7 @@ looking at the tab:
 And the mark's 35px cost the sidebar subtitle its single line, which pushed
 every nav item down — so the subtitle keeps its own full-width row.
 
-Titles are per route (`Agent — NowForge`). Eight pages behind one title made a
+Titles are per route (`Agent — NowHelpAssist`). Eight pages behind one title made a
 pinned tab unidentifiable among its own siblings.
 
 ### D-5 — the audit page ✅
@@ -2692,7 +2693,7 @@ Three honesty properties, each asserted in `server/test/audit.test.js`:
 | pre-migration rows say *not recorded* | "nothing came back" and "we did not store it" are opposite facts, and an empty cell asserts the first |
 | a run that dropped events says so | an audit write must never kill a deploy already touching the instance, and must never vanish either. The count goes in the row and the page prints "this history is incomplete" |
 
-On *"who approved"*: NowForge has no user management, so naming a person would
+On *"who approved"*: NowHelpAssist has no user management, so naming a person would
 be a lie. What is recorded is what can be stated truthfully — the decision
 (`approved` / `rejected` / `auto` / none) and the ServiceNow account the write
 landed under.
@@ -2763,7 +2764,7 @@ keeps them focusable and looks identical.
 
 Real key events over CDP (`Input.dispatchKeyEvent`), not `element.focus()`.
 The distinction is load-bearing: `:focus-visible` — which is what paints
-NowForge's verdigris ring — deliberately does **not** match programmatic focus,
+NowHelpAssist's verdigris ring — deliberately does **not** match programmatic focus,
 so the first probe reported "no focus ring" on components whose ring is fine.
 A probe that only looks for an `outline` also reports a false gap on every
 select and textarea, because this theme gives fields a verdigris **border**
@@ -2798,3 +2799,55 @@ Playwright, no Puppeteer, no new repo dependency.
 | 37 | **`\b` does not bound a hex id inside a URL-encoded string** | a sys_id scanner silently skips `…sys_id%3D196e6cb2…` — the exact format the agent uses to report what it created | The `D` of `%3D` is a word character. Bound with "not more hex" (`(?<![0-9a-f])…(?![0-9a-f])`), and test against a real transcript rather than a tidy example |
 | 38 | **A spreadsheet executes a CSV cell starting with `=`, `+`, `-` or `@`** | an audit export of model-authored text becomes a formula on open | Prefix a single quote. An export is the one artifact that leaves the tool, so it is the one place untrusted text becomes someone else's problem |
 | 39 | **`**bold **` is not bold** | a markdown renderer ships and asterisks are still visible in one spot, so the feature looks broken | CommonMark: a closing `**` preceded by whitespace is not a closer. The source is wrong, not the renderer |
+
+---
+
+## 25. The rename — NowForge → NowHelpAssist
+
+The product is renamed everywhere it names itself: the wordmark, the mark, tab
+titles, prompts, log lines, error text, package names, the CSV export filename,
+this document. The mark splits where the wordmark does — `NH` for
+Now | HelpAssist — and was re-cut and re-checked at 16px, because that is the
+only size the geometry is actually for.
+
+### What was NOT renamed, and why
+
+A name is a label in most places and an **address** in a few. The addresses are
+left alone, and this is the list, because a later reader will otherwise see
+"NowForge" in the tree and assume the rename was simply incomplete.
+
+| kept | what it is | what renaming it would do |
+|---|---|---|
+| `x_2196302_nwforge` (+ its `scopeId`) | the scope of the application **installed on the PDI** | `now-sdk install` would create a second, empty application and leave all nine deployed artifacts behind in the first. A scope is not a display name; it cannot be edited in place |
+| `NowForge Flows` | that application's name | same — the SDK matches the app by it |
+| `nowforge-flows` | the SDK package name inside `fluent-workspace` | build identity for the above |
+| `// nowforge-spec: <fingerprint>` | how `fluent.js` finds the existing source for a request (invariant **d**) | every managed source becomes unrecognisable, so the next edit of an existing flow deploys a **duplicate** instead of updating it. That is the CLASS C failure §12 exists to document, re-created on purpose |
+| `// nowforge-policy: <slug>` | the same mechanism for catalog UI policies | a policy NowHelpAssist authored would start reading as one it did not, and become un-editable and un-removable through the toolchain (§23) |
+| `NowForge Smoke Test`, and its `short_descriptionLIKEnowforge-smoke-test` trigger | a deployed flow and the condition it fires on | the deployed flow keeps the old name; a renamed source would install a second one |
+| `NowForge: change approved…`, `NowForge URGENT escalation…` | **promised literals** asserted by `.verify.json` against flows currently running | the A3 guard would fail its own specs until every flow was regenerated and redeployed. These are the flows' content, not the product's name |
+
+The whole of `server/fluent-workspace/` is therefore untouched.
+
+If the scope should genuinely change, that is a migration, not a rename:
+install under the new scope, move or recreate the artifacts, verify each one,
+then delete the old application. It is worth doing deliberately or not at all.
+
+### Two addresses that WERE renamed, with a migration each
+
+| moved | carried across by |
+|---|---|
+| `server/data/nowforge.db` → `nowhelpassist.db` | `adoptLegacyDatabase()` runs before the first open: it checkpoints the old WAL into the main file — so renaming one file cannot strand committed rows in a `-wal` nobody will look for again — renames it, clears the stale sidecars, and logs that it did. Idempotent: once the new file exists it is a no-op |
+| `localStorage['nowforge.sessionId']` | read as a fallback on mount and cleared on the first write, so a chat open across the rename is not silently replaced by a new empty one |
+
+Both exist for the same reason: the Audit page's entire claim is that history
+survives, and a rename that quietly started a fresh database would have been
+the most ironic possible way to break it.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 40 | **A rename is a find-and-replace until it hits an address** | the product renames cleanly, the build is green, and the next deploy silently creates a second scoped application beside the live one | Separate labels from addresses first. A ServiceNow scope, an app name, an identity marker a tool matches sources by, and any literal a verification spec asserts are all addresses — protect them explicitly, and write down why, or the next reader will "finish the job" |
+| 41 | **A renamed data file is a discarded data file** | the app starts, works perfectly, and has no history — the old database is sitting next to the new one | Rename the file *and* carry the data, checkpointing WAL first. The same applies to any localStorage key holding live state |

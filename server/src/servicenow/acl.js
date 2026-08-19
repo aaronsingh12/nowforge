@@ -349,7 +349,7 @@ export async function aclReport(tableName, {
  * of what the rules GRANT ON PAPER, not a simulation of the decision engine.
  * The platform evaluates every matching ACL at each level with the most
  * specific first, and a field ACL, a condition, a script or a security
- * attribute can all deny what a table-level row appears to allow. NowForge does
+ * attribute can all deny what a table-level row appears to allow. NowHelpAssist does
  * not run that engine, and a report that implied it did would be worse than no
  * report.
  */

@@ -278,7 +278,7 @@ export const TOOLS = [
   },
   {
     name: 'list_live_flows',
-    description: 'List the flows and subflows NowForge manages as Fluent source, with their current state on the instance.',
+    description: 'List the flows and subflows NowHelpAssist manages as Fluent source, with their current state on the instance.',
     mutating: false,
     inputSchema: { type: 'object', properties: {}, required: [] },
     execute: () => listManaged(),
@@ -286,7 +286,7 @@ export const TOOLS = [
   {
     name: 'delete_live_flow',
     description:
-      'Delete a NowForge-managed flow by name: removes its Fluent source, reinstalls, and confirms it is gone from the instance. Destructive — confirm with the user in conversation first. Requires user approval.',
+      'Delete a NowHelpAssist-managed flow by name: removes its Fluent source, reinstalls, and confirms it is gone from the instance. Destructive — confirm with the user in conversation first. Requires user approval.',
     mutating: true,
     inputSchema: {
       type: 'object',
@@ -415,7 +415,7 @@ export const TOOLS = [
   {
     name: 'list_ui_policies',
     description:
-      'List the catalog UI policies scoped to one item, with their conditions decoded into readable form (which variable, which operator, which value) and their actions. Also reports problems NowForge can see without running the form: a condition on a variable that is not on the item, a value the variable cannot hold, or an action that leaves everything on "ignore" and therefore does nothing.',
+      'List the catalog UI policies scoped to one item, with their conditions decoded into readable form (which variable, which operator, which value) and their actions. Also reports problems NowHelpAssist can see without running the form: a condition on a variable that is not on the item, a value the variable cannot hold, or an action that leaves everything on "ignore" and therefore does nothing.',
     mutating: false,
     inputSchema: {
       type: 'object',
@@ -427,7 +427,7 @@ export const TOOLS = [
   {
     name: 'create_ui_policy',
     description:
-      'Create a catalog UI policy that shows, hides, requires or freezes a variable in response to another variable. Conditions and actions both address variables by their item_option_new sys_id, which you must read with get_catalog_item first — a condition naming anything else can never be satisfied, and NowForge refuses it rather than writing a policy that saves and does nothing. Choice values are checked against the variable real choices for the same reason. IMPORTANT: this compiles and installs through the ServiceNow SDK and takes about a minute, because catalog_ui_policy_action cannot be written over REST at all — a POST returns 201 and silently discards the fields that attach the action to its policy. Requires user approval.',
+      'Create a catalog UI policy that shows, hides, requires or freezes a variable in response to another variable. Conditions and actions both address variables by their item_option_new sys_id, which you must read with get_catalog_item first — a condition naming anything else can never be satisfied, and NowHelpAssist refuses it rather than writing a policy that saves and does nothing. Choice values are checked against the variable real choices for the same reason. IMPORTANT: this compiles and installs through the ServiceNow SDK and takes about a minute, because catalog_ui_policy_action cannot be written over REST at all — a POST returns 201 and silently discards the fields that attach the action to its policy. Requires user approval.',
     mutating: true,
     inputSchema: {
       type: 'object',

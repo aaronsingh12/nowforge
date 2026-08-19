@@ -54,7 +54,7 @@ const JOIN_RE = /\^(OR(?!DERBY)|NQ)?/g;
  * Split an encoded query into clauses, keeping the joiner that PRECEDED each.
  * `^EQ` is the condition builder's end-of-query marker, not a clause, and the
  * platform appends it to anything saved through the UI — so a condition read
- * back off the instance and one typed into NowForge differ by that suffix and
+ * back off the instance and one typed into NowHelpAssist differ by that suffix and
  * must still compare equal.
  */
 export function splitQuery(query) {
@@ -288,7 +288,7 @@ export async function derivePayloadFor(tableName, query, { schemaFor, resolveRef
           notes.push(`${c.field}ISNOTEMPTY satisfied with ${field.reference} "${hit.display}" (${hit.sys_id}), resolved live.`);
           break;
         }
-        payload[c.field] = 'NowForge SLA verification';
+        payload[c.field] = 'NowHelpAssist SLA verification';
         break;
       }
       case 'ISEMPTY':

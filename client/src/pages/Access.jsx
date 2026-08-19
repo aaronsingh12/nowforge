@@ -65,7 +65,7 @@ export default function Access() {
           </button>
         </div>
         <div className="note" style={{ marginTop: 10 }}>
-          NowForge reads and explains access rules. It does not write them — an ACL is the one artifact where a
+          NowHelpAssist reads and explains access rules. It does not write them — an ACL is the one artifact where a
           confidently wrong write is a security incident rather than a bug.
         </div>
         {error && <p className="error-text">{error}</p>}

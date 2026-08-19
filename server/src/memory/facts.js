@@ -156,7 +156,7 @@ const SEED = [
     provenance: 'fluent-research §22 B-3, measured 43 contaminating rows', confidence: 0.95 },
 
   { scope: UNIVERSAL, kind: 'decision', key: 'acl-read-only-never-authored',
-    value: 'NowForge READS and EXPLAINS access control and never writes it. There is no ACL authoring tool and none should be simulated with create_record on sys_security_acl — an ACL is the one artifact class where a confidently wrong write is a security incident rather than a bug. Two reporting rules follow: an empty ACL result may mean the tables are not readable on this connection rather than that no rules exist (the report carries a `visibility` field saying which, and it must be quoted), and a role diff shows which rules NAME each role, never what those users can do.',
+    value: 'NowHelpAssist READS and EXPLAINS access control and never writes it. There is no ACL authoring tool and none should be simulated with create_record on sys_security_acl — an ACL is the one artifact class where a confidently wrong write is a security incident rather than a bug. Two reporting rules follow: an empty ACL result may mean the tables are not readable on this connection rather than that no rules exist (the report carries a `visibility` field saying which, and it must be quoted), and a role diff shows which rules NAME each role, never what those users can do.',
     provenance: 'fluent-research §22 B-3, the scope decision for Track B', confidence: 0.95 },
 
   { scope: UNIVERSAL, kind: 'trap', key: 'admin-overrides-inverts-a-role-diff',

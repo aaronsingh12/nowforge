@@ -14,9 +14,9 @@ function CapabilityBanner({ cap }) {
         ServiceNow SDK {cap.cli?.version} · credential <span className="mono">{cap.auth?.alias}</span>
         {cap.auth?.host ? <> → <span className="mono">{cap.auth.host}</span></> : null}
         {' '}· scope <span className="mono">{cap.workspace?.scope}</span>
-        {cap.auth?.matchesNowForgeInstance === false && (
+        {cap.auth?.matchesNowHelpAssistInstance === false && (
           <div style={{ marginTop: 6, color: 'var(--amber, #b8860b)' }}>
-            Warning: the SDK credential points at a different instance than NowForge is connected to.
+            Warning: the SDK credential points at a different instance than NowHelpAssist is connected to.
             Flows would deploy to <span className="mono">{cap.auth.host}</span>.
           </div>
         )}
@@ -32,7 +32,7 @@ function CapabilityBanner({ cap }) {
   }
   return (
     <div className="note warn">
-      <b>Live flow authoring unavailable.</b> NowForge falls back to blueprint + Business Rule until this is fixed.
+      <b>Live flow authoring unavailable.</b> NowHelpAssist falls back to blueprint + Business Rule until this is fixed.
       {cap.cli && !cap.cli.present && <div style={{ marginTop: 4 }}>ServiceNow SDK not found.</div>}
       {cap.auth?.error && <div style={{ marginTop: 4 }}>{cap.auth.error}</div>}
       {cap.workspace?.error && <div style={{ marginTop: 4 }}>{cap.workspace.error}</div>}
@@ -309,7 +309,7 @@ function VerifyPanel({ name, onClose }) {
   );
 }
 
-/** NowForge-managed Fluent sources and their live state. */
+/** NowHelpAssist-managed Fluent sources and their live state. */
 function ManagedArtifacts({ reloadKey, onChanged }) {
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState('');
@@ -343,7 +343,7 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
   if (!data) {
     return (
       <div className="card">
-        <div className="card-title">NowForge-managed artifacts</div>
+        <div className="card-title">NowHelpAssist-managed artifacts</div>
         <SkeletonLines lines={3} />
         <LoadingRegion label="Loading managed artifacts" />
       </div>
@@ -351,11 +351,11 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
   }
   return (
     <div className="card">
-      <div className="card-title">NowForge-managed artifacts</div>
+      <div className="card-title">NowHelpAssist-managed artifacts</div>
       {data.managed.length === 0 && (
         <EmptyState
           title="Nothing is managed yet."
-          hint="Describe an automation in the box above and NowForge will generate Fluent source, compile it offline, install it, and read it back. Only what it authored appears here."
+          hint="Describe an automation in the box above and NowHelpAssist will generate Fluent source, compile it offline, install it, and read it back. Only what it authored appears here."
         />
       )}
       {data.managed.length > 0 && (
@@ -616,9 +616,9 @@ export default function Flows() {
   return (
     <div className="stack">
       <div className="note">
-        Flows are authored through ServiceNow's own SDK (Fluent): NowForge generates TypeScript, compiles it
+        Flows are authored through ServiceNow's own SDK (Fluent): NowHelpAssist generates TypeScript, compiles it
         offline — so nothing reaches the instance unless it compiles — then installs it and reads the result back.
-        There is still no REST API for writing <span className="mono">sys_hub_*</span> directly, and NowForge never
+        There is still no REST API for writing <span className="mono">sys_hub_*</span> directly, and NowHelpAssist never
         attempts it. Blueprint and the inactive Business Rule remain the fallback tier for environments where the
         SDK cannot run.
       </div>
@@ -684,7 +684,7 @@ export default function Flows() {
           {!loading && rows.length === 0 && (
             <EmptyState
               title="No flows or subflows match."
-              hint="Clear the search and type filter, or build one — NowForge authors real Flow Designer flows through the SDK."
+              hint="Clear the search and type filter, or build one — NowHelpAssist authors real Flow Designer flows through the SDK."
             />
           )}
           {error && <p className="error-text">{error}</p>}

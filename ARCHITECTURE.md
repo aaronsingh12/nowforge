@@ -1,4 +1,4 @@
-# NowForge Architecture
+# NowHelpAssist Architecture
 
 ```
 client (React + Vite :5173)
@@ -80,14 +80,14 @@ server (Node 22 + Express :4000)
         └── staged/                        build-verified, deliberately NOT deployed
                                            (outside fluentDir, so the build never scans it)
 
-  server/data/nowforge.db    the SQLite file above — gitignored, WAL mode
+  server/data/nowhelpassist.db    the SQLite file above — gitignored, WAL mode
   server/data/settings.json  connection + llm + agent settings — gitignored
 ```
 
 ## Storage and the audit trail
 
-Everything NowForge remembers lives in one gitignored SQLite file,
-`server/data/nowforge.db`, opened through the built-in **`node:sqlite`** —
+Everything NowHelpAssist remembers lives in one gitignored SQLite file,
+`server/data/nowhelpassist.db`, opened through the built-in **`node:sqlite`** —
 chosen because it was probed rather than assumed (`DatabaseSync`, BLOB
 round-trip for float32 vectors, and FTS5 are all present), which keeps the
 storage layer dependency-free on a Windows machine with no node-gyp toolchain.
@@ -162,7 +162,7 @@ Invariants enforced in `fluent.js`, all load-bearing because installs are whole-
 
 ## Claude Code concept mapping
 
-| Claude Code | NowForge |
+| Claude Code | NowHelpAssist |
 |---|---|
 | Tool registry + JSON schemas | `agent/tools.js` (`inputSchema`, `execute`) |
 | Permission prompts before edits | Amber approval gate on `mutating` tools |
