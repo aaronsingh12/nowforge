@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, sse } from '../api.js';
+import Markdown from '../components/Markdown.jsx';
 
 const SAMPLES = [
   'Create a "Laptop Request" catalog item with 6 sensible variables including a reference to sys_user and a model select box',
@@ -310,8 +311,17 @@ export default function AgentChat() {
           )}
 
           {messages.map((m) => {
-            if (m.kind === 'user' || m.kind === 'assistant') {
-              return <div key={m.id} className={`msg ${m.kind}`}><div className="bubble">{m.text}</div></div>;
+            if (m.kind === 'user') {
+              // User bubbles stay literal on purpose: what you typed is what you
+              // see, and nobody wants their asterisks eaten.
+              return <div key={m.id} className="msg user"><div className="bubble">{m.text}</div></div>;
+            }
+            if (m.kind === 'assistant') {
+              return (
+                <div key={m.id} className="msg assistant">
+                  <div className="bubble md-bubble"><Markdown text={m.text} /></div>
+                </div>
+              );
             }
             if (m.kind === 'system') {
               return <div key={m.id} className="msg"><div className="system-note">{m.text}</div></div>;
