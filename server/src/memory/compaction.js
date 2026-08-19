@@ -1,7 +1,9 @@
 import { getDb } from './db.js';
+import { log } from '../logging.js';
 import { loadHistory, loadDigests, replaceSpanWithDigest } from './sessions.js';
 import { chatOnce } from '../agent/providers/index.js';
 import { codegenDecoding } from '../agent/decoding.js';
+import { CHARS_PER_TOKEN, estimateTextTokens } from './tokens.js';
 
 /**
  * A-3 — compaction.
@@ -24,67 +26,60 @@ import { codegenDecoding } from '../agent/decoding.js';
  */
 
 /**
- * Characters per token. Deliberately pessimistic: 3.5 rather than the usual 4,
- * because tool results are JSON, and JSON tokenises worse than prose. Guessing
- * high on token count means compacting slightly early, which is cheap. Guessing
- * low means the request fails, which is not.
+ * The budget arithmetic moved to `budget.js` in D-7, because it stopped being a
+ * constant and became a measurement: the model's context window is read from
+ * the daemon, and the fixed cost of the system prompt and tool schemas is
+ * measured per turn. What is left here is what compaction itself decides.
  */
-const CHARS_PER_TOKEN = 3.5;
+export { estimateTextTokens };
 
 /**
- * What one request may total — history, system prompt and tool schemas together.
- *
- * Measured against gpt-oss:120b-cloud, single attempt, variants interleaved so
- * a bad minute could not favour one of them:
- *
- *   ~27,900 tokens   4/8 succeeded
- *   ~20,100 tokens   8/8
- *   ~19,200 tokens   8/8
- *
- * Every failure was on the largest. 18k leaves margin under the cliff. This is
- * a property of the backend, not of the model's advertised context window —
- * a stronger provider can raise it, which is the Settings swap this project is
- * built around.
+ * A fallback for callers that have not measured — the offline suite, and any
+ * path that wants a number without probing a daemon. Live turns pass a real
+ * budget computed by `computeBudget()`.
  */
-export const REQUEST_TOKEN_BUDGET = 18_000;
+export const DEFAULT_HISTORY_BUDGET = 13_000;
 
 /**
- * The largest request measured as fully reliable (8/8 at ~20,100 tokens).
+ * The minimum a compaction must SAVE to be worth doing.
  *
- * Separate from the budget above on purpose. The budget is what compaction
- * aims at, with margin; this is where the evidence of failure actually starts.
- * Warning at the budget instead would cry wolf at 19.5k — a size measured to
- * succeed every time — and a warning that fires on healthy traffic is one
- * nobody reads when it matters.
+ * Without this, compaction fires the moment history crosses the budget by one
+ * token, folds a handful of small turns into a digest that costs nearly as
+ * much as they did, and lands just under the line — where the next tool result
+ * pushes it straight back over. That is the thrash that produced three digests
+ * in a single turn. A compaction that saves less than this is not a saving, it
+ * is an LLM call and a loss of verbatim history in exchange for nothing.
  */
-export const REQUEST_TOKEN_CEILING = 20_000;
+export const MIN_COMPACTION_GAIN = 1_500;
 
 /**
- * The history's share of that, once the fixed overhead is subtracted.
+ * What a digest costs, for projecting the gain BEFORE paying for one.
  *
- * This is the fix for a real defect rather than a tuning knob. The constant
- * below is documented as "leaves room for the system prompt, the fact ledger,
- * tools, and reasoning" — but nothing ever subtracted them, so a 24k history
- * allowance shipped a ~35k request and failed half the time.
+ * The real size is unknowable until the summariser has run, which is the call
+ * this threshold exists to avoid making. Measured across live digests the
+ * four-section format lands around 600-900 tokens; the high end is used, so the
+ * projection under-promises and the threshold errs toward not compacting.
  */
-export const HISTORY_TOKEN_BUDGET = 24_000;
-
-/** Below this, compacting harder costs more context than the request saves. */
-const MIN_HISTORY_TOKENS = 4_000;
-
-/** Token estimate for a plain string — the system prompt, or serialised tools. */
-export function estimateTextTokens(text) {
-  return Math.ceil(String(text || '').length / CHARS_PER_TOKEN);
-}
+const TYPICAL_DIGEST_TOKENS = 900;
 
 /**
- * The history budget for THIS turn, given what else is going in the envelope.
- * Both inputs are what the adapter will actually serialise.
+ * The most transcript the summariser is given in one go.
+ *
+ * When a span is bigger than this the span SHRINKS — fewer of the oldest
+ * entries are folded — rather than the transcript being truncated. Truncating
+ * would silently drop whatever fell off the end, and what falls off the end of
+ * a transcript is the most recent, most relevant identifiers. Folding less is
+ * a smaller win; folding a truncated span is a wrong one.
+ *
+ * The number is a dilution bound, not a reliability one. The upstream took
+ * 51,429 real prompt tokens without a single failure across 35 shots (see
+ * budget.js), so the summariser is in no danger of being too big to send. What
+ * it IS in danger of is being handed so much transcript that the identifiers
+ * that matter get crowded out — measured once, when a digest enumerated 100+
+ * record numbers and lost the one flow sys_id that was being asked about. In
+ * estimated tokens, 24,000 is roughly 17,000 real: a large span, still bounded.
  */
-export function historyBudgetFor({ system, tools }) {
-  const overhead = estimateTextTokens(system) + estimateTextTokens(JSON.stringify(tools ?? []));
-  return { budget: Math.max(MIN_HISTORY_TOKENS, REQUEST_TOKEN_BUDGET - overhead), overhead };
-}
+const MAX_SUMMARIZER_INPUT_TOKENS = 24_000;
 
 /** Turns always kept verbatim, however long they are. */
 export const KEEP_LAST_TURNS = 8;
@@ -187,7 +182,7 @@ function renderSpan(entries) {
 export async function compactIfNeeded(
   sessionId,
   {
-    budget = HISTORY_TOKEN_BUDGET,
+    budget = DEFAULT_HISTORY_BUDGET,
     keepLast = KEEP_LAST_TURNS,
     // Injectable so the offline suite can exercise the real splice, budget
     // arithmetic and failure paths without an LLM. The default is the live one.
@@ -213,15 +208,56 @@ export async function compactIfNeeded(
 
   const db = getDb();
   const rows = db.prepare('SELECT seq FROM messages WHERE session = ? ORDER BY seq ASC').all(sessionId);
-  const cutIndex = Math.max(0, rows.length - keepLast);
-  const span = rows.slice(0, cutIndex);
-  if (!span.length) return { compacted: false, tokens: before, budget };
+  let cutIndex = Math.max(0, rows.length - keepLast);
+  if (!cutIndex) return { compacted: false, tokens: before, budget };
 
+  /*
+   * DIGESTS ARE ANCHORED, and it costs nothing to keep them that way.
+   *
+   * `replaceSpanWithDigest` DELETES the folded messages and writes the digest
+   * to a separate `digests` table, which `loadHistory` never reads — the digest
+   * reaches the model through the system prompt instead. So everything below is
+   * by construction the span AFTER the newest digest, and a digest can never be
+   * fed back to the summariser to be compressed a second time. The property is
+   * structural rather than defended, which is the good kind; it is stated here
+   * because "re-summarising the summary" is the first thing a reader worries
+   * about, and the answer is in a different file.
+   */
+
+  // Shrink the span until the summariser's input fits, rather than truncating
+  // the transcript. See MAX_SUMMARIZER_INPUT_TOKENS.
+  let entries = history.slice(0, cutIndex);
+  let transcript = renderSpan(entries);
+  while (cutIndex > MIN_TURNS_TO_COMPACT && estimateTextTokens(transcript) > MAX_SUMMARIZER_INPUT_TOKENS) {
+    cutIndex -= 1;
+    entries = history.slice(0, cutIndex);
+    transcript = renderSpan(entries);
+  }
+
+  /*
+   * Is this worth doing at all? A compaction that saves less than it costs is
+   * the thrash loop, and the only way to not pay for it is to not make the call.
+   */
+  const spanTokens = estimateTokens(entries);
+  const projectedGain = spanTokens - TYPICAL_DIGEST_TOKENS;
+  if (projectedGain < MIN_COMPACTION_GAIN) {
+    return {
+      compacted: false,
+      tokens: before,
+      budget,
+      skipped: 'min-gain',
+      warning:
+        `Skipped compaction: folding the oldest ${entries.length} entries would save about ${Math.max(0, projectedGain)} ` +
+        `tokens, under the ${MIN_COMPACTION_GAIN}-token floor. The session is over budget (~${before} vs ${budget}) ` +
+        `because the RECENT turns are large, and compacting would cost an LLM call and the verbatim history to ` +
+        `land just under the line until the next tool result pushes it back over.`,
+    };
+  }
+
+  const span = rows.slice(0, cutIndex);
   const fromSeq = span[0].seq;
   const toSeq = span[span.length - 1].seq;
-  const entries = history.slice(0, cutIndex);
 
-  const transcript = renderSpan(entries);
   let digest;
   try {
     digest = summarize
@@ -237,6 +273,7 @@ export async function compactIfNeeded(
   } catch (err) {
     // Loud, and non-destructive: the span is NOT deleted, so nothing is lost.
     // The session stays over budget and the caller can see why.
+    log.warn('memory', `compaction failed for session ${sessionId} — history kept intact`, err.message);
     return {
       compacted: false,
       tokens: before,
@@ -247,6 +284,13 @@ export async function compactIfNeeded(
 
   const text = String(digest || '').trim();
   if (text.length < 40) {
+    // The summariser is the same model, on the same flaky upstream, and it can
+    // return nothing for exactly the reasons the main call can. The rule is the
+    // same as everywhere else in D-7: an empty completion is an error path, not
+    // a result. Keeping the raw span is the deterministic fallback — the
+    // session stays over budget, which is a degradation, where splicing an
+    // empty digest would be a silent loss of every identifier in the span.
+    log.warn('memory', `compaction summariser returned an empty digest for session ${sessionId} — raw span kept, skipping`);
     return { compacted: false, tokens: before, budget, error: 'Compaction produced an empty digest; no history was discarded.' };
   }
 
@@ -257,6 +301,7 @@ export async function compactIfNeeded(
   // every heading turns that silent loss into a refusal.
   const missing = REQUIRED_HEADINGS.filter((h) => !text.includes(h));
   if (missing.length) {
+    log.warn('memory', `compaction produced an incomplete digest for session ${sessionId} (missing ${missing.join(', ')}) — raw span kept`);
     return {
       compacted: false,
       tokens: before,
@@ -269,6 +314,7 @@ export async function compactIfNeeded(
 
   replaceSpanWithDigest(sessionId, fromSeq, toSeq, text);
   const after = estimateTokens(loadHistory(sessionId));
+  log.info('memory', `compacted ${entries.length} entries for session ${sessionId}: ${before} -> ${after} tokens (budget ${budget})`);
   return { compacted: true, fromSeq, toSeq, entries: entries.length, tokensBefore: before, tokensAfter: after, budget };
 }
 

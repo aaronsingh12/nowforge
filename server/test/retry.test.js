@@ -138,41 +138,13 @@ test('the retry budget is bounded', async () => {
 
 /* ------------------------------------------------------------------ *
  * The request budget
+ *
+ * The arithmetic moved to memory/budget.js in D-7, and so did its tests —
+ * see budget.test.js. What stays here is the token estimator, because the
+ * adapter's own diagnostics use it.
  * ------------------------------------------------------------------ */
 
-const { historyBudgetFor, estimateTextTokens, REQUEST_TOKEN_BUDGET, REQUEST_TOKEN_CEILING } =
-  await import('../src/memory/compaction.js');
-
-test('the budget subtracts the fixed overhead the request actually carries', () => {
-  const system = 'x'.repeat(19_600);          // the real system prompt's size
-  const tools = [{ name: 'a', description: 'y'.repeat(23_000), inputSchema: {} }];
-
-  const bare = historyBudgetFor({ system: '', tools: [] });
-  const loaded = historyBudgetFor({ system, tools });
-
-  assert.ok(loaded.overhead > 10_000, 'the prompt and tool schemas are ~11k tokens and must be counted');
-  assert.ok(
-    loaded.budget < bare.budget,
-    'the history allowance must shrink as the envelope fills — not subtracting this shipped a 35k request'
-  );
-  // Not exactly the budget: an empty tool array still serialises to "[]".
-  assert.ok(bare.budget >= REQUEST_TOKEN_BUDGET - 5 && bare.budget <= REQUEST_TOKEN_BUDGET);
-});
-
-test('the history allowance never collapses to nothing', () => {
-  // An enormous prompt must not drive the budget to zero and compact the
-  // conversation out of existence; it should hit a floor and let the warning
-  // in the orchestrator do the talking.
-  const { budget } = historyBudgetFor({ system: 'x'.repeat(5_000_000), tools: [] });
-  assert.ok(budget >= 4_000, `floor breached: ${budget}`);
-});
-
-test('the compaction target sits below the measured-reliable ceiling', () => {
-  // 8/8 at ~20,100 tokens, 4/8 at ~27,900. The budget aims under the evidence,
-  // and the warning fires at the evidence — not the other way round.
-  assert.ok(REQUEST_TOKEN_BUDGET < REQUEST_TOKEN_CEILING);
-  assert.ok(REQUEST_TOKEN_CEILING <= 20_000);
-});
+const { estimateTextTokens } = await import('../src/memory/tokens.js');
 
 test('the token estimate is pessimistic, because guessing low fails the request', () => {
   // 3.5 chars/token rather than the usual 4: tool results are JSON, and JSON
@@ -184,10 +156,23 @@ test('the token estimate is pessimistic, because guessing low fails the request'
  * Empty completions
  * ------------------------------------------------------------------ */
 
-/** A 200 whose choice carries no content and no tool calls. */
+/**
+ * A 200 whose choice carries no content and no tool calls.
+ *
+ * `calls` counts REAL attempts only. D-7 made a cold-start retry issue a
+ * one-token warm-up first, so raw fetch count stopped being a usable proxy for
+ * "how many times did it try" — counting them together would have made the
+ * warm-up look like an extra attempt against the retry budget, which is
+ * exactly the confusion these tests exist to prevent.
+ */
 function emptyThen(finishReason, failures) {
-  const state = { calls: 0 };
-  globalThis.fetch = async () => {
+  const state = { calls: 0, warmUps: 0 };
+  globalThis.fetch = async (_url, init) => {
+    const sent = JSON.parse(init.body);
+    if (sent.max_tokens === 1) {
+      state.warmUps += 1;
+      return { ok: true, status: 200, json: async () => OK_BODY };
+    }
     state.calls += 1;
     const body = state.calls <= failures
       ? { choices: [{ message: { content: '' }, finish_reason: finishReason }] }
@@ -205,6 +190,9 @@ test('finish_reason "load" is a cold start, and is retried', async () => {
   const res = await chat({ provider: 'ollama', model: 'gpt-oss:120b-cloud', system: 's', history: HISTORY, tools: [] });
   assert.equal(res.text, 'done');
   assert.equal(state.calls, 2);
+  // The retry landed on a model made resident on purpose, not on a guess about
+  // how long a 120b load takes.
+  assert.equal(state.warmUps, 1);
 });
 
 test('an empty "stop" is a hiccup, and is retried too', async () => {
@@ -212,6 +200,9 @@ test('an empty "stop" is a hiccup, and is retried too', async () => {
   const res = await chat({ provider: 'ollama', system: 's', history: HISTORY, tools: [] });
   assert.equal(res.text, 'done');
   assert.equal(state.calls, 3);
+  // A hiccup is not a cold start: warming up for one spends a request on the
+  // upstream for nothing.
+  assert.equal(state.warmUps, 0);
 });
 
 test('an empty "length" is NOT retried — it has a cause and a remedy', async () => {
@@ -251,18 +242,32 @@ test('a completion carrying only tool calls is not mistaken for an empty one', a
   assert.equal(res.stopReason, 'tool_calls');
 });
 
-test('a cold start waits longer than a 5xx blip', async () => {
+test('a cold start is warmed up rather than waited out', async () => {
   // Observed live: three attempts burned inside ~2.4s while a 120b model was
-  // still coming up, then reported failure. A load needs to be waited out.
-  const started = Date.now();
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '' }, finish_reason: 'load' }] }) };
-  };
+  // still coming up, then reported failure. The first fix slept 4s+8s, which
+  // was a guess about load time dressed as a constant. D-7 asks the question
+  // directly instead — a one-token request that blocks until the model is
+  // resident — so the wait IS the load rather than an estimate of it.
+  const state = emptyThen('load', 99);
   await assert.rejects(() => chat({ provider: 'ollama', system: 's', history: HISTORY, tools: [] }));
-  const elapsed = Date.now() - started;
-  assert.equal(calls, RETRY_ATTEMPTS);
-  // 4s + 8s base with jitter; comfortably past the ~2.4s a generic 5xx gets.
-  assert.ok(elapsed > 6_000, `cold start gave up after only ${elapsed}ms`);
+  assert.equal(state.calls, RETRY_ATTEMPTS);
+  // One warm-up before each retry, and none after the final attempt — warming
+  // up a model we are about to give up on helps nobody.
+  assert.equal(state.warmUps, RETRY_ATTEMPTS - 1);
+});
+
+test('a warm-up that itself fails does not sink the retry', async () => {
+  // The warm-up is an optimisation. If it throws, the real retry must still
+  // happen — otherwise a flaky spare request kills a turn that would have
+  // succeeded.
+  let real = 0;
+  globalThis.fetch = async (_url, init) => {
+    if (JSON.parse(init.body).max_tokens === 1) throw new Error('warm-up socket hang up');
+    real += 1;
+    if (real === 1) return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '' }, finish_reason: 'load' }] }) };
+    return { ok: true, status: 200, json: async () => OK_BODY };
+  };
+  const res = await chat({ provider: 'ollama', system: 's', history: HISTORY, tools: [] });
+  assert.equal(res.text, 'done');
+  assert.equal(real, 2);
 });

@@ -13,7 +13,10 @@ import {
 } from '../memory/sessions.js';
 import { search, searchSessions, embeddingsAvailable, pullCommand, embedModelName } from '../memory/recall.js';
 import { listFacts, recordFact, deleteFact, rememberFromChat, seedLedger } from '../memory/facts.js';
-import { estimateTokens, HISTORY_TOKEN_BUDGET } from '../memory/compaction.js';
+import { estimateTokens, buildDigestNote } from '../memory/compaction.js';
+import { computeBudget } from '../memory/budget.js';
+import { buildSystemPrompt } from '../agent/prompts.js';
+import { TOOLS } from '../agent/tools.js';
 import { loadHistory } from '../memory/sessions.js';
 
 export const agentRouter = Router();
@@ -30,15 +33,28 @@ agentRouter.post('/sessions', (req, res) => {
   res.json(createSession({ id: req.body?.id, title: req.body?.title }));
 });
 
-agentRouter.get('/sessions/:id', (req, res, next) => {
+agentRouter.get('/sessions/:id', async (req, res, next) => {
   const s = getSession(req.params.id);
   if (!s) return next(Object.assign(new Error('No such session.'), { status: 404 }));
   const history = loadHistory(req.params.id);
+  // The budget is measured, not constant: it depends on this session's digests,
+  // which are part of the system prompt. Reporting a constant here is what let
+  // the real allowance drift to 4% of the window without anyone seeing it.
+  const budgets = await computeBudget({
+    system: buildSystemPrompt({ digestNote: buildDigestNote(req.params.id) }),
+    tools: TOOLS,
+  });
   res.json({
     ...s,
     // The UI shows this so a session approaching compaction is visible before
     // it happens, rather than the transcript quietly changing shape one turn.
-    tokens: { estimated: estimateTokens(history), budget: HISTORY_TOKEN_BUDGET },
+    tokens: {
+      estimated: estimateTokens(history),
+      budget: budgets.budget,
+      modelContext: budgets.modelCtx,
+      fixedOverhead: budgets.fixed,
+      outputHeadroom: budgets.headroom,
+    },
     digests: loadDigests(req.params.id).length,
   });
 });
@@ -108,7 +124,7 @@ agentRouter.post('/facts/seed', (_req, res) => res.json(seedLedger()));
  * Streams Server-Sent Events over the POST response body.
  */
 agentRouter.post('/chat', async (req, res) => {
-  const { sessionId, message } = req.body || {};
+  const { sessionId, message, retry } = req.body || {};
   if (!sessionId || !message) {
     return res.status(400).json({ message: 'sessionId and message are required' });
   }
@@ -126,9 +142,13 @@ agentRouter.post('/chat', async (req, res) => {
     // "remember: ..." is handled before the turn so the fact is in the ledger
     // by the time the system prompt is built, and the agent can confirm it in
     // the same breath rather than a turn late.
-    const remembered = rememberFromChat(message);
-    if (remembered) emit({ type: 'remembered', fact: remembered });
-    await runTurn(sessionId, message, emit);
+    // A retry re-issues an existing turn; it must not re-trigger the side
+    // effects of receiving the message for the first time.
+    if (!retry) {
+      const remembered = rememberFromChat(message);
+      if (remembered) emit({ type: 'remembered', fact: remembered });
+    }
+    await runTurn(sessionId, message, emit, { retry: Boolean(retry) });
   } finally {
     clearInterval(keepAlive);
     res.end();

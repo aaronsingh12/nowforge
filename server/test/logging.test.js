@@ -51,14 +51,64 @@ const POISONED_HISTORY = [
   { role: 'user', text: 'is it done?' },
 ];
 
-test('an empty assistant turn never reaches the wire as null', async () => {
+test('a blank assistant turn is DROPPED, not sent as an empty string', async () => {
+  /*
+   * The contract tightened in D-7, and the earlier one is why.
+   *
+   * §29 coerced a null content to '' to stop the 400 that bricked a session.
+   * That worked, and it also made the degenerate message SENDABLE — so the row
+   * kept going out, turn after turn, contributing nothing but a slot. The
+   * stronger rule: a message with no content and no tool calls is not a
+   * message, and does not reach the wire at all.
+   */
   const seen = captureBody();
   await chat({ provider: 'ollama', system: 'sys', history: POISONED_HISTORY, tools: [] });
 
-  const assistant = seen.body.messages.find((m) => m.role === 'assistant');
-  assert.equal(assistant.content, '', 'a null here is the 400 that bricked the session');
-  assert.notEqual(assistant.content, null);
-  assert.ok(!('tool_calls' in assistant), 'no tool calls were made, so none should be sent');
+  const assistants = seen.body.messages.filter((m) => m.role === 'assistant');
+  assert.equal(assistants.length, 0, 'the blank assistant turn should have been dropped entirely');
+  // The turns either side must survive — repairing the request must not cost
+  // the conversation.
+  assert.deepEqual(
+    seen.body.messages.map((m) => m.role),
+    ['system', 'user', 'user'],
+    'dropping the blank turn must not take the real ones with it'
+  );
+});
+
+test('a whitespace-only assistant turn is blank too', async () => {
+  // The exact defect: a bare newline is truthy, so it passed every guard,
+  // rendered as an empty bubble, and rode along in every later request.
+  const seen = captureBody();
+  await chat({
+    provider: 'ollama',
+    system: 'sys',
+    history: [
+      { role: 'user', text: 'go' },
+      // A real newline and spaces — a template literal, so no escape can be
+      // helpfully normalised away by a tool between here and the file.
+      { role: 'assistant', text: `
+  `, toolCalls: [] },
+      { role: 'user', text: 'still there?' },
+    ],
+    tools: [],
+  });
+  assert.equal(seen.body.messages.filter((m) => m.role === 'assistant').length, 0);
+});
+
+test('an orphaned tool result never reaches the wire', async () => {
+  // The shape a half-folded compaction leaves behind: results whose tool_call
+  // was folded into a digest. The wire format rejects these outright.
+  const seen = captureBody();
+  await chat({
+    provider: 'ollama',
+    system: 'sys',
+    history: [
+      { role: 'user', text: 'go' },
+      { role: 'tool', results: [{ id: 'vanished', name: 'query_records', output: '[]' }] },
+    ],
+    tools: [],
+  });
+  assert.equal(seen.body.messages.filter((m) => m.role === 'tool').length, 0);
 });
 
 test('no message of any role is ever sent with a null or missing content', async () => {

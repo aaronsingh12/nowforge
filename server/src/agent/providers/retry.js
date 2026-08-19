@@ -38,14 +38,21 @@ const BASE_DELAY_MS = 600;
 /**
  * A cold start is not a blip, and must not be waited on like one.
  *
- * `finish_reason: load` means the backend was loading the model. For a 120b
- * cloud model that takes far longer than the 600ms/1.8s a 5xx deserves, so the
- * generic backoff burned all three attempts inside ~2.4s and reported failure
- * while the model was still coming up — observed exactly that way in a live
- * session.
+ * `finish_reason: load` means the backend was loading the model and generated
+ * nothing. For a 120b cloud model that takes far longer than the 600ms/1.8s a
+ * 5xx deserves, so the generic backoff burned all three attempts inside ~2.4s
+ * and reported failure while the model was still coming up — observed exactly
+ * that way in a live session.
+ *
+ * D-7 changed how that wait is spent. Sleeping longer was guesswork about how
+ * long a load takes; instead the caller now supplies a `beforeRetry` warm-up
+ * that issues a one-token request and BLOCKS until the model is resident. The
+ * wait is therefore the load itself rather than an estimate of it, and these
+ * delays shrink to what they should always have been — a short settle before
+ * the real call, not a stand-in for the load.
  */
-const LOAD_DELAY_MS = 4_000;
-const isColdStart = (err) => /finish reason: load/i.test(err?.message || '');
+export const COLD_START_DELAYS_MS = [1_000, 3_000, 6_000];
+export const isColdStart = (err) => /finish reason: load/i.test(err?.message || '');
 
 /** 408 timeout, 429 rate limit, and anything 5xx. Nothing else. */
 export function isRetryableStatus(status) {
@@ -61,7 +68,12 @@ export function retryable(err, status) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function withRetry(label, fn, { attempts = RETRY_ATTEMPTS } = {}) {
+/**
+ * `beforeRetry(err, attempt)` runs after a retryable failure and before the
+ * backoff sleep. It may throw nothing useful — a warm-up that fails is not a
+ * reason to abandon the real retry, so its errors are swallowed and logged.
+ */
+export async function withRetry(label, fn, { attempts = RETRY_ATTEMPTS, beforeRetry = null } = {}) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -71,9 +83,21 @@ export async function withRetry(label, fn, { attempts = RETRY_ATTEMPTS } = {}) {
     } catch (err) {
       lastError = err;
       if (!err.retryable || attempt === attempts) break;
-      // Exponential, with jitter so repeated turns do not land in lockstep.
-      const base = isColdStart(err) ? LOAD_DELAY_MS : BASE_DELAY_MS;
-      const delay = Math.round(base * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5));
+      if (beforeRetry) {
+        try {
+          await beforeRetry(err, attempt);
+        } catch (warmErr) {
+          // The warm-up is an optimisation. Losing it costs a slower retry,
+          // not a failed one, so it must never replace the error we are
+          // actually reporting.
+          log.warn('llm', `${label} warm-up before attempt ${attempt + 1} failed — retrying anyway`, warmErr.message);
+        }
+      }
+      // Cold starts get their own schedule; everything else stays exponential
+      // with jitter, so repeated turns do not land in lockstep.
+      const delay = isColdStart(err)
+        ? COLD_START_DELAYS_MS[Math.min(attempt - 1, COLD_START_DELAYS_MS.length - 1)]
+        : Math.round(BASE_DELAY_MS * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5));
       log.warn('llm', `${label} attempt ${attempt}/${attempts} failed (${err.status || 'network'}) — retrying in ${delay}ms`, err.message);
       await sleep(delay);
     }

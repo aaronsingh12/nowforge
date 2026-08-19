@@ -4,7 +4,10 @@
  * (tool calling requires a tool-capable local model, e.g. llama3.1, qwen2.5).
  */
 
-import { withRetry, retryable, isRetryableStatus } from './retry.js';
+import { log } from '../../logging.js';
+import { estimateTextTokens } from '../../memory/tokens.js';
+import { isBlankText } from '../../memory/sanitize.js';
+import { withRetry, retryable, isRetryableStatus, isColdStart } from './retry.js';
 
 const DEFAULTS = {
   openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' },
@@ -26,41 +29,130 @@ const DEFAULTS = {
  * The OpenAI spec allows a null content beside tool_calls, and Ollama honours
  * that — but it rejects a bare null outright. So one stored assistant turn
  * with no text and no tool calls made EVERY later turn in that session fail at
- * the wire, with an error naming neither the session nor the message. Coercing
- * here repairs histories that already contain one.
+ * the wire, with an error naming neither the session nor the message.
+ *
+ * D-7 added the second half. Coercing null to '' stopped the 400, but it also
+ * made a degenerate message SENDABLE: an assistant row with empty content and
+ * no tool calls goes out clean and contributes nothing but a slot the model has
+ * to account for. A whitespace-only completion (a bare newline, which this
+ * model emits when reasoning eats the budget) slipped through the
+ * orchestrator's truthiness check and landed here as exactly that. So the shape
+ * is validated, not merely coerced — and every repair is reported to the caller
+ * rather than done quietly.
  */
-function toOpenAiMessages(system, history) {
+export function toOpenAiMessages(system, history) {
   const str = (v) => (typeof v === 'string' ? v : v == null ? '' : String(v));
   const out = [{ role: 'system', content: str(system) }];
-  for (const m of history) {
-    if (m.role === 'user') {
+  const repairs = [];
+  const seenCallIds = new Set();
+
+  for (const m of history || []) {
+    if (m?.role === 'user') {
+      if (isBlankText(m.text)) { repairs.push('dropped a blank user message'); continue; }
       out.push({ role: 'user', content: str(m.text) });
-    } else if (m.role === 'assistant') {
+    } else if (m?.role === 'assistant') {
+      const hasCalls = m.toolCalls?.length > 0;
+      // The one shape that must never reach the wire: nothing said, nothing
+      // called. It is not a turn, and sending it is what a degenerate request
+      // is made of.
+      if (!hasCalls && isBlankText(m.text)) {
+        repairs.push('dropped a blank assistant turn (no content, no tool calls)');
+        continue;
+      }
       const msg = { role: 'assistant', content: str(m.text) };
-      if (m.toolCalls?.length) {
-        msg.tool_calls = m.toolCalls.map((tc) => ({
-          id: tc.id,
-          type: 'function',
-          function: { name: tc.name, arguments: JSON.stringify(tc.input ?? {}) },
-        }));
+      if (hasCalls) {
+        msg.tool_calls = m.toolCalls.map((tc) => {
+          if (tc?.id) seenCallIds.add(tc.id);
+          return {
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.name, arguments: JSON.stringify(tc.input ?? {}) },
+          };
+        });
       }
       out.push(msg);
-    } else if (m.role === 'tool') {
+    } else if (m?.role === 'tool') {
       for (const r of m.results || []) {
-        out.push({ role: 'tool', tool_call_id: r.id, content: str(r.output) });
+        // A tool result with no matching call is rejected outright by the
+        // wire format, and is the shape a half-folded compaction leaves behind.
+        if (!r?.id || !seenCallIds.has(r.id)) {
+          repairs.push('dropped an orphaned tool result with no matching tool call');
+          continue;
+        }
+        // An empty tool result is legal but useless; say so rather than
+        // sending a blank the model has to interpret.
+        out.push({
+          role: 'tool',
+          tool_call_id: r.id,
+          content: isBlankText(r.output) ? '(the tool returned no output)' : str(r.output),
+        });
       }
+    } else if (m) {
+      repairs.push(`dropped a history row with an unknown role: ${String(m.role)}`);
     }
   }
-  return out;
+  return { messages: out, repairs };
+}
+
+/**
+ * What actually went out, per message. This is the view that was missing when
+ * a turn died on an empty completion: the error named a finish reason and
+ * nothing about the request that produced it, so telling a degenerate request
+ * from an unlucky one meant reading the database by hand.
+ */
+export function describeOutbound(messages) {
+  let chars = 0;
+  const shapes = [];
+  let blanks = 0;
+  for (const m of messages) {
+    const len = (m.content || '').length;
+    const calls = m.tool_calls?.length || 0;
+    chars += len + JSON.stringify(m.tool_calls || '').length;
+    const blank = len === 0 && calls === 0;
+    if (blank) blanks += 1;
+    shapes.push(`${m.role}(${len}ch${calls ? `,calls=${calls}` : ''}${blank ? ',BLANK' : ''})`);
+  }
+  return { count: messages.length, blanks, chars, estTokens: Math.ceil(chars / 3.5), shapes };
+}
+
+/**
+ * Force the model resident before retrying a cold start.
+ *
+ * A `load` finish reason means the backend spent the request loading the model
+ * and produced nothing. Sleeping through that was guesswork about how long a
+ * 120b cloud model takes to come up. This is the same question asked directly:
+ * a one-token request that BLOCKS until the model is loaded, so the retry lands
+ * on a warm model rather than on a longer guess.
+ */
+async function warmUp({ url, headers, model }) {
+  const started = Date.now();
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'ok' }] }),
+  });
+  await res.json().catch(() => null);
+  log.warn('llm', `warm-up request finished in ${Date.now() - started}ms (status ${res.status}) — model should now be resident`);
 }
 
 export async function chat({ provider, apiKey, baseUrl, model, system, history, tools, maxTokens = 4096, decoding }) {
   const d = DEFAULTS[provider] || DEFAULTS.openai;
   const url = `${(baseUrl || d.baseUrl).replace(/\/$/, '')}/chat/completions`;
+  const resolvedModel = model || d.model;
+  const { messages, repairs } = toOpenAiMessages(system, history);
+
+  // Loud, not silent. A repair means something upstream wrote a message that
+  // cannot legally be sent, and the only way that gets fixed is by being seen.
+  if (repairs.length) {
+    log.warn('llm', `outbound request repaired: ${repairs.length} unsendable message(s) removed`, {
+      repairs: [...new Set(repairs)],
+    });
+  }
+
   const body = {
-    model: model || d.model,
+    model: resolvedModel,
     max_tokens: maxTokens,
-    messages: toOpenAiMessages(system, history),
+    messages,
   };
   // A1 passthrough. Both knobs exist on this wire format, so both are sent.
   // Whether the backend HONOURS them is a separate question with a measured
@@ -78,63 +170,98 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
   const payload = JSON.stringify(body);
-  const data = await withRetry(`${provider} chat`, async () => {
-    let res;
-    try {
-      res = await fetch(url, { method: 'POST', headers, body: payload });
-    } catch (err) {
-      // Nothing came back at all — the daemon is down, or the network blinked.
-      throw retryable(new Error(`${provider} unreachable at ${url}: ${err.message}`));
-    }
-    const parsed = await res.json().catch(() => null);
-    if (!res.ok) {
-      const err = new Error(parsed?.error?.message || `${provider} API error (${res.status})`);
-      err.status = res.status;
-      // A 4xx is our malformed request; retrying it three times only makes a
-      // clear bug slower to find.
-      if (isRetryableStatus(res.status)) err.retryable = true;
-      throw err;
-    }
-    // Parsed INSIDE the retry, so an empty completion gets another attempt.
-    // It used to sit after `withRetry` returned, which meant the one failure
-    // mode most worth retrying was the one that never could be.
-    const choice = parsed?.choices?.[0];
-    const msg = choice?.message || {};
-    const toolCalls = (msg.tool_calls || []).map((tc) => {
-      let input = {};
-      try { input = JSON.parse(tc.function?.arguments || '{}'); } catch { /* keep {} */ }
-      return { id: tc.id, name: tc.function?.name, input };
-    });
-    const text = msg.content || '';
-    if (text || toolCalls.length) {
-      return { text, toolCalls, stopReason: choice?.finish_reason };
-    }
+  const data = await withRetry(
+    `${provider} chat`,
+    async () => {
+      let res;
+      try {
+        res = await fetch(url, { method: 'POST', headers, body: payload });
+      } catch (err) {
+        // Nothing came back at all — the daemon is down, or the network blinked.
+        throw retryable(new Error(`${provider} unreachable at ${url}: ${err.message}`));
+      }
+      const parsed = await res.json().catch(() => null);
+      if (!res.ok) {
+        const err = new Error(parsed?.error?.message || `${provider} API error (${res.status})`);
+        err.status = res.status;
+        // A 4xx is our malformed request; retrying it three times only makes a
+        // clear bug slower to find.
+        if (isRetryableStatus(res.status)) err.retryable = true;
+        throw err;
+      }
+      // Parsed INSIDE the retry, so an empty completion gets another attempt.
+      // It used to sit after `withRetry` returned, which meant the one failure
+      // mode most worth retrying was the one that never could be.
+      const choice = parsed?.choices?.[0];
+      const msg = choice?.message || {};
+      const toolCalls = (msg.tool_calls || []).map((tc) => {
+        let input = {};
+        try { input = JSON.parse(tc.function?.arguments || '{}'); } catch { /* keep {} */ }
+        return { id: tc.id, name: tc.function?.name, input };
+      });
+      // Whitespace is not content. This was truthiness-checked upstream, so a
+      // bare newline became a real assistant turn, an empty bubble, and a
+      // permanent passenger in every later request.
+      const text = isBlankText(msg.content) ? '' : msg.content;
+      if (text || toolCalls.length) {
+        return { text, toolCalls, stopReason: choice?.finish_reason };
+      }
 
-    // Nothing came back. Which kind of nothing decides whether to try again.
-    const finish = choice?.finish_reason;
+      // Nothing came back. Everything known about the request that produced it
+      // gets logged HERE, where it is still in scope.
+      const outbound = describeOutbound(messages);
+      log.warn('llm', `${provider} returned an empty completion — dumping the request that produced it`, {
+        finishReason: choice?.finish_reason,
+        outboundMessages: outbound.count,
+        blankMessages: outbound.blanks,
+        estRequestTokens: outbound.estTokens + estimateTextTokens(JSON.stringify(body.tools || [])),
+        shapes: outbound.shapes,
+        options: {
+          model: resolvedModel,
+          max_tokens: maxTokens,
+          temperature: body.temperature,
+          seed: body.seed,
+          tools: body.tools?.length || 0,
+        },
+        // The provider's own answer, verbatim. Ollama's /v1 shim is
+        // OpenAI-shaped, so it reports `finish_reason` and `usage` — the
+        // native /api/chat fields (done_reason, eval_count, load_duration)
+        // are NOT available on this endpoint and are not claimed here.
+        rawResponse: parsed,
+      });
 
-    // `length` is deterministic: reasoning models (gpt-oss, o-series,
-    // deepseek-r1) spend the budget on hidden reasoning before emitting any
-    // content, and the API still answers 200 with an empty string. Retrying
-    // burns three attempts to arrive at the same place, so this one is final
-    // and carries the remedy.
-    if (finish === 'length') {
-      const reasoned = typeof msg.reasoning === 'string' && msg.reasoning.length > 0;
-      throw new Error(
-        `${provider} returned no content: the max_tokens budget (${maxTokens}) was exhausted before any output was produced` +
-        (reasoned ? ' — the model spent it on reasoning tokens.' : '.') +
-        ' Raise max_tokens, or pick a non-reasoning model in Settings.'
-      );
+      const finish = choice?.finish_reason;
+
+      // `length` is deterministic: reasoning models (gpt-oss, o-series,
+      // deepseek-r1) spend the budget on hidden reasoning before emitting any
+      // content, and the API still answers 200 with an empty string. Retrying
+      // burns three attempts to arrive at the same place, so this one is final
+      // and carries the remedy.
+      if (finish === 'length') {
+        const reasoned = typeof msg.reasoning === 'string' && msg.reasoning.length > 0;
+        throw new Error(
+          `${provider} returned no content: the max_tokens budget (${maxTokens}) was exhausted before any output was produced` +
+          (reasoned ? ' — the model spent it on reasoning tokens.' : '.') +
+          ' Raise max_tokens, or pick a non-reasoning model in Settings.'
+        );
+      }
+
+      // Everything else is transient. `load` is Ollama's own: the request loaded
+      // the model and generated nothing — a cold start, reported to the user as
+      // a hard failure that blamed their model choice. An empty `stop` is the
+      // model simply hiccupping. Both are worth another attempt.
+      throw retryable(new Error(
+        `${provider} returned an empty completion (finish reason: ${finish || 'none'})`
+      ));
+    },
+    {
+      // Only a cold start gets a warm-up; a 5xx blip does not need one and an
+      // extra request during an outage is the last thing the upstream wants.
+      beforeRetry: async (err) => {
+        if (isColdStart(err)) await warmUp({ url, headers, model: resolvedModel });
+      },
     }
-
-    // Everything else is transient. `load` is Ollama's own: the request loaded
-    // the model and generated nothing — a cold start, reported to the user as
-    // a hard failure that blamed their model choice. An empty `stop` is the
-    // model simply hiccupping. Both are worth another attempt.
-    throw retryable(new Error(
-      `${provider} returned an empty completion (finish reason: ${finish || 'none'})`
-    ));
-  });
+  );
 
   return data;
 }

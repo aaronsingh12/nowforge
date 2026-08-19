@@ -35,7 +35,7 @@ const {
   deriveTitle, replaceSpanWithDigest, loadDigests,
 } = await import('../src/memory/sessions.js');
 
-const { estimateTokens, compactIfNeeded, buildDigestNote, HISTORY_TOKEN_BUDGET } =
+const { estimateTokens, compactIfNeeded, buildDigestNote, DEFAULT_HISTORY_BUDGET } =
   await import('../src/memory/compaction.js');
 
 const { recordFact, listFacts, factBlock, seedLedger, rememberFromChat, recordVerificationFailure, recordCalculatedFields } =
@@ -186,7 +186,7 @@ test('A-3: the acceptance case — a 100-turn session compacts under budget and 
   }
 
   const before = estimateTokens(loadHistory(id));
-  assert.ok(before > HISTORY_TOKEN_BUDGET, `fixture must exceed the budget, got ${before}`);
+  assert.ok(before > DEFAULT_HISTORY_BUDGET, `fixture must exceed the budget, got ${before}`);
 
   // Stand-in summariser that does what the real prompt demands: preserve every
   // identifier verbatim. That is the property the acceptance test is about.
@@ -207,7 +207,7 @@ test('A-3: the acceptance case — a 100-turn session compacts under budget and 
   const res = await compactIfNeeded(id, { summarize });
   assert.equal(res.compacted, true);
   assert.ok(res.tokensAfter < res.tokensBefore, 'compaction must actually shrink the history');
-  assert.ok(res.tokensAfter <= HISTORY_TOKEN_BUDGET, `still over budget after compaction: ${res.tokensAfter}`);
+  assert.ok(res.tokensAfter <= DEFAULT_HISTORY_BUDGET, `still over budget after compaction: ${res.tokensAfter}`);
 
   // The last K turns are still verbatim.
   const kept = loadHistory(id);

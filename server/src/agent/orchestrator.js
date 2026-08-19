@@ -11,9 +11,9 @@ import {
   loadHistory,
   recordToolEvent,
 } from '../memory/sessions.js';
-import {
-  compactIfNeeded, buildDigestNote, historyBudgetFor, estimateTokens, REQUEST_TOKEN_CEILING,
-} from '../memory/compaction.js';
+import { compactIfNeeded, buildDigestNote, estimateTokens } from '../memory/compaction.js';
+import { computeBudget } from '../memory/budget.js';
+import { sanitizeHistory, isBlankText } from '../memory/sanitize.js';
 import { recordVerificationFailure } from '../memory/facts.js';
 import { indexMessage } from '../memory/recall.js';
 
@@ -59,6 +59,13 @@ export function resolveApproval(sessionId, approvalId, approved) {
 }
 
 const MAX_ITERATIONS = 15;
+
+/**
+ * The completion budget per call. Named because the history budget subtracts
+ * headroom for it — the two numbers have to agree, and a literal in two places
+ * is how they stop agreeing.
+ */
+const MAX_OUTPUT_TOKENS = 4096;
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 const RESULT_CHAR_LIMIT = 8000;
 
@@ -138,49 +145,96 @@ export function detectStalledTurn({ assistantText, userText, mutatingCallCount =
  *   { type: 'approval_required', approvalId, name, input }
  *   { type: 'approval_resolved', approvalId, approved }
  *   { type: 'tool_result', id, name, output, isError }
- *   { type: 'compacted', ... } | { type: 'done' } | { type: 'error', message }
+ *   { type: 'compacted', ... } | { type: 'done' } | { type: 'error', message, retryable }
+ *
+ * `retry` re-issues a turn whose previous attempt died before writing anything
+ * — an empty completion, or the upstream falling over. The user's message is
+ * already the last row in history, so appending it again would duplicate it and
+ * quietly change the conversation the model sees. Everything else is identical:
+ * same history, same tools, same gate.
  */
-export async function runTurn(sessionId, userText, emit) {
+export async function runTurn(sessionId, userText, emit, { retry = false } = {}) {
   const state = liveState(sessionId);
   const { agent } = getSettings();
 
   if (!loadSessionRow(sessionId)) createSession({ id: sessionId });
 
   let stallNudged = false;
+  let compactedThisTurn = false;
   let mutatingCallCount = 0;
-  const userSeq = appendMessage(sessionId, { role: 'user', text: userText });
-  indexMessage(sessionId, userSeq, 'user', userText);
+  if (!retry) {
+    const userSeq = appendMessage(sessionId, { role: 'user', text: userText });
+    indexMessage(sessionId, userSeq, 'user', userText);
+  }
   const info = providerInfo();
   emit({ type: 'meta', ...info });
   const turnStart = Date.now();
-  log.info('agent', `turn start  session=${shortId(sessionId)} ${info.provider}/${info.model}`,
+  log.info('agent', `turn ${retry ? 'RETRY' : 'start'}  session=${shortId(sessionId)} ${info.provider}/${info.model}`,
     { message: userText.slice(0, 200) });
 
   try {
     for (let i = 0; i < MAX_ITERATIONS; i++) {
-      // A-3: fold the oldest span into a digest before it costs a turn. Runs
-      // every iteration because a single turn's tool results can be what
-      // pushes a session over budget, not just the next user message.
-      //
-      // The budget is computed from what this turn will ACTUALLY send: the
-      // system prompt and the 37 tool schemas are ~11k tokens of fixed
-      // overhead, and not subtracting them is what let a "24k" allowance ship
-      // a 35k request that failed half the time (§28).
+      /*
+       * D-7 — AT MOST ONE COMPACTION PER USER TURN.
+       *
+       * This used to run on every iteration of the loop, with the reasoning
+       * that a single turn's tool results can be what pushes a session over
+       * budget. True, and it produced the defect: one long spec compacted
+       * THREE times inside one turn (9,629 -> 4,308, 7,209 -> 3,774,
+       * 6,298 -> 2,476), because each fold landed just under a budget that a
+       * single further tool result immediately pushed back over. Three LLM
+       * calls, three spans of verbatim history destroyed, to end up where it
+       * started.
+       *
+       * Compacting once is not a compromise. If one fold cannot get the turn
+       * under budget, a second will not either — the recent turns are the
+       * weight, and those are the ones compaction is not allowed to touch. The
+       * honest outcome is to proceed and let the size warning say so.
+       */
       const provisionalSystem = buildSystemPrompt({ sessionId, digestNote: buildDigestNote(sessionId) });
-      const { budget, overhead } = historyBudgetFor({ system: provisionalSystem, tools: TOOLS });
-      const compaction = await compactIfNeeded(sessionId, { budget });
-      if (compaction.compacted) emit({ type: 'compacted', ...compaction });
+      const budgets = await computeBudget({ system: provisionalSystem, tools: TOOLS, maxTokens: MAX_OUTPUT_TOKENS });
+      if (i === 0) {
+        // The three numbers, at meta time, every turn. Previously the budget
+        // was a constant nobody could see was wrong.
+        log.info('llm',
+          `budget: model context ${budgets.modelCtx} (${budgets.modelCtxSource}), capped at ${budgets.ceiling}, ` +
+          `fixed overhead ${budgets.fixed} (system + ${TOOLS.length} tool schemas), output headroom ${budgets.headroom} ` +
+          `=> history budget ${budgets.budget}`);
+        emit({ type: 'budget', ...budgets });
+      }
 
-      const history = loadHistory(sessionId);
+      if (!compactedThisTurn) {
+        const compaction = await compactIfNeeded(sessionId, { budget: budgets.budget });
+        if (compaction.compacted) {
+          compactedThisTurn = true;
+          emit({ type: 'compacted', ...compaction });
+        } else if (compaction.warning || compaction.error) {
+          // Not compacting is a decision with consequences for this turn, so
+          // it is reported rather than inferred from the absence of a digest.
+          log.warn('memory', compaction.warning || compaction.error);
+        }
+      }
+
+      /*
+       * The history that will actually be sent, with anything unsendable
+       * removed. This is also the migration: a session written before D-7 can
+       * hold blank assistant rows in SQLite, and they are repaired on read
+       * here rather than in a one-shot script that only helps whoever runs it.
+       */
+      const raw = loadHistory(sessionId);
+      const { history, dropped, reasons } = sanitizeHistory(raw);
+      if (dropped) {
+        log.warn('memory', `sanitized ${dropped} unsendable message(s) out of session ${shortId(sessionId)} before sending`,
+          { reasons: [...new Set(reasons)] });
+      }
+
       // Rebuilt after compaction, so a digest written just now is in the prompt.
       const system = buildSystemPrompt({ sessionId, digestNote: buildDigestNote(sessionId) });
-      const requestTokens = overhead + estimateTokens(history);
-      log.debug('llm', `request ~${requestTokens} tokens (overhead ${overhead}, history budget ${budget})`);
-      if (requestTokens > REQUEST_TOKEN_CEILING) {
-        // Compaction could not get under the line — the recent turns alone are
-        // too big. Say so before the call rather than after it fails.
-        log.warn('llm', `request ~${requestTokens} tokens is past the measured-reliable ${REQUEST_TOKEN_CEILING}; ` +
-          'this backend gets unreliable above it (50% at ~28k)');
+      const requestTokens = budgets.fixed + estimateTokens(history);
+      log.debug('llm', `request ~${requestTokens} tokens (fixed ${budgets.fixed}, history budget ${budgets.budget})`);
+      if (requestTokens > budgets.ceiling) {
+        log.warn('llm', `request ~${requestTokens} tokens is over the ${budgets.ceiling}-token self-imposed cap ` +
+          `(model window is ${budgets.modelCtx}); sending anyway — compaction could not fold enough to help.`);
       }
       const callStart = Date.now();
       let res;
@@ -189,7 +243,7 @@ export async function runTurn(sessionId, userText, emit) {
           system,
           history,
           tools: TOOLS,
-          maxTokens: 4096,
+          maxTokens: MAX_OUTPUT_TOKENS,
         });
       } catch (err) {
         // The message shape is the usual cause of a provider 400, and it is
@@ -206,38 +260,55 @@ export async function runTurn(sessionId, userText, emit) {
       log.debug('llm', `iteration ${i + 1}  ${ms(callStart)}  stop=${res.stopReason || '—'}  ` +
         `text=${res.text ? res.text.length + 'ch' : 'none'}  calls=${res.toolCalls?.length || 0}`);
 
-      // An assistant turn with no text AND no tool calls is not a turn — it is
-      // the model having returned nothing. Storing it poisoned the session:
-      // replayed, it became `content: null` with no tool_calls, which this
-      // backend rejects outright, so every later turn failed at the wire with
-      // an error naming neither the session nor the message. Report it here,
-      // where the cause is still visible, and leave the history usable.
-      if (!res.text && !res.toolCalls?.length) {
-        // The adapter already retried this (an empty completion is transient
-        // unless it is a `length` stop, which reports itself). Reaching here
-        // means it kept happening, so say that rather than suggesting one more
-        // go at something already attempted three times.
-        throw new Error(
-          `The model returned an empty turn — no text and no tool call (finish reason: ${res.stopReason || 'unknown'}), ` +
-          'and repeating the request did not help. Nothing was written to the instance. ' +
-          'The model may be cold-starting or overloaded; wait a moment and try again.'
+      /*
+       * D-7 — AN EMPTY COMPLETION IS AN ERROR PATH, NEVER A MESSAGE.
+       *
+       * §29 already rejected `!res.text && !res.toolCalls?.length`. That guard
+       * is truthiness, and "
+" is truthy — so a whitespace-only completion,
+       * which this model emits when reasoning eats the budget, walked straight
+       * past it. It became a real assistant row, rendered as a blank bubble,
+       * and rode along in every subsequent request for the rest of the session.
+       * That is the shape behind the blank rows in the incident screenshot.
+       *
+       * The adapter now normalises whitespace to '' and this checks emptiness
+       * rather than falsiness, so the two agree on what "nothing" means. And
+       * the outcome is unchanged in kind but stricter in fact: nothing is
+       * appended, nothing is rendered, and the turn fails loudly.
+       */
+      if (isBlankText(res.text) && !res.toolCalls?.length) {
+        // The adapter already retried this three times, warming the model up
+        // between attempts when the finish reason said it was still loading.
+        // Reaching here means it kept happening, so the message says so rather
+        // than suggesting one more go at something already attempted.
+        const err = new Error(
+          `The model returned nothing — no text and no tool call (finish reason: ${res.stopReason || 'unknown'}), ` +
+          'three times in a row. Nothing was written to the instance. This is usually a transient load on ' +
+          "Ollama's side rather than a problem with your request."
         );
+        // Tells the UI to offer Retry: the history is intact and unmodified, so
+        // re-issuing this turn against it is a safe, meaningful thing to do.
+        err.retryable = true;
+        throw err;
       }
 
+      // Whitespace never becomes stored text. Past this point res.text is
+      // either real content or '', and '' is only legal beside a tool call.
+      const assistantText = isBlankText(res.text) ? '' : res.text;
       const assistantSeq = appendMessage(sessionId, {
         role: 'assistant',
-        text: res.text || '',
+        text: assistantText,
         toolCalls: res.toolCalls,
       });
-      if (res.text) {
-        indexMessage(sessionId, assistantSeq, 'assistant', res.text);
-        emit({ type: 'assistant_text', text: res.text });
+      if (assistantText) {
+        indexMessage(sessionId, assistantSeq, 'assistant', assistantText);
+        emit({ type: 'assistant_text', text: assistantText });
       }
 
       if (!res.toolCalls?.length) {
         // A6. One nudge per turn, carrying the one fact the model is missing.
         const stalled = !stallNudged && detectStalledTurn({
-          assistantText: res.text, userText, mutatingCallCount,
+          assistantText, userText, mutatingCallCount,
         });
         if (stalled) {
           stallNudged = true;
@@ -333,6 +404,10 @@ export async function runTurn(sessionId, userText, emit) {
     emit({ type: 'done' });
   } catch (err) {
     log.error('agent', `turn failed  session=${shortId(sessionId)}  ${ms(turnStart)} — ${err.message}`, err);
-    emit({ type: 'error', message: err.message });
+    // `retryable` means the history is intact and re-issuing the turn against
+    // it is safe. The UI turns that into a Retry button; without the flag it
+    // shows the error alone, because retrying a malformed request or a
+    // rejected mutation just fails again more slowly.
+    emit({ type: 'error', message: err.message, retryable: Boolean(err.retryable) });
   }
 }
