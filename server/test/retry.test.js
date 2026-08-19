@@ -179,3 +179,74 @@ test('the token estimate is pessimistic, because guessing low fails the request'
   // tokenises worse than prose.
   assert.ok(estimateTextTokens('a'.repeat(3500)) >= 1000);
 });
+
+/* ------------------------------------------------------------------ *
+ * Empty completions
+ * ------------------------------------------------------------------ */
+
+/** A 200 whose choice carries no content and no tool calls. */
+function emptyThen(finishReason, failures) {
+  const state = { calls: 0 };
+  globalThis.fetch = async () => {
+    state.calls += 1;
+    const body = state.calls <= failures
+      ? { choices: [{ message: { content: '' }, finish_reason: finishReason }] }
+      : OK_BODY;
+    return { ok: true, status: 200, json: async () => body };
+  };
+  return state;
+}
+
+test('finish_reason "load" is a cold start, and is retried', async () => {
+  // Ollama's own value, not OpenAI's: the request loaded the model and
+  // generated nothing. It was surfacing to the user as a hard failure that
+  // blamed their choice of model in Settings.
+  const state = emptyThen('load', 1);
+  const res = await chat({ provider: 'ollama', model: 'gpt-oss:120b-cloud', system: 's', history: HISTORY, tools: [] });
+  assert.equal(res.text, 'done');
+  assert.equal(state.calls, 2);
+});
+
+test('an empty "stop" is a hiccup, and is retried too', async () => {
+  const state = emptyThen('stop', 2);
+  const res = await chat({ provider: 'ollama', system: 's', history: HISTORY, tools: [] });
+  assert.equal(res.text, 'done');
+  assert.equal(state.calls, 3);
+});
+
+test('an empty "length" is NOT retried — it has a cause and a remedy', async () => {
+  // The budget was spent on hidden reasoning tokens. Three attempts arrive at
+  // exactly the same place, slower.
+  const state = emptyThen('length', 99);
+  await assert.rejects(
+    () => chat({ provider: 'ollama', system: 's', history: HISTORY, tools: [], maxTokens: 4096 }),
+    /max_tokens budget \(4096\) was exhausted.*Raise max_tokens/s
+  );
+  assert.equal(state.calls, 1);
+});
+
+test('an empty completion that never resolves fails with its finish reason named', async () => {
+  emptyThen('load', 99);
+  await assert.rejects(
+    () => chat({ provider: 'ollama', system: 's', history: HISTORY, tools: [] }),
+    /empty completion \(finish reason: load\).*after 3 attempts/s
+  );
+});
+
+test('a completion carrying only tool calls is not mistaken for an empty one', async () => {
+  // The commonest shape this model produces: no prose, one tool call.
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      choices: [{
+        message: { content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'query_records', arguments: '{"table":"incident"}' } }] },
+        finish_reason: 'tool_calls',
+      }],
+    }),
+  });
+  const res = await chat({ provider: 'ollama', system: 's', history: HISTORY, tools: [] });
+  assert.equal(res.text, '');
+  assert.equal(res.toolCalls.length, 1);
+  assert.equal(res.toolCalls[0].name, 'query_records');
+  assert.equal(res.stopReason, 'tool_calls');
+});

@@ -3048,3 +3048,65 @@ project is built around.
 | 46 | **A context budget that counts only the history is not a budget** | it is set to 24k, it is enforced, and requests still go out at 35k and fail | Count what the adapter actually serialises — system prompt and tool schemas included. Ours even said in a comment that it left room for them, and it never did |
 | 47 | **Retrying a 4xx makes a bug slower, not rarer** | an intermittent-looking failure that is actually a deterministic malformed request, now taking 3× as long to surface | Retry transport failures only: 5xx, 429, 408, dropped connections. A 4xx is your own request and must fail on the first attempt |
 | 48 | **Compacting to dodge a flaky upstream costs real capability** | the agent forgets things, and the flakiness is still there | Establish whether the failure is size-dependent or time-dependent FIRST, by interleaving variants. Only one of those is fixed by sending less |
+
+---
+
+## 29. `finish reason: load` — a cold start reported as a broken model
+
+Reported straight from the UI:
+
+> The model returned an empty turn — no text and no tool call (finish reason:
+> **load**). … the model in Settings may not be answering reliably.
+
+`load` is not an OpenAI finish reason. There are four of those — `stop`,
+`length`, `tool_calls`, `content_filter` — and this is none of them. It is
+Ollama's own: the request **loaded the model and generated nothing**. A cold
+start.
+
+So the message was wrong twice over. It told the user their model choice was
+unreliable, when what had happened was a warm-up; and it made a transient
+condition terminal.
+
+### The structural bug behind it
+
+The empty-response check sat **after** `withRetry` returned:
+
+```js
+const data = await withRetry(…, async () => { …fetch, parse, throw on !ok… });
+const text = data.choices?.[0]?.message?.content || '';
+if (!text && …) throw new Error(…);   // ← outside the retry
+```
+
+The retry added in §28 covered transport failures — 5xx, 429, dropped
+connections — and every one of those is *less* likely to resolve on a second
+attempt than a cold start is. The single failure mode most obviously worth
+retrying was the one that structurally could not be.
+
+Parsing moved inside the retry callback. Now:
+
+| empty completion | behaviour | why |
+|---|---|---|
+| `finish_reason: load` | retried | the model was loading; nothing was generated |
+| `finish_reason: stop`, no content | retried | the model hiccupped — non-deterministic, so another attempt is a real chance |
+| `finish_reason: length`, no content | **not** retried | deterministic: the budget went on hidden reasoning tokens. Three attempts arrive at the same place, slower. Reported with its remedy instead |
+| any content, or any tool call | returned | the commonest shape this model produces is no prose and one tool call, and that is a full answer, not an empty one |
+
+The orchestrator's guard stays as the last resort, but it no longer suggests
+sending the message again — by the time it fires, the request has already been
+made three times. It names the likely cause instead.
+
+### Verified
+
+Five turns in a fresh session against the live PDI: 5/5, no retries needed on
+that run. The unit tests drive each finish reason directly, since `load` cannot
+be provoked on demand.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 49 | **A provider's finish reasons are not the spec's** | an error naming `load`, a value that appears in no OpenAI documentation, handled by a default branch that assumes the worst | OpenAI defines `stop`, `length`, `tool_calls`, `content_filter`. Ollama adds `load` for "the model was loaded and nothing generated". Treat an unrecognised finish reason as unknown-and-transient, not as broken |
+| 50 | **A retry that wraps the transport but not the parse** | 5xx gets three attempts while the empty response — the most transient failure there is — gets one | Decide what "success" means INSIDE the retried function. If the check for a usable answer sits after the retry helper returns, it is not retryable no matter how transient it is |
+| 51 | **An error message that guesses at a cause teaches the wrong lesson** | "the model in Settings may not be answering reliably" printed for a cold start, sending someone to change a model that was fine | Say what happened and what was tried. A message that speculates about a cause is worse than one that just reports the finish reason |

@@ -213,10 +213,14 @@ export async function runTurn(sessionId, userText, emit) {
       // an error naming neither the session nor the message. Report it here,
       // where the cause is still visible, and leave the history usable.
       if (!res.text && !res.toolCalls?.length) {
+        // The adapter already retried this (an empty completion is transient
+        // unless it is a `length` stop, which reports itself). Reaching here
+        // means it kept happening, so say that rather than suggesting one more
+        // go at something already attempted three times.
         throw new Error(
-          `The model returned an empty turn — no text and no tool call (finish reason: ${res.stopReason || 'unknown'}). ` +
-          'Nothing was written to the instance. Send the message again; if it keeps happening, ' +
-          'the model in Settings may not be answering reliably.'
+          `The model returned an empty turn — no text and no tool call (finish reason: ${res.stopReason || 'unknown'}), ` +
+          'and repeating the request did not help. Nothing was written to the instance. ' +
+          'The model may be cold-starting or overloaded; wait a moment and try again.'
         );
       }
 

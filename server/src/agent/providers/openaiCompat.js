@@ -95,30 +95,48 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
       if (isRetryableStatus(res.status)) err.retryable = true;
       throw err;
     }
-    return parsed;
+    // Parsed INSIDE the retry, so an empty completion gets another attempt.
+    // It used to sit after `withRetry` returned, which meant the one failure
+    // mode most worth retrying was the one that never could be.
+    const choice = parsed?.choices?.[0];
+    const msg = choice?.message || {};
+    const toolCalls = (msg.tool_calls || []).map((tc) => {
+      let input = {};
+      try { input = JSON.parse(tc.function?.arguments || '{}'); } catch { /* keep {} */ }
+      return { id: tc.id, name: tc.function?.name, input };
+    });
+    const text = msg.content || '';
+    if (text || toolCalls.length) {
+      return { text, toolCalls, stopReason: choice?.finish_reason };
+    }
+
+    // Nothing came back. Which kind of nothing decides whether to try again.
+    const finish = choice?.finish_reason;
+
+    // `length` is deterministic: reasoning models (gpt-oss, o-series,
+    // deepseek-r1) spend the budget on hidden reasoning before emitting any
+    // content, and the API still answers 200 with an empty string. Retrying
+    // burns three attempts to arrive at the same place, so this one is final
+    // and carries the remedy.
+    if (finish === 'length') {
+      const reasoned = typeof msg.reasoning === 'string' && msg.reasoning.length > 0;
+      throw new Error(
+        `${provider} returned no content: the max_tokens budget (${maxTokens}) was exhausted before any output was produced` +
+        (reasoned ? ' — the model spent it on reasoning tokens.' : '.') +
+        ' Raise max_tokens, or pick a non-reasoning model in Settings.'
+      );
+    }
+
+    // Everything else is transient. `load` is Ollama's own: the request loaded
+    // the model and generated nothing — a cold start, reported to the user as
+    // a hard failure that blamed their model choice. An empty `stop` is the
+    // model simply hiccupping. Both are worth another attempt.
+    throw retryable(new Error(
+      `${provider} returned an empty completion (finish reason: ${finish || 'none'})`
+    ));
   });
 
-  const choice = data.choices?.[0];
-  const msg = choice?.message || {};
-  const toolCalls = (msg.tool_calls || []).map((tc) => {
-    let input = {};
-    try { input = JSON.parse(tc.function?.arguments || '{}'); } catch { /* keep {} */ }
-    return { id: tc.id, name: tc.function?.name, input };
-  });
-  const text = msg.content || '';
-  // Reasoning models (gpt-oss, o-series, deepseek-r1...) spend the max_tokens
-  // budget on hidden reasoning tokens before emitting any content. When the
-  // budget runs out first the API still answers 200 with an empty string, which
-  // would otherwise surface as "the model returned nothing" much further down.
-  if (!text && !toolCalls.length && choice?.finish_reason === 'length') {
-    const reasoned = typeof msg.reasoning === 'string' && msg.reasoning.length > 0;
-    throw new Error(
-      `${provider} returned no content: the max_tokens budget (${maxTokens}) was exhausted before any output was produced` +
-      (reasoned ? ' — the model spent it on reasoning tokens.' : '.') +
-      ' Raise max_tokens, or pick a non-reasoning model in Settings.'
-    );
-  }
-  return { text, toolCalls, stopReason: choice?.finish_reason };
+  return data;
 }
 
 export const openAiDefaults = DEFAULTS;
