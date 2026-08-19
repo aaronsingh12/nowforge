@@ -142,6 +142,42 @@ declare global {
                         table: 'sys_hub_trigger_instance_v2'
                         id: 'c0c731a08daa44bb91c887e4c99bfb30'
                     }
+                    dip_demo_incident_processor_flow: {
+                        table: 'sys_hub_flow'
+                        id: 'bd7e60d5ecf44d00a6e436bd58be64b7'
+                    }
+                    dip_else_no_manager: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '1627c72b3f41496ab3a92252c6c83343'
+                    }
+                    dip_extra_test_log: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '4e3e6ec142244f7ea5028df7002c64be'
+                    }
+                    dip_if_manager_exists: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'ceeb642c988b4effb5a9befd5b33c989'
+                    }
+                    dip_log_no_manager: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'ffd83adbee2d4a52bb1efae710738453'
+                    }
+                    dip_lookup_hardware_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '284bebb405064585b8f694db90d769e1'
+                    }
+                    dip_send_email_manager: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '377bce10ad0c4a42ba7967cdf576ca9e'
+                    }
+                    dip_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '951ac69b399646fab4e3e9e9dbf89ea5'
+                    }
+                    dip_update_incident: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'e08a85cdd950497d9306966127cef63e'
+                    }
                     dpd_any_found: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '0cb679e794b2426190e6e12134d295c5'
