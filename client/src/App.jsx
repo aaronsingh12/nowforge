@@ -13,6 +13,7 @@ import Settings from './pages/Settings.jsx';
 import Toasts from './components/Toasts.jsx';
 import ConfirmDialog from './components/ConfirmDialog.jsx';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
+import { RequiresInstance } from './components/states.jsx';
 
 const TITLES = {
   '/': 'Dashboard',
@@ -91,14 +92,25 @@ function Shell() {
           {/* Keyed on the path so navigating away clears a caught error — a
               boundary that latches means one bad page bricks the session. */}
           <ErrorBoundary key={pathname} where={title}>
+            {/* The instance gate is a ROUTE wrapper, not something a page
+                wraps around its own JSX. Gating the returned markup gates what
+                a page draws, not what it does: the component is mounted by
+                then and its load effect has already fired. Measured — the
+                disconnected sweep logged fourteen 400s that way. Here, React
+                never mounts the page at all.
+
+                Dashboard, Agent and Settings are deliberately NOT gated: you
+                connect an instance on one, configure a model on another, and
+                the agent is still worth reading offline. Those show the
+                banner instead. */}
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/agent" element={<AgentChat />} />
-              <Route path="/incidents" element={<Incidents />} />
-              <Route path="/catalog" element={<Catalog />} />
-              <Route path="/flows" element={<Flows />} />
-              <Route path="/sla" element={<Sla />} />
-              <Route path="/access" element={<Access />} />
+              <Route path="/incidents" element={<RequiresInstance what="Incident Management"><Incidents /></RequiresInstance>} />
+              <Route path="/catalog" element={<RequiresInstance what="Catalog Management"><Catalog /></RequiresInstance>} />
+              <Route path="/flows" element={<RequiresInstance what="Flow Designer"><Flows /></RequiresInstance>} />
+              <Route path="/sla" element={<RequiresInstance what="SLA definitions"><Sla /></RequiresInstance>} />
+              <Route path="/access" element={<RequiresInstance what="Access control"><Access /></RequiresInstance>} />
               <Route path="/audit" element={<Audit />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>

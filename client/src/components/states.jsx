@@ -89,6 +89,17 @@ export function EmptyState({ title, hint, to, onAction, actionLabel, icon = '·'
 export function RequiresInstance({ children, what = 'This page' }) {
   const s = describeInstanceState(useHealth(), what);
   if (s.kind === 'children') return children;
+  if (s.kind === 'waiting') {
+    // Deliberately holds the children back rather than rendering them
+    // optimistically: mounting them mounts their fetches, and a page that
+    // asks an unbound instance for data logs a 400 nobody can act on.
+    return (
+      <div className="card">
+        <SkeletonLines lines={4} />
+        <LoadingRegion label="Checking the instance connection" />
+      </div>
+    );
+  }
   return <EmptyState icon={s.icon} title={s.title} hint={s.hint} to={s.to} actionLabel={s.actionLabel} />;
 }
 
@@ -99,7 +110,8 @@ export function RequiresInstance({ children, what = 'This page' }) {
 export function DisconnectedBanner() {
   const h = useHealth();
   const s = describeInstanceState(h);
-  if (s.kind === 'children') return null;
+  // A banner has nothing useful to say while the answer is still unknown.
+  if (s.kind === 'children' || s.kind === 'waiting') return null;
   return (
     <div className="note warn" style={{ marginBottom: 12 }}>
       {s.kind === 'server'

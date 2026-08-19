@@ -2,16 +2,23 @@ import { Router } from 'express';
 import { getSettings, saveSettings, publicSettings, clearConnection } from '../config/store.js';
 import { testConnection, resetAuthCache } from '../servicenow/client.js';
 import { getSchema, referenceLookup, tableLookup, clearSchemaCaches, getTableHierarchy } from '../servicenow/schema.js';
-import { capability } from '../servicenow/fluent.js';
+import { capability, cachedCapability } from '../servicenow/fluent.js';
 
 export const systemRouter = Router();
 
-systemRouter.get('/health', async (_req, res) => {
+/**
+ * The one source of truth for "is an instance bound" (D-3), which means every
+ * page polls it — so it must be fast, and it is: it reads settings and the
+ * CACHED capability probe, never the probe itself. Shelling out to `now-sdk`
+ * here made this endpoint take 5.5s on a cold cache while eight pages waited
+ * on it to decide whether to render. `/api/flows/live/capability` is still the
+ * place to ask the SDK a real question.
+ */
+systemRouter.get('/health', (_req, res) => {
   const s = getSettings();
-  let liveAuthoring = { ok: false, error: null };
-  try {
-    const cap = await capability();
-    liveAuthoring = {
+  const cap = cachedCapability();
+  const liveAuthoring = cap
+    ? {
       ok: cap.ok,
       cliVersion: cap.cli.version,
       authAlias: cap.auth.alias,
@@ -20,10 +27,10 @@ systemRouter.get('/health', async (_req, res) => {
       managedSources: cap.workspace.sources.length,
       lastInstall: cap.lastInstall,
       fixes: cap.fixes,
-    };
-  } catch (err) {
-    liveAuthoring = { ok: false, error: err.message };
-  }
+    }
+    // Not "ok: false" — that would print fix commands for a probe that simply
+    // has not run yet.
+    : { pending: true };
   res.json({
     ok: true,
     connected: Boolean(s.connection.instanceUrl && s.connection.username),

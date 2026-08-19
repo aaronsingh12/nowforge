@@ -5,7 +5,7 @@ import VariableEditor from '../components/VariableEditor.jsx';
 import PolicyBuilder from '../components/PolicyBuilder.jsx';
 import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
-import { SkeletonRows, LoadingRegion, EmptyState, RequiresInstance } from '../components/states.jsx';
+import { SkeletonRows, LoadingRegion, EmptyState } from '../components/states.jsx';
 
 const CHOICE_TYPES = [3, 5, 18, 22];
 const REF_TYPES = [8, 21];
@@ -678,7 +678,6 @@ export default function Catalog() {
   const typeLabel = (code) => meta.variableTypes.find((t) => String(t.code) === String(code))?.label || code;
 
   return (
-    <RequiresInstance what="Catalog Management">
     <div className="stack">
       <div className="tabs">
         <button className={`tab ${tab === 'items' ? 'active' : ''}`} onClick={() => setTab('items')}>Items & variables</button>
@@ -703,6 +702,5 @@ export default function Catalog() {
       {tab === 'guides' && <GuidesTab />}
       {tab === 'producers' && <ProducersTab onOpenItem={openItem} />}
     </div>
-    </RequiresInstance>
   );
 }

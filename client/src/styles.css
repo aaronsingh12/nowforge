@@ -311,8 +311,23 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; margin: 0; }
   margin-top: 4px; font-size: 11.5px; color: var(--muted);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.rail-actions { display: none; gap: 8px; margin-top: 6px; }
-.rail-item:hover .rail-actions, .rail-item.active .rail-actions { display: flex; }
+/* Rename and delete are revealed on hover, which meant they were unreachable
+   by keyboard on every row but the active one — and D-2's dialog could not
+   restore focus to a button that had gone display:none while it was open.
+   `display: none` removes an element from the tab order entirely, so adding
+   :focus-within to the old rule was measured and found INERT: nothing can
+   focus into a subtree that is not there. Clipping keeps the buttons
+   focusable while looking exactly as they did. */
+.rail-actions {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+.rail-item:hover .rail-actions,
+.rail-item.active .rail-actions,
+.rail-item:focus-within .rail-actions {
+  position: static; width: auto; height: auto; clip: auto; white-space: normal;
+  display: flex; gap: 8px; margin-top: 6px;
+}
 .rail-btn {
   background: none; border: none; padding: 0; cursor: pointer;
   color: var(--muted); font-size: 11px; font-family: var(--font-body);

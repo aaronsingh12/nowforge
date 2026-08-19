@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, sse, val, disp } from '../api.js';
 import { confirmDestructive, confirmAction, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
-import { SkeletonRows, SkeletonLines, LoadingRegion, EmptyState, RequiresInstance } from '../components/states.jsx';
+import { SkeletonRows, SkeletonLines, LoadingRegion, EmptyState } from '../components/states.jsx';
 
 /** Green when live authoring is ready; otherwise the exact commands to fix it. */
 function CapabilityBanner({ cap }) {
@@ -614,7 +614,6 @@ export default function Flows() {
   };
 
   return (
-    <RequiresInstance what="Flow Designer">
     <div className="stack">
       <div className="note">
         Flows are authored through ServiceNow's own SDK (Fluent): NowForge generates TypeScript, compiles it
@@ -796,6 +795,5 @@ export default function Flows() {
         </div>
       </div>
     </div>
-    </RequiresInstance>
   );
 }

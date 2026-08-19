@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api.js';
 import { TableField } from '../components/ReferenceField.jsx';
-import { SkeletonLines, EmptyState, RequiresInstance } from '../components/states.jsx';
+import { SkeletonLines, EmptyState } from '../components/states.jsx';
 
 /**
  * Access — read and explain ACLs. There is deliberately no authoring here.
@@ -53,7 +53,6 @@ export default function Access() {
   };
 
   return (
-    <RequiresInstance what="Access control">
     <div className="stack">
       <div className="card">
         <div className="card-title">Access control · read only</div>
@@ -149,7 +148,6 @@ export default function Access() {
         </>
       )}
     </div>
-    </RequiresInstance>
   );
 }
 

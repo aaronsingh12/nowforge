@@ -504,6 +504,33 @@ function parseAuthList(stdout) {
 
 let capCache = { at: 0, value: null };
 const CAP_TTL_MS = 30_000;
+let capRefreshing = null;
+
+/**
+ * The cached probe, or null — never a wait.
+ *
+ * `capability()` shells out to `now-sdk` twice and costs ~5s on a cache miss.
+ * That is fine on the Flows page, which asks for it deliberately; it is not
+ * fine on /api/system/health, which every page polls to answer the far simpler
+ * question "is an instance bound". Measured: one expired cache entry turned a
+ * 2ms health check into 5.5s, which left the topbar reading "checking…" and
+ * the instance gate unable to decide before the pages underneath it had
+ * already fired their requests.
+ *
+ * So health reads this instead: whatever is cached, plus a refresh kicked off
+ * in the background for the next caller. A pending probe is reported as
+ * pending rather than as `ok: false` — "not measured yet" and "the SDK is
+ * broken" are different answers and only one of them prints fix commands.
+ */
+export function cachedCapability() {
+  if (capCache.value && Date.now() - capCache.at < CAP_TTL_MS) return capCache.value;
+  if (!capRefreshing) {
+    capRefreshing = capability()
+      .catch(() => null)
+      .finally(() => { capRefreshing = null; });
+  }
+  return null;
+}
 
 /**
  * Capability probe.

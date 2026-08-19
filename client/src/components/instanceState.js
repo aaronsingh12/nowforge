@@ -17,14 +17,22 @@
 /**
  * @param {object} h  the shape `useHealth()` returns
  * @param {string} [what]  the page's own name, used in the copy
- * @returns {{kind: 'children'|'unbound'|'server', title?: string, hint?: string,
- *            to?: string, actionLabel?: string, icon?: string}}
+ * @returns {{kind: 'children'|'waiting'|'unbound'|'server', title?: string,
+ *            hint?: string, to?: string, actionLabel?: string, icon?: string}}
  */
 export function describeInstanceState(h, what = 'This page') {
-  // Unknown is NOT treated as disconnected. Being briefly wrong in the
-  // direction of showing the page beats being briefly wrong in the direction
-  // of an error, and health is polled, so "unknown" happens on every mount.
-  if (h.loading) return { kind: 'children' };
+  // Unknown is its own answer, and it took a measurement to get this right.
+  //
+  // The first version rendered the children while health was still loading, on
+  // the reasoning that a flash of "disconnected" is worse than a flash of the
+  // page. That was true and beside the point: mounting the children mounts
+  // their load effects, so the disconnected sweep produced 18 console errors —
+  // every page firing a request that 400'd before the gate replaced it.
+  //
+  // So unknown now renders a loading state, and the reason that is affordable
+  // is the other half of the same fix: /api/system/health stopped waiting on
+  // the SDK capability probe, so it answers in about 2ms instead of 5.5s.
+  if (h.loading) return { kind: 'waiting' };
 
   if (h.serverDown) {
     return {

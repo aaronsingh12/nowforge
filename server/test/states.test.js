@@ -50,12 +50,24 @@ const UNBOUND = { ok: true, connected: false, instanceUrl: null };
  * The decision
  * ------------------------------------------------------------------ */
 
-test('while health is unknown the page renders, rather than flashing disconnected', () => {
-  // Health is polled, so "unknown" happens on every single mount. Being
-  // briefly wrong in the direction of showing the page beats being briefly
-  // wrong in the direction of an error.
+/**
+ * This assertion was inverted by a measurement, and the earlier version is
+ * worth recording. It said "while health is unknown, render the page" — on the
+ * reasoning that a flash of "disconnected" is worse than a flash of content.
+ * True, and beside the point: mounting the children mounts their load effects,
+ * so the disconnected browser sweep produced 18 console errors, every page
+ * firing a request that 400'd before the gate replaced it.
+ *
+ * Holding the children back is only affordable because of the other half of
+ * that fix: /api/system/health stopped waiting on the SDK capability probe
+ * (~5.5s on a cold cache, for a field no client reads) and now answers in
+ * about 2ms.
+ */
+test('while health is unknown the page waits, and does not mount its fetches', () => {
   const s = describeInstanceState({ loading: true, connected: false }, 'Incident Management');
-  assert.equal(s.kind, 'children');
+  assert.equal(s.kind, 'waiting');
+  assert.notEqual(s.kind, 'children', 'rendering children here fires requests against an unknown binding');
+  assert.notEqual(s.kind, 'unbound', 'and it must not flash "disconnected" on the way to connected either');
 });
 
 test('an unbound instance is stated as itself, with the fix one click away', () => {

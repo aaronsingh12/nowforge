@@ -3,7 +3,7 @@ import { api, val, disp } from '../api.js';
 import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
 import ReferenceField from '../components/ReferenceField.jsx';
-import { SkeletonRows, LoadingRegion, EmptyState, RequiresInstance } from '../components/states.jsx';
+import { SkeletonRows, LoadingRegion, EmptyState } from '../components/states.jsx';
 
 const EMPTY = {
   short_description: '', description: '', category: '', state: '1',
@@ -120,7 +120,6 @@ export default function Incidents() {
   const badgeFor = (p) => (p === '1' ? 'red' : p === '2' ? 'amber' : '');
 
   return (
-    <RequiresInstance what="Incident Management">
     <div className="stack">
       {stats && (
         <div className="row">
@@ -263,6 +262,5 @@ export default function Incidents() {
         </div>
       </div>
     </div>
-    </RequiresInstance>
   );
 }

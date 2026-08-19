@@ -3,7 +3,7 @@ import { api, sse } from '../api.js';
 import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
 import { TableField } from '../components/ReferenceField.jsx';
-import { SkeletonRows, LoadingRegion, EmptyState, RequiresInstance } from '../components/states.jsx';
+import { SkeletonRows, LoadingRegion, EmptyState } from '../components/states.jsx';
 
 /**
  * SLA definitions.
@@ -139,7 +139,6 @@ export default function Sla() {
   };
 
   return (
-    <RequiresInstance what="SLA definitions">
     <div className="stack">
       <div className="split">
         <div className="card">
@@ -335,7 +334,6 @@ export default function Sla() {
         </div>
       )}
     </div>
-    </RequiresInstance>
   );
 }
 
