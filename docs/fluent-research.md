@@ -3110,3 +3110,79 @@ be provoked on demand.
 | 49 | **A provider's finish reasons are not the spec's** | an error naming `load`, a value that appears in no OpenAI documentation, handled by a default branch that assumes the worst | OpenAI defines `stop`, `length`, `tool_calls`, `content_filter`. Ollama adds `load` for "the model was loaded and nothing generated". Treat an unrecognised finish reason as unknown-and-transient, not as broken |
 | 50 | **A retry that wraps the transport but not the parse** | 5xx gets three attempts while the empty response — the most transient failure there is — gets one | Decide what "success" means INSIDE the retried function. If the check for a usable answer sits after the retry helper returns, it is not retryable no matter how transient it is |
 | 51 | **An error message that guesses at a cause teaches the wrong lesson** | "the model in Settings may not be answering reliably" printed for a cold start, sending someone to change a model that was fine | Say what happened and what was tried. A message that speculates about a cause is worse than one that just reports the finish reason |
+
+---
+
+## 30. "Add if/then to it" — three defects behind one failed build
+
+A deployed flow, *Add Demo Comment on Incident Creation*, and a follow-up ask:
+add branching and an end condition. The build failed three attempts with
+identical diagnostics, the user's flow was then deleted, and the session ended
+on a cold start. Three separate defects, one visible symptom.
+
+### 1. The agent could create a flow but never edit one
+
+`createLiveFlow(spec, emit, { updates })` has supported in-place edit since
+invariant **d** — the Flows page uses it, and it is what keeps a flow's sys_id
+stable across a changed spec. The agent's `create_flow_live` tool called
+`createLiveFlow(spec)` and did not expose `updates` at all.
+
+So "add if/then to it" had exactly one path available: build a *new* flow. The
+model duly named it *Add Demo Comment* — a different string, so not even
+matched to the original — and it collided with the deployed one on its element
+keys. The tool now takes `updates`, and its description says plainly that
+editing keeps the sys_id while creating a second flow collides with the first.
+
+### 2. Colliding `Now.ID` keys were asked of the model, not imposed
+
+The diagnostic was good. It named the key, both definition sites, and the fix:
+
+```
+Duplicate $id across the project: Now.ID['adc_flow'] is defined 2 times —
+candidate-1b6e66c38010a6f0.now.ts:6 and
+add-demo-comment-on-incident-creation.now.ts:6 … Mint a fresh key unique to
+this flow (prefix every key with a short slug of this flow's name, e.g.
+'adc_adc_flow').
+```
+
+The model ignored it three times, producing the same two collisions each time
+and burning the whole attempt budget. That is A2's lesson arriving a second
+time: **identity the platform matches on is too important to ask for.** A2
+imposes the flow *name* by string rewrite rather than requesting it;
+`namespaceCollidingIds` now does the same for keys, prefixing only the keys
+another source already owns and leaving the model's own choices alone.
+
+What still reaches the validator is what a rewrite cannot honestly fix — the
+same key twice inside one candidate (a modelling mistake, where renaming both
+would silently merge two elements), literal sys_ids, and unresolved
+placeholders.
+
+A5 was not at fault here: it refuses a byte-identical *prompt*, and each
+attempt's prompt differed by its cosmetically-different prior source. The model
+was making the same mistake in three different ways.
+
+### 3. A cold start was waited on like a network blip
+
+The session ended on `ollama returned an empty completion (finish reason: load)
+(after 3 attempts)`. §29 made `load` retryable, which was right, but it
+inherited the generic 600ms/1.8s backoff — so all three attempts fell inside
+~2.4s while a 120-billion-parameter model was still loading. A cold start now
+starts at 4s.
+
+### Verified
+
+Offline, against a fixture built from the transcript's own sources: the three
+colliding keys are rewritten, the two unique ones are untouched, every
+occurrence moves (a half-rewritten key would build and wire an action to the
+wrong element), and editing a flow in place does not namespace it away from its
+own deployed identity.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 52 | **A capability the UI has and the agent does not** | the agent solves an "edit this" request by creating a second artifact, and collides with the first | `updates` existed on the function and on the HTTP route for two tracks before the tool exposed it. When a pipeline grows an option, check every caller — a tool schema is a caller |
+| 53 | **A good diagnostic is not a fix** | the error names the key, both files and the remedy, and the model repeats the mistake until the budget is gone | If a rule can be enforced mechanically, enforce it. Asking is for things that need judgement; a namespace collision needs a rename |
+| 54 | **Retryable is not the same as "retry soon"** | a cold start correctly marked transient, then abandoned inside 2.4s while the model was still loading | Back-off has to match what is being waited for. Loading a 120b model and recovering from a 502 are not the same wait |

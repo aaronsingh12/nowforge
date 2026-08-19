@@ -274,6 +274,50 @@ function suggestPrefix(source) {
 }
 
 /**
+ * A2's rule, applied to keys: IMPOSE the namespace, do not ask for it.
+ *
+ * `Now.ID` keys are a project-wide namespace (trap #1), so a candidate reusing
+ * `adc_flow` when another source already owns it collides instead of creating.
+ * The diagnostic for that was clear, named both definition sites, and even
+ * suggested the fix — and a real run ignored it three times in a row, with
+ * byte-identical results, burning the whole attempt budget.
+ *
+ * That is the same shape as A2: identity the platform matches on is too
+ * important to leave to a model that is right most of the time. Colliding keys
+ * are now renamed mechanically, prefixed with this flow's own slug, before
+ * validation runs. What is left for the guard to reject is what a rewrite
+ * cannot fix — duplicates WITHIN one candidate, literal sys_ids, placeholders.
+ *
+ * Only colliding keys move. A key unique to this candidate keeps the name the
+ * model chose, because it is readable and it is not wrong.
+ */
+export function namespaceCollidingIds(candidateSource, others = [], { file = 'candidate.now.ts' } = {}) {
+  const taken = new Set();
+  for (const other of others) {
+    if (!other || other.file === file) continue;
+    for (const { key } of collectElementIds(other.source)) taken.add(key);
+  }
+  if (!taken.size) return { source: candidateSource, renames: [] };
+
+  const prefix = suggestPrefix(candidateSource);
+  const renames = [];
+  let source = candidateSource;
+
+  for (const key of new Set(collectElementIds(candidateSource).map((k) => k.key))) {
+    if (!taken.has(key)) continue;
+    // Already prefixed and still colliding: fall back to the file's own slug,
+    // which is unique per artifact by construction.
+    let next = key.startsWith(prefix) ? `${slugify(file).replace(/-/g, '_')}_${key}` : `${prefix}${key}`;
+    let n = 2;
+    while (taken.has(next)) next = `${prefix}${key}_${n++}`;
+    source = source.split(`Now.ID['${key}']`).join(`Now.ID['${next}']`);
+    taken.add(next);
+    renames.push({ from: key, to: next });
+  }
+  return { source, renames };
+}
+
+/**
  * Guard 1 — static pre-build validation of one candidate against the project.
  *
  * Rejects, before `now-sdk build` is ever spawned:
@@ -1118,10 +1162,18 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
       emit({ type: 'trigger_strategy_rejected', attempt, errors: trigCheck.errors, strategy: trigCheck.strategy });
     }
 
-    // Guard 1: reject duplicate identity BEFORE the SDK runs. The SDK's own
-    // abort names a sys_id the model never wrote; this names the key and both
-    // definition sites, which is a diagnostic it can actually act on.
+    // Guard 1: identity, BEFORE the SDK runs. The SDK's own abort names a
+    // sys_id the model never wrote.
+    //
+    // Collisions with another source are rewritten rather than reported: the
+    // model ignored that diagnostic three times in a row on a real run. What
+    // reaches the validator below is only what a rewrite cannot fix.
     const others = await readProjectSources({ except: path.basename(targetFile) });
+    const spaced = namespaceCollidingIds(source, others, { file: path.basename(targetFile) });
+    if (spaced.renames.length) {
+      source = spaced.source;
+      emit({ type: 'ids_namespaced', attempt, renames: spaced.renames });
+    }
     const idCheck = validateCandidateIds(source, others, { file: path.basename(targetFile) });
     if (!idCheck.ok) {
       staticErrors.push(idCheck.diagnostic);

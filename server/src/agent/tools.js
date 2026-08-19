@@ -260,20 +260,26 @@ export const TOOLS = [
   {
     name: 'create_flow_live',
     description:
-      'BUILD STEP. Create a REAL, active Flow Designer flow on the instance from a plain-language description or a blueprint from design_flow_blueprint. Generates Fluent TypeScript, compiles it offline (nothing reaches the instance unless it compiles), installs it, and reads the result back. Returns the flow name, sys_id, type and link. Requires user approval. Note: installing deploys the whole managed application, so the response lists every artifact shipped.',
+      'BUILD STEP. Create or UPDATE a REAL, active Flow Designer flow on the instance from a plain-language description or a blueprint from design_flow_blueprint. Generates Fluent TypeScript, compiles it offline (nothing reaches the instance unless it compiles), installs it, and reads the result back. Returns the flow name, sys_id, type and link. Requires user approval. Note: installing deploys the whole managed application, so the response lists every artifact shipped. ' +
+      'TO CHANGE AN EXISTING FLOW — adding a step, a condition, a branch — pass its EXACT current name as `updates`, and describe the flow as it should be when finished. Editing in place keeps the same sys_id. Creating a second flow instead collides with the first on its element keys and fails. Use list_live_flows to get the exact name.',
     mutating: true,
     inputSchema: {
       type: 'object',
       properties: {
-        description: { type: 'string', description: 'Plain-language automation request' },
+        description: { type: 'string', description: 'Plain-language automation request, describing the finished flow' },
         blueprint: { type: 'object', description: 'A blueprint object previously returned by design_flow_blueprint' },
+        updates: {
+          type: 'string',
+          description:
+            'Exact name of an existing managed flow or subflow to edit IN PLACE, keeping its sys_id. Omit when creating something new.',
+        },
       },
       required: [],
     },
-    execute: async ({ description, blueprint }) => {
+    execute: async ({ description, blueprint, updates }) => {
       const spec = description || (blueprint ? JSON.stringify(blueprint, null, 1) : null);
       if (!spec) throw new Error('Provide either description or blueprint.');
-      return createLiveFlow(spec);
+      return createLiveFlow(spec, () => {}, { updates: updates || null });
     },
   },
   {

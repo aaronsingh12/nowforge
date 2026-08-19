@@ -35,6 +35,18 @@ import { log } from '../../logging.js';
 export const RETRY_ATTEMPTS = 3;
 const BASE_DELAY_MS = 600;
 
+/**
+ * A cold start is not a blip, and must not be waited on like one.
+ *
+ * `finish_reason: load` means the backend was loading the model. For a 120b
+ * cloud model that takes far longer than the 600ms/1.8s a 5xx deserves, so the
+ * generic backoff burned all three attempts inside ~2.4s and reported failure
+ * while the model was still coming up — observed exactly that way in a live
+ * session.
+ */
+const LOAD_DELAY_MS = 4_000;
+const isColdStart = (err) => /finish reason: load/i.test(err?.message || '');
+
 /** 408 timeout, 429 rate limit, and anything 5xx. Nothing else. */
 export function isRetryableStatus(status) {
   return status === 408 || status === 429 || (status >= 500 && status < 600);
@@ -60,7 +72,8 @@ export async function withRetry(label, fn, { attempts = RETRY_ATTEMPTS } = {}) {
       lastError = err;
       if (!err.retryable || attempt === attempts) break;
       // Exponential, with jitter so repeated turns do not land in lockstep.
-      const delay = Math.round(BASE_DELAY_MS * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5));
+      const base = isColdStart(err) ? LOAD_DELAY_MS : BASE_DELAY_MS;
+      const delay = Math.round(base * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5));
       log.warn('llm', `${label} attempt ${attempt}/${attempts} failed (${err.status || 'network'}) — retrying in ${delay}ms`, err.message);
       await sleep(delay);
     }

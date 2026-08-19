@@ -5,6 +5,21 @@ declare global {
         namespace Internal {
             interface Keys extends KeysRegistry {
                 explicit: {
+                    adc_flow: {
+                        table: 'sys_hub_flow'
+                        id: '23a885769f954eab968d49f58d00d3ca'
+                        deleted: true
+                    }
+                    adc_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '2f31c572c42b4ec4941a840e16ac1dea'
+                        deleted: true
+                    }
+                    adc_update_comment: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '770247afecde4f509d843b7651694440'
+                        deleted: true
+                    }
                     add_non_critical_work_note: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'e5fe8f73bf97433b928b10187334ccf3'

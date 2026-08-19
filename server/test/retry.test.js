@@ -250,3 +250,19 @@ test('a completion carrying only tool calls is not mistaken for an empty one', a
   assert.equal(res.toolCalls[0].name, 'query_records');
   assert.equal(res.stopReason, 'tool_calls');
 });
+
+test('a cold start waits longer than a 5xx blip', async () => {
+  // Observed live: three attempts burned inside ~2.4s while a 120b model was
+  // still coming up, then reported failure. A load needs to be waited out.
+  const started = Date.now();
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '' }, finish_reason: 'load' }] }) };
+  };
+  await assert.rejects(() => chat({ provider: 'ollama', system: 's', history: HISTORY, tools: [] }));
+  const elapsed = Date.now() - started;
+  assert.equal(calls, RETRY_ATTEMPTS);
+  // 4s + 8s base with jitter; comfortably past the ~2.4s a generic 5xx gets.
+  assert.ok(elapsed > 6_000, `cold start gave up after only ${elapsed}ms`);
+});
