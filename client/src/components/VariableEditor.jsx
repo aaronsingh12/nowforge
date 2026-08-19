@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, val, disp } from '../api.js';
 import { confirmDestructive, CONSEQUENCE } from './confirm.js';
 import { toast } from './toast.js';
+import { SkeletonLines, LoadingRegion, EmptyState } from './states.jsx';
 
 /**
  * Variable list with inline editing, reordering and choice management.
@@ -54,7 +55,7 @@ function ChoiceEditor({ variableId, onChanged }) {
     } catch (e) { setError(e.message); toast.error(e.message); }
   };
 
-  if (!choices) return <div className="empty">Loading choices…</div>;
+  if (!choices) return <><SkeletonLines lines={2} /><LoadingRegion label="Loading choices" /></>;
 
   return (
     <div className="choice-editor">
@@ -66,11 +67,16 @@ function ChoiceEditor({ variableId, onChanged }) {
           <button className="btn ghost sm" onClick={() => remove(c)} aria-label="Delete choice">✕</button>
         </div>
       ))}
-      {choices.length === 0 && <div className="empty">No choices yet.</div>}
+      {choices.length === 0 && (
+        <EmptyState
+          title="No choices yet."
+          hint="Until this list has entries the variable renders empty on the form — and a UI policy comparing against a value it does not have can never match."
+        />
+      )}
       <div className="choice-row">
         <input className="input" placeholder="Display text" value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} />
         <input className="input mono" placeholder="value (derived if blank)" value={draft.value} onChange={(e) => setDraft({ ...draft, value: e.target.value })} />
-        <button className="btn sm" onClick={add} disabled={busy || !draft.text}>Add</button>
+        <button className="btn sm" onClick={add} aria-busy={busy} disabled={busy || !draft.text}>Add</button>
       </div>
       {error && <p className="error-text">{error}</p>}
     </div>
@@ -109,7 +115,7 @@ function EditForm({ v, onSave, onCancel, busy }) {
         <label className="check">
           <input type="checkbox" checked={form.mandatory} onChange={(e) => setForm({ ...form, mandatory: e.target.checked })} /> Mandatory
         </label>
-        <button className="btn primary sm" onClick={() => onSave(form)} disabled={busy}>Save</button>
+        <button className="btn primary sm" onClick={() => onSave(form)} aria-busy={busy} disabled={busy}>Save</button>
         <button className="btn ghost sm" onClick={onCancel}>Cancel</button>
       </div>
     </div>
@@ -123,7 +129,14 @@ export default function VariableEditor({ catItemId, variables, typeLabel, onChan
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  if (!variables?.length) return <div className="empty">No variables yet.</div>;
+  if (!variables?.length) {
+    return (
+      <EmptyState
+        title="This item has no variables."
+        hint="Add one below. Variables are what the requester fills in, and what UI policies address — by sys_id, not by name."
+      />
+    );
+  }
 
   const ids = variables.map((v) => val(v, 'sys_id'));
 

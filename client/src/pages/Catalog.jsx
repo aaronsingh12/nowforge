@@ -5,6 +5,7 @@ import VariableEditor from '../components/VariableEditor.jsx';
 import PolicyBuilder from '../components/PolicyBuilder.jsx';
 import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
+import { SkeletonRows, LoadingRegion, EmptyState, RequiresInstance } from '../components/states.jsx';
 
 const CHOICE_TYPES = [3, 5, 18, 22];
 const REF_TYPES = [8, 21];
@@ -70,14 +71,16 @@ function VariableForm({ types, onSubmit, busy }) {
         <label className="check">
           <input type="checkbox" checked={v.mandatory} onChange={(e) => setV({ ...v, mandatory: e.target.checked })} /> Mandatory
         </label>
-        <button className="btn primary sm" onClick={submit} disabled={busy || !v.name}>Add variable</button>
+        <button className="btn primary sm" onClick={submit} aria-busy={busy} disabled={busy || !v.name}>Add variable</button>
       </div>
     </div>
   );
 }
 
 function VariableTable({ variables, typeLabel, onDelete }) {
-  if (!variables?.length) return <div className="empty">No variables yet.</div>;
+  if (!variables?.length) {
+    return <EmptyState title="No variables on this item yet." hint="Add one below — every variable type this instance actually supports is offered, read from its dictionary." />;
+  }
   return (
     <table className="table">
       <thead><tr><th>Ord</th><th>Name</th><th>Question</th><th>Type</th><th>Ref</th><th /></tr></thead>
@@ -109,9 +112,16 @@ function ItemsTab({ meta, categories, catalogs, typeLabel, openItemId, onOpened,
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [itemTab, setItemTab] = useState('variables');
+  const [loading, setLoading] = useState(true);
   const [newCategory, setNewCategory] = useState(null);
 
-  const load = () => api.get(`/catalog/items?search=${encodeURIComponent(search)}`).then(setItems).catch((e) => setError(e.message));
+  const load = () => {
+    setLoading(true);
+    return api.get(`/catalog/items?search=${encodeURIComponent(search)}`)
+      .then(setItems)
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  };
   useEffect(() => { load(); api.get('/catalog/variable-sets').then(setSets).catch(() => {}); /* eslint-disable-next-line */ }, []);
 
   // The producers tab hands an item over rather than duplicating the editor —
@@ -246,10 +256,10 @@ function ItemsTab({ meta, categories, catalogs, typeLabel, openItemId, onOpened,
                     {catalogs.map((c) => <option key={c.sys_id} value={c.sys_id}>{c.title}</option>)}
                   </select>
                 </div>
-                <button className="btn sm" onClick={createCategory} disabled={busy || !newCategory.title}>Create category</button>
+                <button className="btn sm" onClick={createCategory} aria-busy={busy} disabled={busy || !newCategory.title}>Create category</button>
               </div>
             )}
-            <button className="btn primary sm" onClick={createItem} disabled={busy || !draft.name}>Create item</button>
+            <button className="btn primary sm" onClick={createItem} aria-busy={busy} disabled={busy || !draft.name}>Create item</button>
           </div>
         )}
         <div className="row" style={{ marginBottom: 10 }}>
@@ -258,7 +268,8 @@ function ItemsTab({ meta, categories, catalogs, typeLabel, openItemId, onOpened,
         </div>
         <table className="table">
           <thead><tr><th>Name</th><th>Class</th><th>Active</th></tr></thead>
-          <tbody>
+          {loading && <SkeletonRows rows={6} cols={3} />}
+          {!loading && <tbody>
             {items.map((r) => (
               <tr key={val(r, 'sys_id')} className={`click ${selected && val(selected.item, 'sys_id') === val(r, 'sys_id') ? 'selected' : ''}`}
                 onClick={() => openItem(val(r, 'sys_id'))}>
@@ -267,21 +278,32 @@ function ItemsTab({ meta, categories, catalogs, typeLabel, openItemId, onOpened,
                 <td><span className={`badge ${val(r, 'active') === 'true' ? 'green' : ''}`}>{val(r, 'active') === 'true' ? 'active' : 'off'}</span></td>
               </tr>
             ))}
-          </tbody>
+          </tbody>}
         </table>
-        {items.length === 0 && <div className="empty">No items found.</div>}
+        {loading && <LoadingRegion label="Loading catalog items" />}
+        {!loading && items.length === 0 && (
+          <EmptyState
+            title="No catalog items match."
+            hint="Clear the search, or create one below — variables, choices and UI policies are all editable in place once it exists."
+            actionLabel={creating ? 'Close the form' : 'New item'}
+            onAction={() => setCreating(!creating)}
+          />
+        )}
         {error && <p className="error-text">{error}</p>}
       </div>
 
       <div className="card">
         {!selected ? (
-          <div className="empty">Select an item to inspect its variables, choices, and attached variable sets.</div>
+          <EmptyState
+            title="Nothing selected."
+            hint="Pick an item on the left to inspect and edit its variables, their choices, its UI policies, and the variable sets attached to it."
+          />
         ) : (
           <>
             <div className="spread">
               <h3 style={{ fontSize: 16 }}>{disp(selected.item, 'name')}</h3>
               <div className="row" style={{ gap: 8 }}>
-                <button className="btn sm" onClick={toggleActive} disabled={busy}>
+                <button className="btn sm" onClick={toggleActive} aria-busy={busy} disabled={busy}>
                   {val(selected.item, 'active') === 'true' ? 'Deactivate' : 'Activate'}
                 </button>
                 <button className="btn danger sm" onClick={deleteItem}>Delete item</button>
@@ -333,7 +355,7 @@ function ItemsTab({ meta, categories, catalogs, typeLabel, openItemId, onOpened,
                     <option value="">Attach existing set…</option>
                     {sets.map((s) => <option key={val(s, 'sys_id')} value={val(s, 'sys_id')}>{disp(s, 'title')}</option>)}
                   </select>
-                  <button className="btn sm" onClick={doAttach} disabled={!attachSet || busy}>Attach</button>
+                  <button className="btn sm" onClick={doAttach} aria-busy={busy} disabled={!attachSet || busy}>Attach</button>
                 </div>
               </>
             )}
@@ -389,7 +411,7 @@ function SetsTab({ meta, typeLabel }) {
           <input className="input" value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></div>
         <div className="field"><label className="label">Description</label>
           <input className="input" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></div>
-        <button className="btn primary sm" onClick={create} disabled={busy || !draft.title}>Create set</button>
+        <button className="btn primary sm" onClick={create} aria-busy={busy} disabled={busy || !draft.title}>Create set</button>
         <table className="table" style={{ marginTop: 14 }}>
           <thead><tr><th>Title</th><th>Internal name</th></tr></thead>
           <tbody>
@@ -405,7 +427,10 @@ function SetsTab({ meta, typeLabel }) {
       </div>
       <div className="card">
         {!selected ? (
-          <div className="empty">Select a set to add variables. Attach sets to items from the Items tab.</div>
+          <EmptyState
+            title="Nothing selected."
+            hint="Pick a variable set on the left to add variables to it. Sets are attached to items from the Items tab."
+          />
         ) : (
           <>
             <h3 style={{ fontSize: 15 }}>{disp(selected, 'title')}</h3>
@@ -481,7 +506,7 @@ function GuidesTab() {
         <label className="check" style={{ marginBottom: 10 }}>
           <input type="checkbox" checked={draft.two_step} onChange={(e) => setDraft({ ...draft, two_step: e.target.checked })} /> Two-step checkout
         </label>
-        <button className="btn primary sm" onClick={create} disabled={busy || !draft.name}>Create guide</button>
+        <button className="btn primary sm" onClick={create} aria-busy={busy} disabled={busy || !draft.name}>Create guide</button>
         <table className="table" style={{ marginTop: 14 }}>
           <thead><tr><th>Name</th><th>Two-step</th><th>Active</th></tr></thead>
           <tbody>
@@ -498,7 +523,10 @@ function GuidesTab() {
       </div>
       <div className="card">
         {!selected ? (
-          <div className="empty">Select a guide to manage its rule-base items.</div>
+          <EmptyState
+            title="Nothing selected."
+            hint="Pick an order guide on the left to manage the catalog items in its rule base."
+          />
         ) : (
           <>
             <div className="spread">
@@ -510,7 +538,9 @@ function GuidesTab() {
               release, verify the table name via Settings → table lookup and adjust GUIDE_RULE_TABLE in the server.
             </div>
             <div className="card-title">Included items</div>
-            {guideItems.length === 0 && <div className="empty">No items in this guide yet.</div>}
+            {guideItems.length === 0 && (
+              <EmptyState title="This guide has no items." hint="Add one below — the guide orders them together as a rule base." />
+            )}
             {guideItems.length > 0 && (
               <table className="table">
                 <thead><tr><th>Ord</th><th>Item</th><th>Condition</th></tr></thead>
@@ -534,7 +564,7 @@ function GuidesTab() {
               <div className="field"><label className="label">Condition (encoded query, optional)</label>
                 <input className="input mono" value={addItem.condition} onChange={(e) => setAddItem({ ...addItem, condition: e.target.value })} /></div>
             </div>
-            <button className="btn primary sm" onClick={addGuideItem} disabled={busy || !addItem.item}>Add to guide</button>
+            <button className="btn primary sm" onClick={addGuideItem} aria-busy={busy} disabled={busy || !addItem.item}>Add to guide</button>
           </>
         )}
       </div>
@@ -592,7 +622,7 @@ function ProducersTab({ onOpenItem }) {
           <input className="input" value={draft.short_description} onChange={(e) => setDraft({ ...draft, short_description: e.target.value })} /></div>
         <div className="field"><label className="label">Script (maps variables → record)</label>
           <textarea className="textarea mono" placeholder="current.short_description = producer.issue_summary;" value={draft.script} onChange={(e) => setDraft({ ...draft, script: e.target.value })} /></div>
-        <button className="btn primary sm" onClick={create} disabled={busy || !draft.name || !draft.table}>Create producer</button>
+        <button className="btn primary sm" onClick={create} aria-busy={busy} disabled={busy || !draft.name || !draft.table}>Create producer</button>
         {error && <p className="error-text">{error}</p>}
       </div>
       <div className="card">
@@ -617,7 +647,12 @@ function ProducersTab({ onOpenItem }) {
             ))}
           </tbody>
         </table>
-        {producers.length === 0 && <div className="empty">No record producers yet.</div>}
+        {producers.length === 0 && (
+          <EmptyState
+            title="No record producers yet."
+            hint="A producer is a catalog item that creates a record on a table you choose. Create one on the left."
+          />
+        )}
       </div>
     </div>
   );
@@ -643,6 +678,7 @@ export default function Catalog() {
   const typeLabel = (code) => meta.variableTypes.find((t) => String(t.code) === String(code))?.label || code;
 
   return (
+    <RequiresInstance what="Catalog Management">
     <div className="stack">
       <div className="tabs">
         <button className={`tab ${tab === 'items' ? 'active' : ''}`} onClick={() => setTab('items')}>Items & variables</button>
@@ -667,5 +703,6 @@ export default function Catalog() {
       {tab === 'guides' && <GuidesTab />}
       {tab === 'producers' && <ProducersTab onOpenItem={openItem} />}
     </div>
+    </RequiresInstance>
   );
 }

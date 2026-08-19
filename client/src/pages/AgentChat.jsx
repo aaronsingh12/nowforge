@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, sse } from '../api.js';
+import { useHealth } from '../hooks/useHealth.js';
 import Markdown from '../components/Markdown.jsx';
 import { confirmDestructive, promptFor, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
+import { SkeletonLines, LoadingRegion, EmptyState, DisconnectedBanner } from '../components/states.jsx';
 
 const SAMPLES = [
   'Create a "Laptop Request" catalog item with 6 sensible variables including a reference to sys_user and a model select box',
@@ -58,21 +61,22 @@ export default function AgentChat() {
   const [meta, setMeta] = useState(null);
   const [autoApprove, setAutoApprove] = useState(false);
 
-  const [sessions, setSessions] = useState([]);
+  const [sessions, setSessions] = useState(null);   // null = not loaded yet
   const [sessionId, setSessionId] = useState(() => localStorage.getItem(SESSION_KEY) || crypto.randomUUID());
   const [loadingSession, setLoadingSession] = useState(false);
   const [digestCount, setDigestCount] = useState(0);
   const [query, setQuery] = useState('');
   const [searchHits, setSearchHits] = useState(null);
   const [memory, setMemory] = useState(null);
-  const [banner, setBanner] = useState(null);
 
+  const { connected } = useHealth();
   const bottom = useRef(null);
 
   useEffect(() => { localStorage.setItem(SESSION_KEY, sessionId); }, [sessionId]);
 
   const refreshSessions = useCallback(async () => {
-    try { setSessions(await api.get('/agent/sessions')); } catch { /* rail is not load-bearing */ }
+    try { setSessions(await api.get('/agent/sessions')); }
+    catch { setSessions([]); /* the rail is not load-bearing, but it must settle */ }
   }, []);
 
   useEffect(() => {
@@ -210,7 +214,8 @@ export default function AgentChat() {
     } catch (err) { toast.error(err.message); }
   };
 
-  const rail = searchHits ? searchHits.sessions : sessions;
+  const railLoading = !searchHits && sessions === null;
+  const rail = searchHits ? searchHits.sessions : (sessions || []);
 
   return (
     <div className="agent-layout">
@@ -245,7 +250,17 @@ export default function AgentChat() {
         )}
 
         <div className="rail-list">
-          {rail.length === 0 && <div className="rail-empty">{searchHits ? 'Nothing matched.' : 'No chats yet.'}</div>}
+          {railLoading && (
+            <div style={{ padding: '6px 2px' }}>
+              <SkeletonLines lines={4} />
+              <LoadingRegion label="Loading chats" />
+            </div>
+          )}
+          {!railLoading && rail.length === 0 && (
+            <div className="rail-empty">
+              {searchHits ? 'Nothing matched.' : 'No chats yet — say something below and this fills in.'}
+            </div>
+          )}
           {rail.map((s) => (
             <div
               key={s.id}
@@ -300,14 +315,17 @@ export default function AgentChat() {
           </label>
         </div>
 
-        {banner && (
-          <div className="note warn" style={{ marginBottom: 10 }}>
-            {banner} <button className="btn ghost sm" onClick={() => setBanner(null)}>dismiss</button>
-          </div>
-        )}
+        {/* The agent itself runs disconnected — it just cannot do anything
+            useful to an instance, so this is a banner rather than a gate. */}
+        <DisconnectedBanner />
 
         <div className="msgs">
-          {loadingSession && <div className="empty">Loading transcript…</div>}
+          {loadingSession && (
+            <div className="msg">
+              <div className="bubble" style={{ minWidth: 320 }}><SkeletonLines lines={3} /></div>
+              <LoadingRegion label="Loading transcript" />
+            </div>
+          )}
 
           {!loadingSession && messages.length === 0 && (
             <div className="card" style={{ maxWidth: 780 }}>
@@ -321,6 +339,12 @@ export default function AgentChat() {
               <div className="chips">
                 {SAMPLES.map((s) => <button key={s} className="chip" onClick={() => send(s)}>{s}</button>)}
               </div>
+              {!connected && (
+                <p style={{ margin: '10px 0 0', fontSize: 12.5, color: 'var(--muted)' }}>
+                  No instance is bound yet, so every one of those needs a PDI first.{' '}
+                  <Link to="/">Connect one on the Dashboard</Link>.
+                </p>
+              )}
             </div>
           )}
 
@@ -393,7 +417,7 @@ export default function AgentChat() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
           />
-          <button className="btn primary" onClick={() => send()} disabled={running || !input.trim()}>
+          <button className="btn primary" onClick={() => send()} aria-busy={running} disabled={running || !input.trim()}>
             {running ? 'Working…' : 'Send'}
           </button>
         </div>

@@ -3,6 +3,7 @@ import { api, sse } from '../api.js';
 import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
 import { TableField } from '../components/ReferenceField.jsx';
+import { SkeletonRows, LoadingRegion, EmptyState, RequiresInstance } from '../components/states.jsx';
 
 /**
  * SLA definitions.
@@ -41,17 +42,19 @@ export default function Sla() {
   const [editingId, setEditingId] = useState(null);
   const [check, setCheck] = useState(null);      // dry-run validation
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState(null);
   const [selected, setSelected] = useState(null);
   const [run, setRun] = useState(null);          // verification events + result
 
   const load = async () => {
-    setError('');
+    setError(''); setLoading(true);
     try {
       const qs = new URLSearchParams({ search: filters.search, collection: filters.collection }).toString();
       setRows(await api.get(`/sla?${qs}`));
     } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
   };
 
   useEffect(() => { api.get('/sla/meta').then(setMeta).catch((e) => setError(e.message)); }, []);
@@ -136,6 +139,7 @@ export default function Sla() {
   };
 
   return (
+    <RequiresInstance what="SLA definitions">
     <div className="stack">
       <div className="split">
         <div className="card">
@@ -156,7 +160,8 @@ export default function Sla() {
           {error && <p className="error-text">{error}</p>}
           <table className="table">
             <thead><tr><th>Name</th><th>Table</th><th>Duration</th><th>Clock</th></tr></thead>
-            <tbody>
+            {loading && <SkeletonRows rows={5} cols={4} />}
+            {!loading && <tbody>
               {rows.map((r) => (
                 <tr key={r.sys_id} className={`click ${editingId === r.sys_id ? 'selected' : ''}`} onClick={() => openEdit(r)}>
                   <td>
@@ -172,24 +177,34 @@ export default function Sla() {
                   </td>
                 </tr>
               ))}
-            </tbody>
+            </tbody>}
           </table>
-          {rows.length === 0 && !error && <div className="empty">No SLA definitions match. Connect your PDI on the Dashboard first.</div>}
+          {loading && <LoadingRegion label="Loading SLA definitions" />}
+          {!loading && rows.length === 0 && !error && (
+            <EmptyState
+              title="No SLA definitions match."
+              hint="Clear the filters, or define one — its conditions are checked against the target table before anything is written."
+              actionLabel="New SLA definition"
+              onAction={openNew}
+            />
+          )}
         </div>
 
         <div className="card">
           {!form ? (
-            <div className="empty">
-              Select a definition to edit, or create one. Conditions are checked against the target table&rsquo;s real
-              schema before anything is written.
-            </div>
+            <EmptyState
+              title="Nothing selected."
+              hint="Pick a definition on the left, or create one. Conditions are checked against the target table's real schema before anything is written."
+              actionLabel="New SLA definition"
+              onAction={openNew}
+            />
           ) : (
             <>
               <div className="spread" style={{ marginBottom: 12 }}>
                 <div className="card-title" style={{ marginBottom: 0 }}>
                   {editingId ? <>Edit <span className="mono">{form.name}</span></> : 'New SLA definition'}
                 </div>
-                {editingId && <button className="btn danger sm" onClick={remove} disabled={busy}>Delete</button>}
+                {editingId && <button className="btn danger sm" onClick={remove} aria-busy={busy} disabled={busy}>Delete</button>}
               </div>
 
               <div className="field">
@@ -287,8 +302,8 @@ export default function Sla() {
               </div>
 
               <div className="row">
-                <button className="btn" onClick={validate} disabled={busy}>Check conditions</button>
-                <button className="btn primary" onClick={submit} disabled={busy || !form.name || !form.collection}>
+                <button className="btn" onClick={validate} aria-busy={busy} disabled={busy}>Check conditions</button>
+                <button className="btn primary" onClick={submit} aria-busy={busy} disabled={busy || !form.name || !form.collection}>
                   {busy ? 'Saving…' : editingId ? 'Save changes' : 'Create SLA'}
                 </button>
                 <button className="btn ghost" onClick={() => { setForm(null); setEditingId(null); setCheck(null); }}>Close</button>
@@ -307,7 +322,7 @@ export default function Sla() {
         <div className="card">
           <div className="spread" style={{ marginBottom: 12 }}>
             <div className="card-title" style={{ marginBottom: 0 }}>Verify &ldquo;{selected.name}&rdquo;</div>
-            <button className="btn amber sm" onClick={() => verify(selected.name)} disabled={Boolean(run && !run.result)}>
+            <button className="btn amber sm" onClick={() => verify(selected.name)} aria-busy={Boolean(run && !run.result)} disabled={Boolean(run && !run.result)}>
               {run && !run.result ? 'Running…' : 'Run verification'}
             </button>
           </div>
@@ -320,6 +335,7 @@ export default function Sla() {
         </div>
       )}
     </div>
+    </RequiresInstance>
   );
 }
 

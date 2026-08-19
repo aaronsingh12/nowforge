@@ -3,6 +3,7 @@ import { api, val, disp } from '../api.js';
 import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
 import ReferenceField from '../components/ReferenceField.jsx';
+import { SkeletonRows, LoadingRegion, EmptyState, RequiresInstance } from '../components/states.jsx';
 
 const EMPTY = {
   short_description: '', description: '', category: '', state: '1',
@@ -22,16 +23,18 @@ export default function Incidents() {
   const [form, setForm] = useState(null);      // null = closed, {..EMPTY} or loaded record form
   const [editingId, setEditingId] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
   const load = async () => {
-    setError('');
+    setError(''); setLoading(true);
     try {
       const qs = new URLSearchParams({ ...filters, active: '', limit: '30' }).toString();
       setRows(await api.get(`/incidents?${qs}`));
       api.get('/incidents/stats').then(setStats).catch(() => {});
     } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
   };
 
   useEffect(() => {
@@ -117,6 +120,7 @@ export default function Incidents() {
   const badgeFor = (p) => (p === '1' ? 'red' : p === '2' ? 'amber' : '');
 
   return (
+    <RequiresInstance what="Incident Management">
     <div className="stack">
       {stats && (
         <div className="row">
@@ -152,7 +156,8 @@ export default function Incidents() {
           {error && <p className="error-text">{error}</p>}
           <table className="table">
             <thead><tr><th>Number</th><th>Short description</th><th>State</th><th>Pri</th></tr></thead>
-            <tbody>
+            {loading && <SkeletonRows rows={6} cols={4} />}
+            {!loading && <tbody>
               {rows.map((r) => (
                 <tr key={val(r, 'sys_id')} className={`click ${editingId === val(r, 'sys_id') ? 'selected' : ''}`} onClick={() => openEdit(r)}>
                   <td className="mono">{disp(r, 'number')}</td>
@@ -161,21 +166,36 @@ export default function Incidents() {
                   <td><span className={`badge ${badgeFor(val(r, 'priority'))}`}>{val(r, 'priority')}</span></td>
                 </tr>
               ))}
-            </tbody>
+            </tbody>}
           </table>
-          {rows.length === 0 && !error && <div className="empty">No incidents match. Connect your PDI on the Dashboard first.</div>}
+          {loading && <LoadingRegion label="Loading incidents" />}
+          {/* "Nothing matched" now only ever means nothing matched — the
+              binding is answered by RequiresInstance before we get here. */}
+          {!loading && rows.length === 0 && !error && (
+            <EmptyState
+              title="No incidents match these filters."
+              hint="Clear the search and state filters, or raise one to work against."
+              actionLabel="New incident"
+              onAction={openNew}
+            />
+          )}
         </div>
 
         <div className="card">
           {!form ? (
-            <div className="empty">Select an incident to edit, or create a new one. Reference fields (caller, group, assignee) resolve live against your instance.</div>
+            <EmptyState
+              title="Nothing selected."
+              hint="Pick an incident on the left to edit it, or start a new one. Caller, group and assignee resolve live against your instance."
+              actionLabel="New incident"
+              onAction={openNew}
+            />
           ) : (
             <>
               <div className="spread" style={{ marginBottom: 12 }}>
                 <div className="card-title" style={{ marginBottom: 0 }}>
                   {editingId ? <>Edit <span className="mono">{form._number}</span></> : 'New incident'}
                 </div>
-                {editingId && <button className="btn danger sm" onClick={remove} disabled={busy}>Delete</button>}
+                {editingId && <button className="btn danger sm" onClick={remove} aria-busy={busy} disabled={busy}>Delete</button>}
               </div>
               <div className="field">
                 <label className="label">Short description</label>
@@ -231,7 +251,7 @@ export default function Incidents() {
                 </div>
               )}
               <div className="row">
-                <button className="btn primary" onClick={submit} disabled={busy || !form.short_description}>
+                <button className="btn primary" onClick={submit} aria-busy={busy} disabled={busy || !form.short_description}>
                   {busy ? 'Saving…' : editingId ? 'Save changes' : 'Create incident'}
                 </button>
                 <button className="btn ghost" onClick={() => { setForm(null); setEditingId(null); }}>Close</button>
@@ -243,5 +263,6 @@ export default function Incidents() {
         </div>
       </div>
     </div>
+    </RequiresInstance>
   );
 }

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import { toast } from '../components/toast.js';
+import { DisconnectedBanner } from '../components/states.jsx';
 
 const HINTS = {
   anthropic: { model: 'claude-sonnet-4-6', baseUrl: 'api.anthropic.com (fixed)', key: true },
@@ -12,7 +14,7 @@ export default function Settings() {
   const [memory, setMemory] = useState(null);
   const [saved, setSaved] = useState(null);
   const [autoApprove, setAutoApprove] = useState(false);
-  const [notice, setNotice] = useState('');
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -27,17 +29,20 @@ export default function Settings() {
   const hint = HINTS[llm.provider];
 
   const save = async () => {
-    setNotice(''); setError('');
+    setSaving(true); setError('');
     try {
       const s = await api.post('/system/settings', { llm, agent: { autoApprove } });
       setSaved(s);
       setLlm((l) => ({ ...l, apiKey: '' }));
-      setNotice('Settings saved.');
-    } catch (e) { setError(e.message); }
+      toast.success('Settings saved.');
+    } catch (e) { setError(e.message); toast.error(e.message); }
+    finally { setSaving(false); }
   };
 
   return (
-    <div className="grid2">
+    <div className="stack">
+      <DisconnectedBanner />
+      <div className="grid2">
       <div className="card">
         <div className="card-title">LLM provider — bring your own model</div>
         <div className="field">
@@ -89,8 +94,9 @@ export default function Settings() {
           <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
           Auto-approve agent mutations (skip the amber gate)
         </label>
-        <button className="btn primary" onClick={save}>Save settings</button>
-        {notice && <p className="ok-text">{notice}</p>}
+        <button className="btn primary" onClick={save} aria-busy={saving} disabled={saving}>
+          {saving ? 'Saving…' : 'Save settings'}
+        </button>
         {error && <p className="error-text">{error}</p>}
       </div>
 
@@ -116,6 +122,7 @@ export default function Settings() {
             Auto-approve removes the human gate on create/update/delete. Recommended only on throwaway PDIs.
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

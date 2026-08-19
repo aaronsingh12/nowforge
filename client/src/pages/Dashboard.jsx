@@ -2,11 +2,15 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
+import { EmptyState } from '../components/states.jsx';
+import { refreshHealth } from '../hooks/useHealth.js';
 
 export default function Dashboard() {
   const [conn, setConn] = useState({ instanceUrl: '', authType: 'basic', username: '', password: '', clientId: '', clientSecret: '' });
   const [saved, setSaved] = useState(null);
   const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [test, setTest] = useState(null);
   const [error, setError] = useState('');
   const [stats, setStats] = useState(null);
@@ -22,14 +26,16 @@ export default function Dashboard() {
   }, []);
 
   const save = async () => {
-    setError('');
+    setSaving(true); setError('');
     try {
       const s = await api.post('/system/settings', { connection: conn });
       setSaved(s);
       setConn((c) => ({ ...c, password: '', clientSecret: '' })); // stored; stop holding it in the form
       setTest(null);
       toast.success('Connection saved. Test it to confirm the credentials work.');
+      refreshHealth();   // the topbar pill and every RequiresInstance gate read this
     } catch (e) { setError(e.message); toast.error(e.message); }
+    finally { setSaving(false); }
   };
 
   const runTest = async () => {
@@ -50,14 +56,16 @@ export default function Dashboard() {
       confirmLabel: 'Disconnect',
     });
     if (!ok) return;
-    setError(''); setTest(null);
+    setDisconnecting(true); setError(''); setTest(null);
     try {
       const s = await api.post('/system/connection/disconnect');
       setSaved(s);
       setConn({ instanceUrl: '', authType: 'basic', username: '', password: '', clientId: '', clientSecret: '' });
       setStats(null);
       toast.info('Disconnected. The stored credentials are cleared.');
+      refreshHealth();
     } catch (e) { setError(e.message); toast.error(e.message); }
+    finally { setDisconnecting(false); }
   };
 
   const warnings = saved?.connection?.warnings || [];
@@ -104,10 +112,15 @@ export default function Dashboard() {
             </div>
           )}
           <div className="row">
-            <button className="btn primary" onClick={save}>Save connection</button>
+            <button className="btn primary" onClick={save} aria-busy={saving} disabled={saving}>
+              {saving ? 'Saving…' : 'Save connection'}
+            </button>
             <button className="btn" onClick={runTest} disabled={testing}>{testing ? 'Testing…' : 'Test connection'}</button>
             {connected && (
-              <button className="btn amber" onClick={disconnect} style={{ marginLeft: 'auto' }}>Log out</button>
+              <button className="btn amber" onClick={disconnect} aria-busy={disconnecting} disabled={disconnecting}
+                style={{ marginLeft: 'auto' }}>
+                {disconnecting ? 'Disconnecting…' : 'Log out'}
+              </button>
             )}
           </div>
 
@@ -138,7 +151,15 @@ export default function Dashboard() {
               <div className="stat"><b>{stats.new}</b><span>state: new</span></div>
             </div>
           ) : (
-            <div className="empty">Connect and test your PDI to see live counts.</div>
+            <EmptyState
+              icon="○"
+              title="No counts yet."
+              hint={connected
+                ? 'Run Test connection to confirm the credentials, and the pulse fills in.'
+                : 'Save your PDI URL and admin credentials on the left, then test the connection.'}
+              actionLabel="Test connection"
+              onAction={runTest}
+            />
           )}
           <div className="note" style={{ marginTop: 14 }}>
             Counts come from the Aggregate API on your bound instance. The Agent, Incidents, Catalog, and Flows

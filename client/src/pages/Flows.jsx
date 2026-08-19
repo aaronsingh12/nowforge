@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, sse, val, disp } from '../api.js';
 import { confirmDestructive, confirmAction, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
+import { SkeletonRows, SkeletonLines, LoadingRegion, EmptyState, RequiresInstance } from '../components/states.jsx';
 
 /** Green when live authoring is ready; otherwise the exact commands to fix it. */
 function CapabilityBanner({ cap }) {
@@ -135,7 +136,7 @@ function LiveBuild({ capOk, seedSpec, managed = [], onDeployed }) {
         onChange={(e) => setSpec(e.target.value)}
       />
       <div className="row" style={{ marginTop: 8 }}>
-        <button className="btn amber" onClick={run} disabled={running || !spec.trim() || !capOk}>
+        <button className="btn amber" onClick={run} aria-busy={running} disabled={running || !spec.trim() || !capOk}>
           {running ? 'Building…' : updates ? 'Regenerate & deploy' : 'Generate & deploy'}
         </button>
         {managed.filter((m) => m.kind === 'flow').length > 0 && (
@@ -337,11 +338,26 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
     finally { setBusy(''); }
   };
 
-  if (!data) return null;
+  // Used to render nothing at all while loading, so the page shuffled itself
+  // downwards a second after it appeared.
+  if (!data) {
+    return (
+      <div className="card">
+        <div className="card-title">NowForge-managed artifacts</div>
+        <SkeletonLines lines={3} />
+        <LoadingRegion label="Loading managed artifacts" />
+      </div>
+    );
+  }
   return (
     <div className="card">
       <div className="card-title">NowForge-managed artifacts</div>
-      {data.managed.length === 0 && <div className="empty">Nothing managed yet — build one above.</div>}
+      {data.managed.length === 0 && (
+        <EmptyState
+          title="Nothing is managed yet."
+          hint="Describe an automation in the box above and NowForge will generate Fluent source, compile it offline, install it, and read it back. Only what it authored appears here."
+        />
+      )}
       {data.managed.length > 0 && (
         <table className="table">
           <thead><tr><th>Name</th><th>Kind</th><th>On instance</th><th>Verification</th><th /></tr></thead>
@@ -363,11 +379,11 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
                 <td>
                   <div className="row">
                     {m.verification?.available && (
-                      <button className="btn amber sm" onClick={() => setVerifying(m.name)} disabled={Boolean(verifying)}>
+                      <button className="btn amber sm" onClick={() => setVerifying(m.name)} aria-busy={verifying === m.name} disabled={Boolean(verifying)}>
                         Verify
                       </button>
                     )}
-                    <button className="btn sm" onClick={() => remove(m)} disabled={busy === m.name}>
+                    <button className="btn sm" onClick={() => remove(m)} aria-busy={busy === m.name} disabled={busy === m.name}>
                       {busy === m.name ? 'Removing…' : 'Delete'}
                     </button>
                   </div>
@@ -446,7 +462,7 @@ function Blueprint({ bp, capOk, onDeploy }) {
             </button>
           )}
           {recordTriggered && (
-            <button className="btn amber sm" onClick={createRule} disabled={busy}>
+            <button className="btn amber sm" onClick={createRule} aria-busy={busy} disabled={busy}>
               {busy ? 'Creating…' : 'Business Rule fallback'}
             </button>
           )}
@@ -533,6 +549,7 @@ export default function Flows() {
   const [seedSpec, setSeedSpec] = useState('');
   const [managedKey, setManagedKey] = useState(0);
   const [managed, setManaged] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     api.get('/flows/live/capability').then(setCap).catch(() => setCap({ ok: false, fixes: [] }));
@@ -557,10 +574,13 @@ export default function Flows() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const load = () =>
-    api.get(`/flows?search=${encodeURIComponent(search)}&type=${typeFilter}`)
+  const load = () => {
+    setLoading(true);
+    return api.get(`/flows?search=${encodeURIComponent(search)}&type=${typeFilter}`)
       .then(setRows)
-      .catch((e) => setError(e.message));
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [typeFilter]);
 
   const open = async (r) => {
@@ -594,6 +614,7 @@ export default function Flows() {
   };
 
   return (
+    <RequiresInstance what="Flow Designer">
     <div className="stack">
       <div className="note">
         Flows are authored through ServiceNow's own SDK (Fluent): NowForge generates TypeScript, compiles it
@@ -623,7 +644,7 @@ export default function Flows() {
           <div style={{ marginTop: 12 }}>
             <textarea className="textarea" placeholder="e.g. When a P1 incident is created for the Network group, notify the group manager and create a problem task…"
               value={designText} onChange={(e) => setDesignText(e.target.value)} />
-            <button className="btn primary" style={{ marginTop: 8 }} onClick={design} disabled={designing || !designText.trim()}>
+            <button className="btn primary" style={{ marginTop: 8 }} onClick={design} aria-busy={designing} disabled={designing || !designText.trim()}>
               {designing ? 'Designing…' : 'Generate blueprint'}
             </button>
             {bpError && <p className="error-text">{bpError}</p>}
@@ -646,7 +667,8 @@ export default function Flows() {
           </div>
           <table className="table">
             <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Active</th></tr></thead>
-            <tbody>
+            {loading && <SkeletonRows rows={6} cols={4} />}
+            {!loading && <tbody>
               {rows.map((r) => (
                 <tr key={val(r, 'sys_id')} className={`click ${detail && val(detail.flow, 'sys_id') === val(r, 'sys_id') ? 'selected' : ''}`} onClick={() => open(r)}>
                   <td>{disp(r, 'name')}</td>
@@ -655,15 +677,26 @@ export default function Flows() {
                   <td><span className={`badge ${val(r, 'active') === 'true' ? 'green' : ''}`}>{val(r, 'active') === 'true' ? 'on' : 'off'}</span></td>
                 </tr>
               ))}
-            </tbody>
+            </tbody>}
           </table>
-          {rows.length === 0 && <div className="empty">No flows or subflows found (or not connected).</div>}
+          {loading && <LoadingRegion label="Loading flows" />}
+          {/* "or not connected" is gone: the binding is answered before the
+              page renders, so an empty list is now only an empty list. */}
+          {!loading && rows.length === 0 && (
+            <EmptyState
+              title="No flows or subflows match."
+              hint="Clear the search and type filter, or build one — NowForge authors real Flow Designer flows through the SDK."
+            />
+          )}
           {error && <p className="error-text">{error}</p>}
         </div>
 
         <div className="card">
           {!detail ? (
-            <div className="empty">Select a flow to read it top-to-bottom: trigger, actions, logic, executions.</div>
+            <EmptyState
+              title="Nothing selected."
+              hint="Pick a flow on the left to read it top-to-bottom: trigger, actions, logic and recent executions."
+            />
           ) : (
             <>
               <div className="spread">
@@ -763,5 +796,6 @@ export default function Flows() {
         </div>
       </div>
     </div>
+    </RequiresInstance>
   );
 }

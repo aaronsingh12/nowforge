@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, sse } from '../api.js';
 import { confirmDestructive, CONSEQUENCE } from './confirm.js';
+import { SkeletonLines, LoadingRegion, EmptyState } from './states.jsx';
 
 /**
  * Catalog UI policy builder, scoped to one item.
@@ -147,7 +148,7 @@ export default function PolicyBuilder({ catItemId, meta }) {
   };
 
   if (error && !data) return <p className="error-text">{error}</p>;
-  if (!data) return <div className="empty">Loading policies…</div>;
+  if (!data) return <><SkeletonLines lines={3} /><LoadingRegion label="Loading UI policies" /></>;
 
   const variables = data.variables || [];
 
@@ -198,7 +199,16 @@ export default function PolicyBuilder({ catItemId, meta }) {
           {p.problems.map((prob, i) => <div key={i} className="note" style={{ borderLeftColor: 'var(--red)', marginTop: 8 }}>{prob}</div>)}
         </div>
       ))}
-      {data.policies.length === 0 && <div className="empty">No UI policies on this item.</div>}
+      {data.policies.length === 0 && (
+        <EmptyState
+          title="No UI policies on this item."
+          hint={variables.length < 2
+            ? 'A policy needs at least two variables — one to test, one to act on. Add another variable first.'
+            : 'A policy shows, hides, requires or locks one variable based on the value of another. It is built here and installed through the SDK.'}
+          actionLabel={variables.length < 2 ? null : 'New policy'}
+          onAction={startDraft}
+        />
+      )}
 
       {draft && (
         <div className="policy-card">
@@ -230,7 +240,7 @@ export default function PolicyBuilder({ catItemId, meta }) {
 
           <div className="row">
             <button className="btn" onClick={validate}>Check</button>
-            <button className="btn primary" onClick={create} disabled={Boolean(run && !run.result) || !draft.short_description}>
+            <button className="btn primary" onClick={create} aria-busy={Boolean(run && !run.result)} disabled={Boolean(run && !run.result) || !draft.short_description}>
               {run && !run.result ? 'Installing…' : 'Create policy'}
             </button>
           </div>

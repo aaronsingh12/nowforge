@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api.js';
 import { TableField } from '../components/ReferenceField.jsx';
+import { SkeletonLines, EmptyState, RequiresInstance } from '../components/states.jsx';
 
 /**
  * Access — read and explain ACLs. There is deliberately no authoring here.
@@ -52,6 +53,7 @@ export default function Access() {
   };
 
   return (
+    <RequiresInstance what="Access control">
     <div className="stack">
       <div className="card">
         <div className="card-title">Access control · read only</div>
@@ -59,7 +61,7 @@ export default function Access() {
           <div style={{ flex: 1, minWidth: 260 }}>
             <TableField value={table} onChange={setTable} placeholder="Pick a table…" />
           </div>
-          <button className="btn primary" onClick={run} disabled={busy === 'report' || !table?.id}>
+          <button className="btn primary" onClick={run} aria-busy={busy === 'report'} disabled={busy === 'report' || !table?.id}>
             {busy === 'report' ? 'Reading…' : 'Read ACLs'}
           </button>
         </div>
@@ -69,6 +71,21 @@ export default function Access() {
         </div>
         {error && <p className="error-text">{error}</p>}
       </div>
+
+      {busy === 'report' && !report && (
+        <div className="card"><SkeletonLines lines={6} /></div>
+      )}
+
+      {!report && !busy && !error && (
+        <div className="card">
+          <EmptyState
+            title="No report yet."
+            hint="Pick a table and read its ACLs. The report walks the inheritance chain, so incident brings task's rules with it — and says which of them came from where."
+            actionLabel="Read ACLs"
+            onAction={run}
+          />
+        </div>
+      )}
 
       {report && (
         <>
@@ -90,7 +107,7 @@ export default function Access() {
                     onChange={(e) => setRoles({ ...roles, a: e.target.value })} placeholder="role A" />
                   <input className="input mono" style={{ width: 200 }} value={roles.b}
                     onChange={(e) => setRoles({ ...roles, b: e.target.value })} placeholder="role B" />
-                  <button className="btn primary" onClick={runDiff} disabled={busy === 'diff'}>
+                  <button className="btn primary" onClick={runDiff} aria-busy={busy === 'diff'} disabled={busy === 'diff'}>
                     {busy === 'diff' ? 'Comparing…' : 'Compare'}
                   </button>
                 </div>
@@ -103,15 +120,18 @@ export default function Access() {
             <div className="card">
               <div className="spread" style={{ marginBottom: 12 }}>
                 <div className="card-title" style={{ marginBottom: 0 }}>Plain language</div>
-                <button className="btn" onClick={explain} disabled={busy === 'explain'}>
+                <button className="btn" onClick={explain} aria-busy={busy === 'explain'} disabled={busy === 'explain'}>
                   {busy === 'explain' ? 'Generating…' : 'Explain in plain language'}
                 </button>
               </div>
+              {busy === 'explain' && <SkeletonLines lines={5} />}
               {!explanation && !error && (
-                <div className="empty">
-                  Sends the structured report above through your configured model. Read-only — nothing is written, and
-                  the model sees the report, not the instance.
-                </div>
+                <EmptyState
+                  title="Not generated yet."
+                  hint="Sends the structured report above through your configured model. Read-only — nothing is written, and the model sees the report, not the instance."
+                  actionLabel="Explain in plain language"
+                  onAction={explain}
+                />
               )}
               {explanation && (
                 <>
@@ -129,6 +149,7 @@ export default function Access() {
         </>
       )}
     </div>
+    </RequiresInstance>
   );
 }
 
