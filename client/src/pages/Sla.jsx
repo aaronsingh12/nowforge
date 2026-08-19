@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, sse } from '../api.js';
+import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
+import { toast } from '../components/toast.js';
 import { TableField } from '../components/ReferenceField.jsx';
 
 /**
@@ -101,7 +103,13 @@ export default function Sla() {
   };
 
   const remove = async () => {
-    if (!window.confirm(`Delete SLA definition "${form.name}"? Running clocks on existing records are not removed by this.`)) return;
+    const ok = await confirmDestructive({
+      action: 'Delete SLA definition',
+      subject: form.name,
+      sysId: editingId,
+      detail: CONSEQUENCE.sla,
+    });
+    if (!ok) return;
     setBusy(true); setError('');
     try {
       const out = await api.del(`/sla/${editingId}`);

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, sse, val, disp } from '../api.js';
+import { confirmDestructive, confirmAction, CONSEQUENCE } from '../components/confirm.js';
+import { toast } from '../components/toast.js';
 
 /** Green when live authoring is ready; otherwise the exact commands to fix it. */
 function CapabilityBanner({ cap }) {
@@ -316,14 +318,22 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
   const load = () => api.get('/flows/live').then(setData).catch((e) => setError(e.message));
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [reloadKey]);
 
-  const remove = async (name) => {
-    if (!window.confirm(`Delete "${name}" from the instance?\n\nIts Fluent source is removed and the app reinstalled, which deletes the record on the instance.`)) return;
+  const remove = async (m) => {
+    const name = m.name;
+    const ok = await confirmDestructive({
+      action: 'Delete flow',
+      subject: name,
+      sysId: m.live?.sys_id,
+      detail: CONSEQUENCE.flow,
+    });
+    if (!ok) return;
     setBusy(name); setError('');
     try {
       await api.del(`/flows/live/${encodeURIComponent(name)}`);
       await load();
       onChanged?.();
-    } catch (e) { setError(e.message); }
+      toast.success(`Deleted "${name}" and reinstalled the application.`);
+    } catch (e) { setError(e.message); toast.error(e.message); }
     finally { setBusy(''); }
   };
 
@@ -357,7 +367,7 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
                         Verify
                       </button>
                     )}
-                    <button className="btn sm" onClick={() => remove(m.name)} disabled={busy === m.name}>
+                    <button className="btn sm" onClick={() => remove(m)} disabled={busy === m.name}>
                       {busy === m.name ? 'Removing…' : 'Delete'}
                     </button>
                   </div>
@@ -408,7 +418,14 @@ function Blueprint({ bp, capOk, onDeploy }) {
   };
 
   const createRule = async () => {
-    if (!window.confirm('Create an equivalent Business Rule on the instance? It will be created INACTIVE for your review.')) return;
+    const ok = await confirmAction({
+      action: 'Create an equivalent Business Rule for',
+      subject: bp.name,
+      detail: 'It is created INACTIVE on the instance for your review. This is the Tier 3 fallback — '
+        + 'it is not a flow, and nothing activates it for you.',
+      confirmLabel: 'Create rule',
+    });
+    if (!ok) return;
     setBusy(true); setError('');
     try { setRuleResult(await api.post('/flows/blueprint-to-rule', { blueprint: bp })); }
     catch (e) { setError(e.message); }

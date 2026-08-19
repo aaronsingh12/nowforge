@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
+import { toast } from '../components/toast.js';
 
 export default function Dashboard() {
   const [conn, setConn] = useState({ instanceUrl: '', authType: 'basic', username: '', password: '', clientId: '', clientSecret: '' });
@@ -26,7 +28,8 @@ export default function Dashboard() {
       setSaved(s);
       setConn((c) => ({ ...c, password: '', clientSecret: '' })); // stored; stop holding it in the form
       setTest(null);
-    } catch (e) { setError(e.message); }
+      toast.success('Connection saved. Test it to confirm the credentials work.');
+    } catch (e) { setError(e.message); toast.error(e.message); }
   };
 
   const runTest = async () => {
@@ -40,14 +43,21 @@ export default function Dashboard() {
   };
 
   const disconnect = async () => {
-    if (!window.confirm('Disconnect from this instance?\n\nThe stored username and password are cleared. Nothing on the ServiceNow instance is changed.')) return;
+    const ok = await confirmDestructive({
+      action: 'Disconnect from',
+      subject: saved?.connection?.instanceUrl || 'this instance',
+      detail: CONSEQUENCE.connection,
+      confirmLabel: 'Disconnect',
+    });
+    if (!ok) return;
     setError(''); setTest(null);
     try {
       const s = await api.post('/system/connection/disconnect');
       setSaved(s);
       setConn({ instanceUrl: '', authType: 'basic', username: '', password: '', clientId: '', clientSecret: '' });
       setStats(null);
-    } catch (e) { setError(e.message); }
+      toast.info('Disconnected. The stored credentials are cleared.');
+    } catch (e) { setError(e.message); toast.error(e.message); }
   };
 
   const warnings = saved?.connection?.warnings || [];

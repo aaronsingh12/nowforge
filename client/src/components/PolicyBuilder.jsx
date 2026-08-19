@@ -139,7 +139,9 @@ export default function PolicyBuilder({ catItemId, meta }) {
   };
 
   const removePolicy = async (p) => {
-    const ok = await confirmDestructive({ action: 'Delete UI policy', subject: p.short_description, detail: CONSEQUENCE.policy });
+    const ok = await confirmDestructive({
+      action: 'Delete UI policy', subject: p.short_description, sysId: p.sys_id, detail: CONSEQUENCE.policy,
+    });
     if (!ok) return;
     await stream(`/catalog/policies/${p.sys_id}`, null, 'DELETE');
   };

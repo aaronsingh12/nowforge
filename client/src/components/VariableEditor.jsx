@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, val, disp } from '../api.js';
 import { confirmDestructive, CONSEQUENCE } from './confirm.js';
+import { toast } from './toast.js';
 
 /**
  * Variable list with inline editing, reordering and choice management.
@@ -42,10 +43,15 @@ function ChoiceEditor({ variableId, onChanged }) {
   };
 
   const remove = async (c) => {
-    if (!await confirmDestructive({ action: 'Delete choice', subject: c.text, detail: CONSEQUENCE.choice })) return;
+    const ok = await confirmDestructive({
+      action: 'Delete choice', subject: c.text, sysId: c.sys_id, detail: CONSEQUENCE.choice,
+    });
+    if (!ok) return;
     setError('');
-    try { await api.del(`/catalog/choices/${c.sys_id}`); load(); onChanged?.(); }
-    catch (e) { setError(e.message); }
+    try {
+      await api.del(`/catalog/choices/${c.sys_id}`); load(); onChanged?.();
+      toast.success(`Deleted choice "${c.text}".`);
+    } catch (e) { setError(e.message); toast.error(e.message); }
   };
 
   if (!choices) return <div className="empty">Loading choices…</div>;
@@ -160,12 +166,17 @@ export default function VariableEditor({ catItemId, variables, typeLabel, onChan
 
   const remove = async (v) => {
     const ok = await confirmDestructive({
-      action: 'Delete variable', subject: disp(v, 'question_text') || disp(v, 'name'), detail: CONSEQUENCE.variable,
+      action: 'Delete variable',
+      subject: disp(v, 'question_text') || disp(v, 'name'),
+      sysId: val(v, 'sys_id'),
+      detail: CONSEQUENCE.variable,
     });
     if (!ok) return;
     setError('');
-    try { await api.del(`/catalog/variables/${val(v, 'sys_id')}`); onChanged?.(); }
-    catch (e) { setError(e.message); }
+    try {
+      await api.del(`/catalog/variables/${val(v, 'sys_id')}`); onChanged?.();
+      toast.success(`Deleted variable "${disp(v, 'name')}".`);
+    } catch (e) { setError(e.message); toast.error(e.message); }
   };
 
   return (

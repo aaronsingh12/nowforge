@@ -4,6 +4,7 @@ import ReferenceField, { TableField } from '../components/ReferenceField.jsx';
 import VariableEditor from '../components/VariableEditor.jsx';
 import PolicyBuilder from '../components/PolicyBuilder.jsx';
 import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
+import { toast } from '../components/toast.js';
 
 const CHOICE_TYPES = [3, 5, 18, 22];
 const REF_TYPES = [8, 21];
@@ -191,11 +192,14 @@ function ItemsTab({ meta, categories, catalogs, typeLabel, openItemId, onOpened,
   const deleteItem = async () => {
     const id = val(selected.item, 'sys_id');
     const ok = await confirmDestructive({
-      action: 'Delete catalog item', subject: disp(selected.item, 'name'), detail: CONSEQUENCE.item,
+      action: 'Delete catalog item', subject: disp(selected.item, 'name'), sysId: id, detail: CONSEQUENCE.item,
     });
     if (!ok) return;
-    try { await api.del(`/catalog/items/${id}`); setSelected(null); load(); }
-    catch (e) { setError(e.message); }
+    try {
+      await api.del(`/catalog/items/${id}`);
+      setSelected(null); load();
+      toast.success(`Deleted catalog item "${disp(selected.item, 'name')}".`);
+    } catch (e) { setError(e.message); toast.error(e.message); }
   };
 
   return (
@@ -443,7 +447,7 @@ function GuidesTab() {
 
   const removeGuide = async (g) => {
     const ok = await confirmDestructive({
-      action: 'Delete order guide', subject: disp(g, 'name'), detail: CONSEQUENCE.guide,
+      action: 'Delete order guide', subject: disp(g, 'name'), sysId: val(g, 'sys_id'), detail: CONSEQUENCE.guide,
     });
     if (!ok) return;
     setError('');
@@ -544,23 +548,24 @@ function ProducersTab({ onOpenItem }) {
   const [draft, setDraft] = useState({ name: '', table: null, short_description: '', script: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
 
   const load = () => api.get('/catalog/record-producers').then(setProducers).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
 
   const remove = async (p) => {
     const ok = await confirmDestructive({
-      action: 'Delete record producer', subject: disp(p, 'name'), detail: CONSEQUENCE.producer,
+      action: 'Delete record producer', subject: disp(p, 'name'), sysId: val(p, 'sys_id'), detail: CONSEQUENCE.producer,
     });
     if (!ok) return;
     setError('');
-    try { await api.del(`/catalog/record-producers/${val(p, 'sys_id')}`); load(); }
-    catch (e) { setError(e.message); }
+    try {
+      await api.del(`/catalog/record-producers/${val(p, 'sys_id')}`); load();
+      toast.success(`Deleted record producer "${disp(p, 'name')}".`);
+    } catch (e) { setError(e.message); toast.error(e.message); }
   };
 
   const create = async () => {
-    setBusy(true); setError(''); setNotice('');
+    setBusy(true); setError('');
     try {
       const r = await api.post('/catalog/record-producers', {
         name: draft.name,
@@ -568,7 +573,7 @@ function ProducersTab({ onOpenItem }) {
         short_description: draft.short_description,
         script: draft.script,
       });
-      setNotice(`Created record producer "${disp(r, 'name')}" → ${draft.table?.id}`);
+      toast.success(`Created record producer "${disp(r, 'name')}" → ${draft.table?.id}`);
       setDraft({ name: '', table: null, short_description: '', script: '' });
       load();
     } catch (e) { setError(e.message); }
@@ -588,7 +593,6 @@ function ProducersTab({ onOpenItem }) {
         <div className="field"><label className="label">Script (maps variables → record)</label>
           <textarea className="textarea mono" placeholder="current.short_description = producer.issue_summary;" value={draft.script} onChange={(e) => setDraft({ ...draft, script: e.target.value })} /></div>
         <button className="btn primary sm" onClick={create} disabled={busy || !draft.name || !draft.table}>Create producer</button>
-        {notice && <p className="ok-text">{notice}</p>}
         {error && <p className="error-text">{error}</p>}
       </div>
       <div className="card">

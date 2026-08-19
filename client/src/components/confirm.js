@@ -1,28 +1,65 @@
 /**
  * One place destructive confirmation happens.
  *
- * Every delete in the catalog used to call `window.confirm` inline with its own
- * wording, which meant no consistent phrasing and — more to the point — no
- * single seam to replace. Track D's dialog component drops in here and nowhere
- * else: change this file, and every call site upgrades at once.
+ * Every delete used to call `window.confirm` inline with its own wording,
+ * which meant no consistent phrasing and — more to the point — no single seam
+ * to replace. D-2's dialog drops in HERE and nowhere else: the call sites were
+ * already promise-based, so swapping the native modal for a real dialog was
+ * not also an async refactor of every caller.
  *
- * The signature is deliberately promise-based even though window.confirm is
- * synchronous, so swapping in a real dialog later is not also an async
- * refactor of every caller.
+ * If no dialog host is mounted this throws rather than falling back to
+ * `window.confirm`. A silent fallback would mean the app quietly reverts to
+ * the thing this replaced, on the exact code path where being wrong deletes
+ * something.
  */
+
+let host = null;
+
+/** Called by ConfirmDialog when it mounts. Returns its own unregister. */
+export function registerConfirmHost(fn) {
+  host = fn;
+  return () => { if (host === fn) host = null; };
+}
+
+function ask(request) {
+  if (!host) {
+    throw new Error(
+      'No confirmation dialog is mounted — <ConfirmDialog /> must be rendered at the app root. ' +
+      'Refusing to fall back to window.confirm on a destructive action.'
+    );
+  }
+  return host(request);
+}
 
 /**
  * @param {object} opts
- * @param {string} opts.action   what is about to happen, e.g. "Delete variable"
- * @param {string} opts.subject  what it happens to, e.g. "justification"
- * @param {string} [opts.detail] the consequence a person needs before deciding
+ * @param {string} opts.action    what is about to happen, e.g. "Delete variable"
+ * @param {string} opts.subject   what it happens to, e.g. "justification"
+ * @param {string} [opts.detail]  the consequence a person needs before deciding
+ * @param {string} [opts.sysId]   the exact record, shown in mono — the subject
+ *                                is a label and labels are not unique
+ * @param {string} [opts.confirmLabel]
  * @returns {Promise<boolean>}
  */
-export function confirmDestructive({ action, subject, detail }) {
-  const lines = [`${action} "${subject}"?`];
-  if (detail) lines.push('', detail);
-  // eslint-disable-next-line no-alert
-  return Promise.resolve(window.confirm(lines.join('\n')));
+export function confirmDestructive({ action, subject, detail, sysId, confirmLabel }) {
+  return ask({ kind: 'confirm', action, subject, detail, sysId, confirmLabel, danger: true });
+}
+
+/**
+ * The non-destructive twin — "create this?", "reinstall?". Same dialog, no
+ * danger styling, so an ordinary confirmation does not cry wolf in red.
+ */
+export function confirmAction({ action, subject, detail, sysId, confirmLabel }) {
+  return ask({ kind: 'confirm', action, subject, detail, sysId, confirmLabel, danger: false });
+}
+
+/**
+ * `window.prompt` had exactly one call site (renaming a chat), and leaving one
+ * native modal in an app that just removed all the others reads as a bug.
+ * @returns {Promise<string|null>} null when cancelled
+ */
+export function promptFor({ action, subject, label, value = '', confirmLabel = 'Save' }) {
+  return ask({ kind: 'prompt', action, subject, label, value, confirmLabel, danger: false });
 }
 
 /**
@@ -39,4 +76,11 @@ export const CONSEQUENCE = {
     'A UI policy condition comparing against this value can never be true again.',
   guide: 'The guide is removed; the catalog items it referenced are not.',
   producer: 'The producer and its variables are removed; records it already created are not.',
+  flow:
+    'Its Fluent source is removed and the application reinstalled, which deletes the record on the instance.',
+  incident: 'This cannot be undone.',
+  sla: 'Clocks already running on existing records are not removed by this.',
+  session: 'The transcript goes with it. Its audit trail does too — the Audit page will no longer show what this session did.',
+  connection:
+    'The stored username and password are cleared. Nothing on the ServiceNow instance is changed.',
 };

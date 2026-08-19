@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, val, disp } from '../api.js';
+import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
+import { toast } from '../components/toast.js';
 import ReferenceField from '../components/ReferenceField.jsx';
 
 const EMPTY = {
@@ -90,7 +92,13 @@ export default function Incidents() {
   };
 
   const remove = async () => {
-    if (!window.confirm(`Delete incident ${form._number}? This cannot be undone.`)) return;
+    const ok = await confirmDestructive({
+      action: 'Delete incident',
+      subject: form._number,
+      sysId: editingId,
+      detail: CONSEQUENCE.incident,
+    });
+    if (!ok) return;
     setBusy(true); setError('');
     try {
       await api.del(`/incidents/${editingId}`);

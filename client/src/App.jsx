@@ -9,6 +9,8 @@ import Flows from './pages/Flows.jsx';
 import Sla from './pages/Sla.jsx';
 import Access from './pages/Access.jsx';
 import Settings from './pages/Settings.jsx';
+import Toasts from './components/Toasts.jsx';
+import ConfirmDialog from './components/ConfirmDialog.jsx';
 
 const TITLES = {
   '/': 'Dashboard',
@@ -78,6 +80,11 @@ export default function App() {
           </div>
         </div>
       </div>
+      {/* Mounted once, outside the routed content: a toast raised by a page
+          that is navigating away must still be readable, and the dialog must
+          outlive the row that opened it. */}
+      <Toasts />
+      <ConfirmDialog />
     </BrowserRouter>
   );
 }

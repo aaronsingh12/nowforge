@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, sse } from '../api.js';
 import Markdown from '../components/Markdown.jsx';
+import { confirmDestructive, promptFor, CONSEQUENCE } from '../components/confirm.js';
+import { toast } from '../components/toast.js';
 
 const SAMPLES = [
   'Create a "Laptop Request" catalog item with 6 sensible variables including a reference to sys_user and a model select box',
@@ -167,14 +169,25 @@ export default function AgentChat() {
   };
 
   const rename = async (s) => {
-    const title = window.prompt('Rename this chat', s.title || '');
+    const title = await promptFor({
+      action: 'Rename this chat',
+      label: 'Title',
+      value: s.title || '',
+    });
     if (title === null) return;
-    try { await api.patch(`/agent/sessions/${s.id}`, { title }); refreshSessions(); }
-    catch (e) { setBanner(e.message); }
+    try { await api.patch(`/agent/sessions/${s.id}`, { title }); refreshSessions(); toast.success('Chat renamed.'); }
+    catch (e) { toast.error(e.message); }
   };
 
   const remove = async (s) => {
-    if (!window.confirm(`Delete "${s.title || 'this chat'}"? The transcript and its audit trail go with it.`)) return;
+    const ok = await confirmDestructive({
+      action: 'Delete chat',
+      subject: s.title || 'this chat',
+      sysId: s.id,
+      detail: CONSEQUENCE.session,
+      confirmLabel: 'Delete chat',
+    });
+    if (!ok) return;
     try {
       await api.del(`/agent/sessions/${s.id}`);
       if (s.id === sessionId) {
@@ -182,7 +195,8 @@ export default function AgentChat() {
         setSessionId(id);
       }
       refreshSessions();
-    } catch (e) { setBanner(e.message); }
+      toast.success('Chat deleted.');
+    } catch (e) { toast.error(e.message); }
   };
 
   const runSearch = async (e) => {
@@ -193,7 +207,7 @@ export default function AgentChat() {
       const res = await api.get(`/agent/memory/search?sessions=true&q=${encodeURIComponent(q)}`);
       setSearchHits(res);
       if (res.degraded) setMemory({ mode: 'keyword', degraded: true, command: res.command, reason: res.reason });
-    } catch (err) { setBanner(err.message); }
+    } catch (err) { toast.error(err.message); }
   };
 
   const rail = searchHits ? searchHits.sessions : sessions;
