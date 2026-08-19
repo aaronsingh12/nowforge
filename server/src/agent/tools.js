@@ -1,5 +1,5 @@
 import { table, testConnection } from '../servicenow/client.js';
-import { getSchema, referenceLookup, tableLookup } from '../servicenow/schema.js';
+import { getSchema, toCompactSchema, referenceLookup, tableLookup } from '../servicenow/schema.js';
 import { catalog } from '../servicenow/catalog.js';
 import { flows, designFlowBlueprint } from '../servicenow/flows.js';
 import { capability, createLiveFlow, listManaged, removeManaged, smokeRun, verify } from '../servicenow/fluent.js';
@@ -25,20 +25,51 @@ export const TOOLS = [
   {
     name: 'get_table_schema',
     description:
-      'Get the full field schema for any ServiceNow table, walking the inheritance chain (e.g. incident→task). Returns each field with type, label, mandatory flag, choice list values, and — for reference fields — the referenced table. ALWAYS call this before creating/updating records on an unfamiliar table.',
+      'Get the field schema for any ServiceNow table, walking the inheritance chain (e.g. incident -> task). ' +
+      'Returns EVERY field with its type, reference target, and mandatory flag — so if a field is not in the list, ' +
+      'it does not exist on that table, and you can say so with confidence. Choice values are counted, not listed; ' +
+      'pass expand:["state","priority"] to see the values for the specific fields you are about to write to. ' +
+      'ALWAYS call this before creating or updating records on an unfamiliar table.',
     mutating: false,
     inputSchema: {
       type: 'object',
-      properties: { table: { type: 'string', description: 'Table name, e.g. incident, sc_cat_item' } },
+      properties: {
+        table: { type: 'string', description: 'Table name, e.g. incident, sc_cat_item' },
+        expand: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Field names whose choice values you need in full. Keep this short — name only the fields the current task touches.',
+        },
+        full: {
+          type: 'boolean',
+          description: 'Rarely needed. Returns labels, max lengths and defaults for every field as well — large enough to crowd out the rest of the conversation.',
+        },
+      },
       required: ['table'],
     },
-    execute: async ({ table: t }) => {
+    execute: async ({ table: t, expand, full }) => {
       const schema = await getSchema(t);
       // A-4 write path: fields the platform computes accept a write and then
       // discard it (trap #5's family). Recording them here means the next
       // session starts knowing, instead of rediscovering it by shipping a bug.
       try { recordCalculatedFields(t, schema); } catch { /* the ledger is never load-bearing for a read */ }
-      return schema;
+      /*
+       * D-7 — compact by default, and the default is the correctness fix.
+       *
+       * MEASURED on dev442675: `incident` carries 91 fields and serialises to
+       * 29,152 characters, about 8,330 tokens. The agent's history budget at
+       * the time was 5,452, so one schema read was 153% of everything the
+       * conversation could hold — and the orchestrator's 8,000-character result
+       * cap hid that instead of fixing it. Fields are sorted alphabetically, so
+       * the cut landed after `company`: the agent saw 26 of 91 fields, never
+       * saw `state`, `priority` or `assignment_group`, and — because `u_`
+       * fields sort last — could not observe that a custom field was ABSENT.
+       *
+       * Compact mode is 1,007 tokens for the same table, 8.3x smaller, with
+       * every field name present. `full` stays for the UI and codegen paths
+       * that genuinely need labels and defaults.
+       */
+      return full ? schema : toCompactSchema(schema, { expand });
     },
   },
   {

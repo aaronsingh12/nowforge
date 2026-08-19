@@ -146,3 +146,76 @@ export async function tableLookup(q = '', limit = 15) {
   const rows = await table.query('sys_db_object', { query, fields: 'name,label', display: 'false', limit });
   return rows.map((r) => ({ name: r.name, label: r.label || r.name }));
 }
+
+/**
+ * D-7 — the compact schema, and why the full one cannot be what the agent reads.
+ *
+ * MEASURED against dev442675: `incident` inherits from `task` and carries 91
+ * fields. Serialised in full that is 29,152 characters — about 8,330 estimated
+ * tokens. The agent's entire history budget at the time was 5,452, so ONE
+ * schema read was 153% of everything the conversation was allowed to remember.
+ *
+ * The orchestrator's 8,000-character result cap hid this rather than fixing it,
+ * and hid it in the worst possible way: fields are sorted alphabetically, so
+ * the cut landed after `company` and the agent saw 26 of 91 fields. It never
+ * saw `description`, `priority`, `state`, `urgency` or `assignment_group` —
+ * and, because `u_` fields sort last, it could never observe that a custom
+ * field was ABSENT. It was being asked to check for fields it was structurally
+ * incapable of seeing.
+ *
+ * So the diet is not a size optimisation, it is a correctness fix. Compact mode
+ * keeps what the agent reasons with — every field name, its type, what it
+ * references, whether it is mandatory — and drops what it almost never needs at
+ * read time: labels, max lengths, defaults, and the choice VALUES, which are
+ * counted instead of listed. Choices come back on request, per field, because
+ * a task mentions two or three of them and pays for ninety-eight.
+ */
+function compactField(f) {
+  const bits = [`${f.name}: ${f.type || 'unknown'}`];
+  if (f.reference) bits.push(`-> ${f.reference}`);
+  if (f.mandatory) bits.push('*mandatory');
+  if (f.readOnly) bits.push('ro');
+  if (f.choices?.length) bits.push(`+${f.choices.length} choices`);
+  return bits.join(' ');
+}
+
+/**
+ * `expand` names the fields whose choice VALUES are wanted in full. Anything
+ * not named is counted only. Unknown names are reported rather than ignored —
+ * asking to expand a field that does not exist is exactly the signal the agent
+ * needs, and silently returning nothing reads as "this field has no choices".
+ */
+export function toCompactSchema(schema, { expand = [] } = {}) {
+  const wanted = new Set((expand || []).map((s) => String(s).trim()).filter(Boolean));
+  const byName = new Map(schema.fields.map((f) => [f.name, f]));
+  const expanded = {};
+  const unknown = [];
+  for (const name of wanted) {
+    const f = byName.get(name);
+    if (!f) { unknown.push(name); continue; }
+    expanded[name] = f.choices?.length
+      ? f.choices.map((c) => `${c.value} = ${c.label}`)
+      : '(no choice list on this field)';
+  }
+
+  const out = {
+    table: schema.table,
+    hierarchy: schema.hierarchy,
+    fieldCount: schema.fields.length,
+    legend: 'name: type [-> referenced table] [*mandatory] [ro = read-only] [+N choices]',
+    // Every field name, always. This list is what makes "that field does not
+    // exist on this table" a conclusion the agent can actually reach.
+    fields: schema.fields.map(compactField),
+  };
+  if (Object.keys(expanded).length) out.choices = expanded;
+  if (unknown.length) {
+    out.expandNotFound = unknown;
+    out.expandNote =
+      `These field names do not exist on ${schema.table}: ${unknown.join(', ')}. ` +
+      'The fields list above is complete, so treat them as absent rather than assuming they were omitted.';
+  }
+  if (!Object.keys(expanded).length) {
+    out.note = 'Choice values are counted, not listed. To see them, call get_table_schema again with expand: ["state","priority"] naming only the fields you need.';
+  }
+  return out;
+}

@@ -39,7 +39,10 @@ function hydrate(messages) {
     if (e.role === 'user') {
       out.push({ id: uid(), kind: 'user', text: e.text });
     } else if (e.role === 'assistant') {
-      if (e.text) out.push({ id: uid(), kind: 'assistant', text: e.text });
+      // Whitespace is not text. D-7 stops blank turns being written at all, but
+      // sessions recorded before it still hold them, and `if (e.text)` is
+      // truthiness — a stored newline rendered as an empty bubble on replay.
+      if (e.text?.trim()) out.push({ id: uid(), kind: 'assistant', text: e.text });
       for (const tc of e.toolCalls || []) {
         out.push({ id: uid(), kind: 'tool', toolId: tc.id, name: tc.name, input: tc.input, status: 'done' });
       }
@@ -70,6 +73,8 @@ export default function AgentChat() {
   );
   const [loadingSession, setLoadingSession] = useState(false);
   const [digestCount, setDigestCount] = useState(0);
+  // The three measured budget numbers for this session, streamed at meta time.
+  const [budget, setBudget] = useState(null);
   const [query, setQuery] = useState('');
   const [searchHits, setSearchHits] = useState(null);
   const [memory, setMemory] = useState(null);
@@ -136,23 +141,36 @@ export default function AgentChat() {
     try { await api.post('/system/settings', { agent: { autoApprove: v } }); } catch { /* noop */ }
   };
 
-  const send = async (text) => {
+  /*
+   * `retry` re-issues a turn that died before it wrote anything — an empty
+   * completion, or the upstream falling over mid-turn. The message is NOT
+   * echoed again as a user bubble and the server does not append it again:
+   * the same history is sent a second time. Anything else would quietly change
+   * the conversation the model sees while claiming to repeat it.
+   */
+  const send = async (text, { retry = false } = {}) => {
     const message = (text ?? input).trim();
     if (!message || running) return;
-    setInput('');
+    if (!retry) setInput('');
     setRunning(true);
-    push({ kind: 'user', text: message });
+    if (!retry) push({ kind: 'user', text: message });
     try {
-      await sse('/agent/chat', { sessionId, message }, (evt) => {
+      await sse('/agent/chat', { sessionId, message, retry }, (evt) => {
         switch (evt.type) {
           case 'meta': setMeta(evt); break;
-          case 'assistant_text': push({ kind: 'assistant', text: evt.text }); break;
+          // The three measured numbers, for the digest badge's tooltip.
+          case 'budget': setBudget(evt); break;
+          // Same rule as hydrate(): only real content becomes a bubble.
+          case 'assistant_text': if (evt.text?.trim()) push({ kind: 'assistant', text: evt.text }); break;
           case 'remembered': push({ kind: 'system', text: `Remembered — ${evt.fact.value}` }); break;
           case 'compacted':
             setDigestCount((n) => n + 1);
+            // One line, and it stays one line. The detail lives on the badge's
+            // tooltip, where it is available without costing every reader the
+            // vertical space.
             push({
               kind: 'system',
-              text: `Compacted ${evt.entries} earlier messages into a digest (${evt.tokensBefore} → ${evt.tokensAfter} tokens). Artifacts and sys_ids were carried across.`,
+              text: `Compacted ${evt.entries} earlier messages into a digest (${evt.tokensBefore} → ${evt.tokensAfter} tokens, budget ${evt.budget}). Artifacts and sys_ids were carried across.`,
             });
             break;
           case 'tool_use':
@@ -167,7 +185,7 @@ export default function AgentChat() {
           case 'tool_result':
             patchMsg((m) => m.kind === 'tool' && m.toolId === evt.id, { status: evt.isError ? 'error' : 'done', output: evt.output });
             break;
-          case 'error': push({ kind: 'error', text: evt.message }); break;
+          case 'error': push({ kind: 'error', text: evt.message, retryable: evt.retryable, retryOf: message }); break;
           default: break;
         }
       });
@@ -328,6 +346,28 @@ export default function AgentChat() {
                 {digestCount} digest{digestCount === 1 ? '' : 's'}
               </span>
             )}
+            {/* The budget used to be a constant nobody could see was wrong — it
+                was 4% of this model's context window for a while, and the only
+                symptom was the transcript quietly compacting three times in one
+                turn. On hover, so it informs without taking up room. */}
+            {budget && (
+              <span
+                className="badge"
+                title={
+                  `Model context: ${budget.modelCtx.toLocaleString()} tokens (${budget.modelCtxSource})
+` +
+                  `Self-imposed cap: ${budget.ceiling.toLocaleString()}
+` +
+                  `Fixed overhead: ${budget.fixed.toLocaleString()} (system prompt + tool schemas)
+` +
+                  `Output headroom: ${budget.headroom.toLocaleString()}
+` +
+                  `History budget: ${budget.budget.toLocaleString()}`
+                }
+              >
+                {(budget.budget / 1000).toFixed(1)}k history budget
+              </span>
+            )}
             {meta?.decoding?.reality && !/honoured\./.test(meta.decoding.reality) && (
               <span className="badge amber" title={meta.decoding.reality}>non-reproducible</span>
             )}
@@ -388,7 +428,26 @@ export default function AgentChat() {
               return <div key={m.id} className="msg"><div className="system-note">{m.text}</div></div>;
             }
             if (m.kind === 'error') {
-              return <div key={m.id} className="msg"><div className="bubble" style={{ borderColor: 'var(--red)' }}><span className="error-text">{m.text}</span></div></div>;
+              return (
+                <div key={m.id} className="msg">
+                  <div className="bubble" style={{ borderColor: 'var(--red)' }}>
+                    <span className="error-text">{m.text}</span>
+                    {m.retryable && (
+                      <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                        <button className="btn" disabled={running} onClick={() => send(m.retryOf, { retry: true })}>
+                          Retry
+                        </button>
+                        {/* Says whose fault it probably is. The old card named a
+                            finish reason and left the reader to guess. */}
+                        <span className="muted" style={{ fontSize: 12 }}>
+                          The model returned nothing — this is usually a transient load on Ollama&apos;s side.
+                          Nothing was written to the instance, and retrying re-sends the same conversation.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
             }
             if (m.kind === 'tool') {
               return (
