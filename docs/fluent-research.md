@@ -2946,3 +2946,105 @@ had been happening invisibly.
 | 42 | **An empty model turn, stored, bricks a session forever** | one conversation fails on every message with a wire error that names neither the session nor the message; every other conversation is fine | A turn with no text and no tool calls is the model returning nothing. Refuse it where it happens. Anything persisted into a replayed history is a permanent input, not a transient one |
 | 43 | **`content: null` is legal beside `tool_calls` and illegal without it** | you fix the wrong branch, confidently, because the OpenAI spec says null is allowed | It is allowed — for the tool-call case, which is the one that was already working. Probe each shape against the actual backend; the wire is where the spec and the implementation differ |
 | 44 | **A UI that renders an error is not a system that recorded one** | a red box in the browser, a silent terminal, and a bug that can only be found by reading the database | Log both halves into one stream. An SSE `error` frame, a rejected fetch and a render error are all invisible server-side unless the client sends them |
+
+---
+
+## 28. `Internal Server Error (ref: …)` — how a size limit turned out not to be one
+
+A session building a Flow + Subflow died on iterations 3 and 4 with a 500 from
+Ollama's cloud shim. The new log (§27) had already narrowed it: both failures
+carried `historyEntries: 19` and `26`, and the turn before each had returned a
+6–8KB tool result.
+
+### The measurement that nearly produced the wrong fix
+
+Replaying the captured request body — the exact bytes the app sent — bisected
+cleanly at first, and then stopped being clean:
+
+| variation | bytes | result |
+|---|---|---|
+| exactly what the app sent | 111,412 | **500** |
+| the same, without tools | 88,094 | 200 |
+| the same, last 6 messages only | 69,106 | 200 |
+| 30 tools | 106,685 | 200 |
+| **24 tools** | 100,710 | **500** |
+| 12 tools | 93,902 | 200 |
+
+24 tools failing while 30 passed is not a size limit. Sending the *same body*
+six times settled it:
+
+| body | successes |
+|---|---|
+| the full failing request | 4/6 |
+| the same, without tools | 5/6 |
+| half the history | 6/6 |
+
+Nothing deterministic. On that evidence the obvious fix — truncate history hard
+— would have degraded the agent's memory to work around someone else's flaky
+afternoon.
+
+### The measurement that produced the right one
+
+Single attempt, three sizes, **round-robin** so a bad minute could not fall
+disproportionately on one variant:
+
+| variant | bytes | ~tokens | success |
+|---|---|---|---|
+| full history (26 msgs) | 111,412 | 27,853 | **4/8 — 50%** |
+| last 16 msgs | 80,454 | 20,114 | **8/8 — 100%** |
+| last 8 msgs | 76,620 | 19,155 | **8/8 — 100%** |
+
+Every failure landed on the largest variant. So it *is* size-dependent — there
+is a cliff between ~20k and ~28k tokens — and the earlier non-monotonic bisect
+was noise being read as signal, because each of those cells was a single
+sample.
+
+### The defect this exposed in our own code
+
+`HISTORY_TOKEN_BUDGET = 24_000`, and its comment reads *"leaves room for the
+system prompt, the fact ledger, tools, and reasoning"*. Nothing ever subtracted
+them. Measured on this session:
+
+```
+system prompt   19,663 B   ~5,600 tokens
+tool schemas    23,288 B   ~6,650 tokens   (37 tools)
+history         88,034 B  ~22,000 tokens
+                          ~27,850 tokens total
+```
+
+A 24k *history* allowance therefore shipped a ~35k request at the limit. The
+budget was doing exactly what it said and still permitting the failure.
+
+Fixed by budgeting the **request**: `historyBudgetFor({system, tools})`
+subtracts the real overhead each turn, `REQUEST_TOKEN_BUDGET = 18_000` is what
+compaction aims at, and `REQUEST_TOKEN_CEILING = 20_000` — the largest size
+measured 8/8 — is where the warning fires. Those are two constants on purpose:
+warning at the budget would cry wolf at 19.5k, a size measured to succeed every
+time, and a warning that fires on healthy traffic is one nobody reads.
+
+Retry stays as well, because transient failures are real — bounded to 3
+attempts, on 5xx/429/408 and network errors only. **Never on a 4xx**: that is
+our own malformed request, and retrying one three times is how the
+`<nil>` defect of §26 stayed invisible as long as it did. The retry wraps the
+model call only; a mutation approved at the gate is never re-run by it.
+
+### Verified
+
+The session that could not complete a turn now completes three in a row.
+Compaction fires (a third digest, written mid-turn), the request drops from
+~27,850 to ~19,500 tokens, and the agent answers from its own history.
+
+Both numbers are properties of *this backend*, not of the model's advertised
+context window. A stronger provider raises them — the Settings swap this
+project is built around.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 45 | **One sample per cell is not a bisection** | a clean-looking size threshold with one cell out of order, which you explain away | Failure was probabilistic, so every cell was a coin flip. Repeat the SAME input N times before believing any boundary. The out-of-order cell is the signal, not the anomaly |
+| 46 | **A context budget that counts only the history is not a budget** | it is set to 24k, it is enforced, and requests still go out at 35k and fail | Count what the adapter actually serialises — system prompt and tool schemas included. Ours even said in a comment that it left room for them, and it never did |
+| 47 | **Retrying a 4xx makes a bug slower, not rarer** | an intermittent-looking failure that is actually a deterministic malformed request, now taking 3× as long to surface | Retry transport failures only: 5xx, 429, 408, dropped connections. A 4xx is your own request and must fail on the first attempt |
+| 48 | **Compacting to dodge a flaky upstream costs real capability** | the agent forgets things, and the flakiness is still there | Establish whether the failure is size-dependent or time-dependent FIRST, by interleaving variants. Only one of those is fixed by sending less |

@@ -415,6 +415,50 @@ declare global {
                         table: 'sys_hub_action_instance_v2'
                         id: '8a12e793640f4896bf5c917ff0f00c2a'
                     }
+                    hpie_create_problem: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '45ada9fe51604b4aaa69ec1f43ee5557'
+                    }
+                    hpie_incident_note_existing: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '5efe99b886fd48cc9c37761b257929b1'
+                    }
+                    hpie_incident_note_new: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '3e06eb699bad4e2ba80792fe44205d4d'
+                    }
+                    hpie_lookup_incident: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '2fd79da2726d48789ca589a5be9ed4ec'
+                    }
+                    hpie_lookup_problem: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '9aeb0fe666e64b93a0139b48fa20c76d'
+                    }
+                    hpie_out_existing: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '9d700e905888401c8e7f85f2605abb91'
+                    }
+                    hpie_out_new: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'dd5e0f12abf542cdbc7c1192d0a75123'
+                    }
+                    hpie_problem_note_new: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '5870de42428842cf8385b512f3135100'
+                    }
+                    hpie_subflow: {
+                        table: 'sys_hub_flow'
+                        id: '81909828f0db45c99ae91abae7fd380c'
+                    }
+                    hpie_try_problem_lookup: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'f0ef1da4706c4d7fbdec0ef279fa6dd1'
+                    }
+                    hpie_try_problem_lookup_catch: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'ed98a33db5814c8cac500702fb5927f6'
+                    }
                     hrc_ask_approval: {
                         table: 'sys_hub_action_instance_v2'
                         id: 'c3f8204bbaec45a6a142e29cfd35df4c'
@@ -797,6 +841,15 @@ declare global {
                     },
                     {
                         table: 'sys_documentation'
+                        id: '23ba6caee5864fa997a47f88e8db7ee5'
+                        key: {
+                            name: 'var__m_sys_hub_flow_output_81909828f0db45c99ae91abae7fd380c'
+                            element: 'problem_number'
+                            language: 'en'
+                        }
+                    },
+                    {
+                        table: 'sys_documentation'
                         id: '25bdeafeeae443c9b02c5c2047fd7b1e'
                         deleted: false
                         key: {
@@ -824,12 +877,38 @@ declare global {
                         }
                     },
                     {
+                        table: 'sys_hub_flow_output'
+                        id: '4a6c3214a2c54467a7c94193ca7ff4ae'
+                        key: {
+                            model: '81909828f0db45c99ae91abae7fd380c'
+                            element: 'was_created'
+                        }
+                    },
+                    {
                         table: 'sys_hub_flow_input'
                         id: '534b66eb43bf4841af6863e6d9b0d08a'
                         deleted: true
                         key: {
                             model: '5f71545a40184eda9b64654f7da65aa7'
                             element: 'taskSysId'
+                        }
+                    },
+                    {
+                        table: 'sys_documentation'
+                        id: '552d2b74dc714a6f8854fce7968bec68'
+                        key: {
+                            name: 'var__m_sys_hub_flow_output_81909828f0db45c99ae91abae7fd380c'
+                            element: 'was_created'
+                            language: 'en'
+                        }
+                    },
+                    {
+                        table: 'sys_documentation'
+                        id: '87b46691836542c59708743ab641055f'
+                        key: {
+                            name: 'var__m_sys_hub_flow_output_81909828f0db45c99ae91abae7fd380c'
+                            element: 'problem_sys_id'
+                            language: 'en'
                         }
                     },
                     {
@@ -848,6 +927,14 @@ declare global {
                         key: {
                             model: 'af90366362d04879b7ab39f6dc66bcc1'
                             element: 'taskTable'
+                        }
+                    },
+                    {
+                        table: 'sys_hub_flow_input'
+                        id: '96785a86f8d34efb8f736705e0fd9aef'
+                        key: {
+                            model: '81909828f0db45c99ae91abae7fd380c'
+                            element: 'incident_sys_id'
                         }
                     },
                     {
@@ -879,6 +966,15 @@ declare global {
                         }
                     },
                     {
+                        table: 'sys_documentation'
+                        id: 'b09c901c5bf44b95a6444c7cd456c330'
+                        key: {
+                            name: 'var__m_sys_hub_flow_input_81909828f0db45c99ae91abae7fd380c'
+                            element: 'incident_sys_id'
+                            language: 'en'
+                        }
+                    },
+                    {
                         table: 'sys_hub_flow_input'
                         id: 'b49bf5483c5f49e8a7539ad398cd3ba9'
                         deleted: false
@@ -895,6 +991,14 @@ declare global {
                             name: 'var__m_sys_hub_flow_output_5f71545a40184eda9b64654f7da65aa7'
                             element: 'notified'
                             language: 'en'
+                        }
+                    },
+                    {
+                        table: 'sys_hub_flow_output'
+                        id: 'c584e1c04fbd4805a915df2cc490fe16'
+                        key: {
+                            model: '81909828f0db45c99ae91abae7fd380c'
+                            element: 'problem_number'
                         }
                     },
                     {
@@ -942,6 +1046,14 @@ declare global {
                             name: 'var__m_sys_hub_flow_input_5f71545a40184eda9b64654f7da65aa7'
                             element: 'message'
                             language: 'en'
+                        }
+                    },
+                    {
+                        table: 'sys_hub_flow_output'
+                        id: 'fdd729e8579843fba46a198358e5a6e7'
+                        key: {
+                            model: '81909828f0db45c99ae91abae7fd380c'
+                            element: 'problem_sys_id'
                         }
                     },
                 ]

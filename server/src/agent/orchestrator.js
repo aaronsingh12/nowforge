@@ -11,7 +11,9 @@ import {
   loadHistory,
   recordToolEvent,
 } from '../memory/sessions.js';
-import { compactIfNeeded, buildDigestNote } from '../memory/compaction.js';
+import {
+  compactIfNeeded, buildDigestNote, historyBudgetFor, estimateTokens, REQUEST_TOKEN_CEILING,
+} from '../memory/compaction.js';
 import { recordVerificationFailure } from '../memory/facts.js';
 import { indexMessage } from '../memory/recall.js';
 
@@ -159,15 +161,32 @@ export async function runTurn(sessionId, userText, emit) {
       // A-3: fold the oldest span into a digest before it costs a turn. Runs
       // every iteration because a single turn's tool results can be what
       // pushes a session over budget, not just the next user message.
-      const compaction = await compactIfNeeded(sessionId);
+      //
+      // The budget is computed from what this turn will ACTUALLY send: the
+      // system prompt and the 37 tool schemas are ~11k tokens of fixed
+      // overhead, and not subtracting them is what let a "24k" allowance ship
+      // a 35k request that failed half the time (§28).
+      const provisionalSystem = buildSystemPrompt({ sessionId, digestNote: buildDigestNote(sessionId) });
+      const { budget, overhead } = historyBudgetFor({ system: provisionalSystem, tools: TOOLS });
+      const compaction = await compactIfNeeded(sessionId, { budget });
       if (compaction.compacted) emit({ type: 'compacted', ...compaction });
 
       const history = loadHistory(sessionId);
+      // Rebuilt after compaction, so a digest written just now is in the prompt.
+      const system = buildSystemPrompt({ sessionId, digestNote: buildDigestNote(sessionId) });
+      const requestTokens = overhead + estimateTokens(history);
+      log.debug('llm', `request ~${requestTokens} tokens (overhead ${overhead}, history budget ${budget})`);
+      if (requestTokens > REQUEST_TOKEN_CEILING) {
+        // Compaction could not get under the line — the recent turns alone are
+        // too big. Say so before the call rather than after it fails.
+        log.warn('llm', `request ~${requestTokens} tokens is past the measured-reliable ${REQUEST_TOKEN_CEILING}; ` +
+          'this backend gets unreliable above it (50% at ~28k)');
+      }
       const callStart = Date.now();
       let res;
       try {
         res = await chatTurn({
-          system: buildSystemPrompt({ sessionId, digestNote: buildDigestNote(sessionId) }),
+          system,
           history,
           tools: TOOLS,
           maxTokens: 4096,

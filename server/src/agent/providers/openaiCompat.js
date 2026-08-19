@@ -4,6 +4,8 @@
  * (tool calling requires a tool-capable local model, e.g. llama3.1, qwen2.5).
  */
 
+import { withRetry, retryable, isRetryableStatus } from './retry.js';
+
 const DEFAULTS = {
   openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' },
   ollama: { baseUrl: 'http://localhost:11434/v1', model: 'llama3.1' },
@@ -74,11 +76,28 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
   }
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    throw new Error(data?.error?.message || `${provider} API error (${res.status})`);
-  }
+
+  const payload = JSON.stringify(body);
+  const data = await withRetry(`${provider} chat`, async () => {
+    let res;
+    try {
+      res = await fetch(url, { method: 'POST', headers, body: payload });
+    } catch (err) {
+      // Nothing came back at all — the daemon is down, or the network blinked.
+      throw retryable(new Error(`${provider} unreachable at ${url}: ${err.message}`));
+    }
+    const parsed = await res.json().catch(() => null);
+    if (!res.ok) {
+      const err = new Error(parsed?.error?.message || `${provider} API error (${res.status})`);
+      err.status = res.status;
+      // A 4xx is our malformed request; retrying it three times only makes a
+      // clear bug slower to find.
+      if (isRetryableStatus(res.status)) err.retryable = true;
+      throw err;
+    }
+    return parsed;
+  });
+
   const choice = data.choices?.[0];
   const msg = choice?.message || {};
   const toolCalls = (msg.tool_calls || []).map((tc) => {

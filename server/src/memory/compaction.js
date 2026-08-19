@@ -31,8 +31,60 @@ import { codegenDecoding } from '../agent/decoding.js';
  */
 const CHARS_PER_TOKEN = 3.5;
 
-/** Leaves room for the system prompt, the fact ledger, tools, and reasoning. */
+/**
+ * What one request may total — history, system prompt and tool schemas together.
+ *
+ * Measured against gpt-oss:120b-cloud, single attempt, variants interleaved so
+ * a bad minute could not favour one of them:
+ *
+ *   ~27,900 tokens   4/8 succeeded
+ *   ~20,100 tokens   8/8
+ *   ~19,200 tokens   8/8
+ *
+ * Every failure was on the largest. 18k leaves margin under the cliff. This is
+ * a property of the backend, not of the model's advertised context window —
+ * a stronger provider can raise it, which is the Settings swap this project is
+ * built around.
+ */
+export const REQUEST_TOKEN_BUDGET = 18_000;
+
+/**
+ * The largest request measured as fully reliable (8/8 at ~20,100 tokens).
+ *
+ * Separate from the budget above on purpose. The budget is what compaction
+ * aims at, with margin; this is where the evidence of failure actually starts.
+ * Warning at the budget instead would cry wolf at 19.5k — a size measured to
+ * succeed every time — and a warning that fires on healthy traffic is one
+ * nobody reads when it matters.
+ */
+export const REQUEST_TOKEN_CEILING = 20_000;
+
+/**
+ * The history's share of that, once the fixed overhead is subtracted.
+ *
+ * This is the fix for a real defect rather than a tuning knob. The constant
+ * below is documented as "leaves room for the system prompt, the fact ledger,
+ * tools, and reasoning" — but nothing ever subtracted them, so a 24k history
+ * allowance shipped a ~35k request and failed half the time.
+ */
 export const HISTORY_TOKEN_BUDGET = 24_000;
+
+/** Below this, compacting harder costs more context than the request saves. */
+const MIN_HISTORY_TOKENS = 4_000;
+
+/** Token estimate for a plain string — the system prompt, or serialised tools. */
+export function estimateTextTokens(text) {
+  return Math.ceil(String(text || '').length / CHARS_PER_TOKEN);
+}
+
+/**
+ * The history budget for THIS turn, given what else is going in the envelope.
+ * Both inputs are what the adapter will actually serialise.
+ */
+export function historyBudgetFor({ system, tools }) {
+  const overhead = estimateTextTokens(system) + estimateTextTokens(JSON.stringify(tools ?? []));
+  return { budget: Math.max(MIN_HISTORY_TOKENS, REQUEST_TOKEN_BUDGET - overhead), overhead };
+}
 
 /** Turns always kept verbatim, however long they are. */
 export const KEEP_LAST_TURNS = 8;
