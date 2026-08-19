@@ -291,6 +291,13 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; margin: 0; }
 .rail-empty { color: var(--muted); font-size: 12.5px; text-align: center; padding: 20px 8px; }
 
 .rail-item {
+  /* `position: relative` is load-bearing, and its absence was a real bug.
+     The clipped .rail-actions below are position:absolute; with no positioned
+     ancestor their containing block became the initial one, so they escaped
+     .rail-list's overflow and extended documentElement.scrollHeight to 999px
+     against a 904px viewport. That made the whole DOCUMENT scrollable, which
+     is what the chat's auto-scroll then scrolled. */
+  position: relative;
   padding: 8px 9px; border-radius: var(--radius-sm); cursor: pointer;
   border: 1px solid transparent; margin-bottom: 3px;
   transition: background 120ms, border-color 120ms;

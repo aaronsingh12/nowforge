@@ -70,7 +70,7 @@ export default function AgentChat() {
   const [memory, setMemory] = useState(null);
 
   const { connected } = useHealth();
-  const bottom = useRef(null);
+  const msgsRef = useRef(null);
 
   useEffect(() => { localStorage.setItem(SESSION_KEY, sessionId); }, [sessionId]);
 
@@ -102,7 +102,22 @@ export default function AgentChat() {
     return () => { alive = false; };
   }, [sessionId]);
 
-  useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+  /**
+   * Keep the transcript pinned to the newest turn — by scrolling the message
+   * COLUMN, never by asking an element to scroll itself into view.
+   *
+   * `scrollIntoView` walks every scrollable ancestor, so the moment anything
+   * above the chat became scrollable it scrolled that too: the page slid down
+   * on load and again on every click that touched `messages`, taking the
+   * topbar with it. Setting scrollTop on the one container that should move
+   * cannot do that, whatever the layout above it is doing.
+   */
+  useEffect(() => {
+    const el = msgsRef.current;
+    if (!el) return;
+    const smooth = !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+  }, [messages]);
 
   const push = (m) => setMessages((ms) => [...ms, { id: uid(), ...m }]);
   const patchMsg = (match, patch) =>
@@ -319,7 +334,7 @@ export default function AgentChat() {
             useful to an instance, so this is a banner rather than a gate. */}
         <DisconnectedBanner />
 
-        <div className="msgs">
+        <div className="msgs" ref={msgsRef}>
           {loadingSession && (
             <div className="msg">
               <div className="bubble" style={{ minWidth: 320 }}><SkeletonLines lines={3} /></div>
@@ -406,7 +421,6 @@ export default function AgentChat() {
             }
             return null;
           })}
-          <div ref={bottom} />
         </div>
 
         <div className="chat-input">
