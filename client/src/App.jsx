@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
 import { useHealth } from './hooks/useHealth.js';
 import Dashboard from './pages/Dashboard.jsx';
@@ -50,11 +51,25 @@ function Topbar({ title }) {
 function Shell() {
   const { pathname } = useLocation();
   const title = TITLES[pathname] || 'NowForge';
+
+  // D-4 — the tab says which page you left open. With eight routes behind one
+  // title, a pinned NowForge tab was unidentifiable among its own siblings.
+  useEffect(() => {
+    document.title = pathname === '/' ? 'NowForge — Agentic ServiceNow Studio' : `${title} — NowForge`;
+  }, [pathname, title]);
+
   return (
     <div className="shell">
       <aside className="sidebar">
+        {/* The wordmark is unchanged; the mark is the same file the browser
+            tab loads, so the two can never drift apart. The subtitle stays on
+            its own full-width line — putting it beside the mark cost it 35px
+            and broke it onto two. */}
         <div className="logo">
-          Now<span className="forge">Forge</span>
+          <span className="logo-row">
+            <img className="logomark" src="/favicon.svg" alt="" width="26" height="26" aria-hidden="true" />
+            <span>Now<span className="forge">Forge</span></span>
+          </span>
           <span className="logo-sub">agentic servicenow studio</span>
         </div>
         <NavLink to="/" end className="navlink">Dashboard</NavLink>
@@ -92,7 +107,7 @@ function Shell() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Shell />
       {/* Mounted once, outside the routed content: a toast raised by a page
           that is navigating away must still be readable, the dialog must

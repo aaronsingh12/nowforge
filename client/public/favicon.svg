@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="NowForge">
+  <!--
+    The NowForge wordmark compressed to a mark: "NF" in verdigris on ink,
+    rounded square, hairline in verdigris-dim. Same three token values the
+    sidebar logo already uses (ink #0e1116, verdigris #57b57c, verdigris-dim
+    #2c4e3b), so the tab and the app are recognisably one thing.
+
+    The letters are PATHS, not <text>. A favicon renders outside the page, so
+    it cannot see the Sora webfont, and a text-based mark would silently fall
+    back to whatever the OS picked and look different on every machine.
+
+    The geometry was set by rendering it at 16px rather than by looking at it
+    large: the first pass left so much padding that the letters closed into a
+    smudge in the tab strip. Glyphs now occupy 56% of the square.
+
+    width and height are present as well as viewBox, and are load-bearing: an
+    SVG with only a viewBox has no intrinsic size, so an img reports
+    naturalWidth 0.
+
+    And this comment is written without CSS custom-property syntax on purpose.
+    A double hyphen is illegal inside an XML comment. Naming the tokens the
+    usual way put "- -ink" in here, which the HTML parser forgives when the
+    SVG is inlined and the XML parser does not when it is loaded through an
+    img or a link rel=icon. It failed silently in both places.
+  -->
+  <rect width="64" height="64" rx="15" fill="#0e1116"/>
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="none" stroke="#2c4e3b" stroke-width="2"/>
+  <g fill="#57b57c">
+    <!-- N -->
+    <rect x="12" y="14" width="6" height="36"/>
+    <rect x="26" y="14" width="6" height="36"/>
+    <polygon points="12,14 18,14 32,50 26,50"/>
+    <!-- F -->
+    <rect x="38" y="14" width="6" height="36"/>
+    <rect x="38" y="14" width="14" height="6"/>
+    <rect x="38" y="29" width="11" height="6"/>
+  </g>
+</svg>

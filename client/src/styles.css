@@ -55,6 +55,11 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; margin: 0; }
   font-weight: 700; font-size: 18px; letter-spacing: 0.2px;
   padding: 4px 10px 16px;
 }
+/* The mark sits beside the wordmark, on its own row. The subtitle keeps the
+   full 188px it had before — sharing the row with the mark left it 153px and
+   wrapped "studio" onto a second line, which moved every nav item down. */
+.logo-row { display: flex; align-items: center; gap: 9px; }
+.logomark { flex: none; }
 .logo .forge { color: var(--verdigris); }
 .logo-sub { display: block; font-family: var(--font-mono); font-size: 10px; color: var(--muted); font-weight: 400; margin-top: 2px; }
 .navlink {
