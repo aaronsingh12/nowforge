@@ -9,13 +9,32 @@ const DEFAULTS = {
   ollama: { baseUrl: 'http://localhost:11434/v1', model: 'llama3.1' },
 };
 
+/**
+ * Neutral history -> /chat/completions messages.
+ *
+ * Every `content` is a STRING, never null, and that is not defensive tidying —
+ * it is the fix for a session that could brick itself permanently. Measured
+ * against gpt-oss:120b-cloud through Ollama's /v1 shim:
+ *
+ *   assistant content:null, WITH tool_calls   200
+ *   assistant content:null, NO tool_calls     400  invalid message content
+ *                                                  type: <nil>
+ *   assistant content:'',   NO tool_calls     200
+ *
+ * The OpenAI spec allows a null content beside tool_calls, and Ollama honours
+ * that — but it rejects a bare null outright. So one stored assistant turn
+ * with no text and no tool calls made EVERY later turn in that session fail at
+ * the wire, with an error naming neither the session nor the message. Coercing
+ * here repairs histories that already contain one.
+ */
 function toOpenAiMessages(system, history) {
-  const out = [{ role: 'system', content: system }];
+  const str = (v) => (typeof v === 'string' ? v : v == null ? '' : String(v));
+  const out = [{ role: 'system', content: str(system) }];
   for (const m of history) {
     if (m.role === 'user') {
-      out.push({ role: 'user', content: m.text });
+      out.push({ role: 'user', content: str(m.text) });
     } else if (m.role === 'assistant') {
-      const msg = { role: 'assistant', content: m.text || null };
+      const msg = { role: 'assistant', content: str(m.text) };
       if (m.toolCalls?.length) {
         msg.tool_calls = m.toolCalls.map((tc) => ({
           id: tc.id,
@@ -26,7 +45,7 @@ function toOpenAiMessages(system, history) {
       out.push(msg);
     } else if (m.role === 'tool') {
       for (const r of m.results || []) {
-        out.push({ role: 'tool', tool_call_id: r.id, content: r.output });
+        out.push({ role: 'tool', tool_call_id: r.id, content: str(r.output) });
       }
     }
   }

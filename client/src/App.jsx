@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
 import { useHealth } from './hooks/useHealth.js';
+import { logToServer } from './logging.js';
 import Dashboard from './pages/Dashboard.jsx';
 import AgentChat from './pages/AgentChat.jsx';
 import Incidents from './pages/Incidents.jsx';
@@ -59,6 +60,8 @@ function Shell() {
   // title, a pinned NowHelpAssist tab was unidentifiable among its own siblings.
   useEffect(() => {
     document.title = pathname === '/' ? 'NowHelpAssist — Agentic ServiceNow Studio' : `${title} — NowHelpAssist`;
+    // Navigation in the terminal, so a later error has somewhere to belong.
+    logToServer('info', `page ${title}`);
   }, [pathname, title]);
 
   return (

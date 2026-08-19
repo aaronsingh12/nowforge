@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { log } from '../logging.js';
 
 /**
  * One SQLite file for everything NowHelpAssist needs to remember: sessions,
@@ -226,6 +227,7 @@ export function migrate(db) {
       db.exec(MIGRATIONS[v]);
       db.exec(`PRAGMA user_version = ${v + 1}`);
       db.exec('COMMIT');
+      log.info('storage', `migration ${v + 1} applied`);
     } catch (err) {
       db.exec('ROLLBACK');
       // Loud: a half-migrated database is worse than one that refuses to open.
@@ -265,7 +267,7 @@ export function getDb() {
   if (handle) return handle;
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const adopted = adoptLegacyDatabase();
-  if (adopted) console.log(`  storage: adopted ${path.basename(adopted)} as ${path.basename(DB_FILE)}`);
+  if (adopted) log.info('storage', `adopted ${path.basename(adopted)} as ${path.basename(DB_FILE)}`);
   const db = new DatabaseSync(DB_FILE);
 
   // WAL survives a hard kill mid-write, which is exactly the acceptance test

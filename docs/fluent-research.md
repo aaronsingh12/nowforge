@@ -2851,3 +2851,98 @@ the most ironic possible way to break it.
 |---|---|---|---|
 | 40 | **A rename is a find-and-replace until it hits an address** | the product renames cleanly, the build is green, and the next deploy silently creates a second scoped application beside the live one | Separate labels from addresses first. A ServiceNow scope, an app name, an identity marker a tool matches sources by, and any literal a verification spec asserts are all addresses — protect them explicitly, and write down why, or the next reader will "finish the job" |
 | 41 | **A renamed data file is a discarded data file** | the app starts, works perfectly, and has no history — the old database is sitting next to the new one | Rename the file *and* carry the data, checkpointing WAL first. The same applies to any localStorage key holding live state |
+
+---
+
+## 26. The empty turn, and why nothing was written down
+
+A session reported `invalid message content type: <nil> (ref: …)` on every
+message, forever. The UI showed a red box; the server terminal showed nothing,
+because the failure arrived as an SSE `error` event that the client rendered
+and dropped. Finding it meant reading the database by hand.
+
+### The bug
+
+The first hypothesis was wrong, and only a probe against the real backend
+showed it. Measured on `gpt-oss:120b-cloud` through Ollama's `/v1` shim:
+
+| assistant message | result |
+|---|---|
+| `content: null`, **with** `tool_calls` | **200** |
+| `content: null`, **no** `tool_calls` | **400** `invalid message content type: <nil>` |
+| `content: ''`, no `tool_calls` | **200** |
+
+So the guess — "OpenAI allows a null content beside tool_calls and Ollama does
+not" — was backwards. Ollama honours that case fine. What it rejects is a bare
+null, and the adapter emitted one for any assistant entry with empty text:
+`content: m.text || null`.
+
+That mattered because of what the orchestrator stored. When the model returns
+an empty turn — no text *and* no tool calls, which this model does — that was
+appended to the history as a message. Replayed on the next turn it became
+`{role:'assistant', content:null}` with no `tool_calls`, and the session was
+**permanently bricked**: every later message failed at the wire, with an error
+naming neither the session nor the offending entry.
+
+Scanning the live database found exactly one such row across 90 messages —
+`assistant text=EMPTY toolCalls=0` — and it was in the reported session.
+
+Fixed at both levels, because either alone is insufficient:
+
+- **The wire** coerces every `content` to a string. This repairs histories that
+  already contain the poison message, including the user's.
+- **The orchestrator** refuses to store an empty turn at all. A model returning
+  nothing is a failure to report, not a message to keep. The existing
+  "returned no content" guard only fired on `finish_reason: length`; this
+  catches the rest.
+
+### The reason it took a database read to find
+
+Nothing logged. That is the real defect, and it is now fixed separately: see
+§27.
+
+---
+
+## 27. One log stream
+
+`server/src/logging.js`, plus `POST /api/logs` and `client/src/logging.js` so
+the browser's half prints in the same terminal. Levels, a scope column, colour
+when stdout is a TTY, `LOG_LEVEL=debug` for the health poll and per-request
+reads.
+
+What it prints without being asked: every HTTP request with status and
+duration; every agent turn with its session, provider and model; every tool
+call with its arguments, outcome and elapsed time; every approval decision,
+with an explicit `UNGATED` warning when auto-approve let one through; every
+build run; every migration; and on the browser side every navigation,
+`console.error`/`warn`, uncaught exception, unhandled rejection, failed API
+call and render error, tagged with the route it happened on.
+
+Three properties that are load-bearing rather than nice:
+
+- **Secrets never reach it.** Request bodies are never printed, and structured
+  metadata goes through `redact()`, which masks `password`, `apiKey`,
+  `client_secret`, `Authorization` and friends at any depth. A falsy secret is
+  passed through as itself — `<redacted>` against an absent password would read
+  as one being stored.
+- **The browser half cannot loop.** A failure of the log transport is never
+  logged over the transport.
+- **Repeats collapse.** Consecutive identical entries become one line with a
+  count. StrictMode double-invokes every effect in dev, so each navigation
+  logged twice; more importantly a render loop would otherwise bury its own
+  cause under a hundred copies of its symptom.
+
+Immediately worth it: the first live run surfaced the bound PDI dropping a
+request (`Could not reach dev428633… Is the PDI awake?`) and the agent
+recovering by calling `test_connection` and retrying — a self-correction that
+had been happening invisibly.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 42 | **An empty model turn, stored, bricks a session forever** | one conversation fails on every message with a wire error that names neither the session nor the message; every other conversation is fine | A turn with no text and no tool calls is the model returning nothing. Refuse it where it happens. Anything persisted into a replayed history is a permanent input, not a transient one |
+| 43 | **`content: null` is legal beside `tool_calls` and illegal without it** | you fix the wrong branch, confidently, because the OpenAI spec says null is allowed | It is allowed — for the tool-call case, which is the one that was already working. Probe each shape against the actual backend; the wire is where the spec and the implementation differ |
+| 44 | **A UI that renders an error is not a system that recorded one** | a red box in the browser, a silent terminal, and a bug that can only be found by reading the database | Log both halves into one stream. An SSE `error` frame, a rejected fetch and a render error are all invisible server-side unless the client sends them |

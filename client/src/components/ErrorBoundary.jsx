@@ -1,5 +1,6 @@
 import { Component } from 'react';
 import { toast } from './toast.js';
+import { logToServer } from '../logging.js';
 
 /**
  * D-3 — the route-level failure card.
@@ -31,6 +32,10 @@ export default class ErrorBoundary extends Component {
     // Keep the console entry: this is a genuine defect, and swallowing it
     // would make the boundary itself a place where evidence goes missing.
     console.error('NowHelpAssist render error', error, info);
+    // The console patch would catch this too, but the component stack is the
+    // useful half and only exists here.
+    logToServer('error', `render error on ${this.props.where || 'a page'}: ${error?.message || error}`,
+      `${error?.stack || ''}\n\nComponent stack:${info?.componentStack || ''}`);
     this.setState({ info });
   }
 

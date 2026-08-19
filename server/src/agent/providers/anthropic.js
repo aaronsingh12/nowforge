@@ -19,7 +19,7 @@ function toAnthropicMessages(history) {
         content: (m.results || []).map((r) => ({
           type: 'tool_result',
           tool_use_id: r.id,
-          content: r.output,
+          content: typeof r.output === 'string' ? r.output : String(r.output ?? ''),
           ...(r.isError ? { is_error: true } : {}),
         })),
       });

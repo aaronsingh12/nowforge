@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { chatTurn, providerInfo } from './providers/index.js';
+import { log, ms, shortId } from '../logging.js';
 import { TOOLS, toolMap } from './tools.js';
 import { buildSystemPrompt } from './prompts.js';
 import { getSettings } from '../config/store.js';
@@ -147,7 +148,11 @@ export async function runTurn(sessionId, userText, emit) {
   let mutatingCallCount = 0;
   const userSeq = appendMessage(sessionId, { role: 'user', text: userText });
   indexMessage(sessionId, userSeq, 'user', userText);
-  emit({ type: 'meta', ...providerInfo() });
+  const info = providerInfo();
+  emit({ type: 'meta', ...info });
+  const turnStart = Date.now();
+  log.info('agent', `turn start  session=${shortId(sessionId)} ${info.provider}/${info.model}`,
+    { message: userText.slice(0, 200) });
 
   try {
     for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -158,12 +163,43 @@ export async function runTurn(sessionId, userText, emit) {
       if (compaction.compacted) emit({ type: 'compacted', ...compaction });
 
       const history = loadHistory(sessionId);
-      const res = await chatTurn({
-        system: buildSystemPrompt({ sessionId, digestNote: buildDigestNote(sessionId) }),
-        history,
-        tools: TOOLS,
-        maxTokens: 4096,
-      });
+      const callStart = Date.now();
+      let res;
+      try {
+        res = await chatTurn({
+          system: buildSystemPrompt({ sessionId, digestNote: buildDigestNote(sessionId) }),
+          history,
+          tools: TOOLS,
+          maxTokens: 4096,
+        });
+      } catch (err) {
+        // The message shape is the usual cause of a provider 400, and it is
+        // invisible from the error alone — so name it here rather than making
+        // someone read the database to find out.
+        log.error('llm', `iteration ${i + 1} failed after ${ms(callStart)} — ${err.message}`, {
+          historyEntries: history.length,
+          shapes: history.map((m) => (m.role === 'assistant'
+            ? `assistant(text=${m.text ? 'str' : 'EMPTY'},calls=${m.toolCalls?.length || 0})`
+            : m.role === 'tool' ? `tool(${(m.results || []).length})` : m.role)),
+        });
+        throw err;
+      }
+      log.debug('llm', `iteration ${i + 1}  ${ms(callStart)}  stop=${res.stopReason || '—'}  ` +
+        `text=${res.text ? res.text.length + 'ch' : 'none'}  calls=${res.toolCalls?.length || 0}`);
+
+      // An assistant turn with no text AND no tool calls is not a turn — it is
+      // the model having returned nothing. Storing it poisoned the session:
+      // replayed, it became `content: null` with no tool_calls, which this
+      // backend rejects outright, so every later turn failed at the wire with
+      // an error naming neither the session nor the message. Report it here,
+      // where the cause is still visible, and leave the history usable.
+      if (!res.text && !res.toolCalls?.length) {
+        throw new Error(
+          `The model returned an empty turn — no text and no tool call (finish reason: ${res.stopReason || 'unknown'}). ` +
+          'Nothing was written to the instance. Send the message again; if it keeps happening, ' +
+          'the model in Settings may not be answering reliably.'
+        );
+      }
 
       const assistantSeq = appendMessage(sessionId, {
         role: 'assistant',
@@ -197,6 +233,7 @@ export async function runTurn(sessionId, userText, emit) {
           });
           continue;
         }
+        log.info('agent', `turn done  session=${shortId(sessionId)}  ${ms(turnStart)}`);
         emit({ type: 'done' });
         return;
       }
@@ -209,14 +246,18 @@ export async function runTurn(sessionId, userText, emit) {
           continue;
         }
         emit({ type: 'tool_use', id: call.id, name: call.name, input: call.input, mutating: tool.mutating });
+        const toolStart = Date.now();
+        log.info('tool', `${call.name}${tool.mutating ? ' (mutating)' : ''}`, call.input);
 
         // Permission gate — the heart of the platform's safety model.
         let approval = null;
         if (tool.mutating && !agent.autoApprove) {
           const approvalId = crypto.randomUUID();
           emit({ type: 'approval_required', approvalId, name: call.name, input: call.input });
+          log.warn('gate', `approval required: ${call.name} — waiting for the user`);
           const approved = await awaitApproval(state, approvalId);
           approval = approved ? 'approved' : 'rejected';
+          log.info('gate', `${call.name} ${approved ? 'APPROVED' : 'REJECTED'} by the user`);
           emit({ type: 'approval_resolved', approvalId, approved });
           if (!approved) {
             const output = 'The user rejected this operation. Do not retry it; ask what they would like to change.';
@@ -230,6 +271,7 @@ export async function runTurn(sessionId, userText, emit) {
           }
         } else if (tool.mutating) {
           approval = 'auto';
+          log.warn('gate', `${call.name} ran UNGATED — auto-approve is on, nobody saw it`);
         }
         if (tool.mutating) mutatingCallCount += 1;
 
@@ -247,9 +289,11 @@ export async function runTurn(sessionId, userText, emit) {
           // thing this agent ever learns about an instance, and it used to be
           // thrown away with the session.
           recordVerificationFailure(call.name, raw);
+          log.info('tool', `${call.name} ok  ${ms(toolStart)}  ${output.length}ch`);
           emit({ type: 'tool_result', id: call.id, name: call.name, output, isError: false });
         } catch (err) {
           const output = `Error: ${err.message}${err.detail ? ` — ${JSON.stringify(err.detail).slice(0, 300)}` : ''}`;
+          log.error('tool', `${call.name} failed  ${ms(toolStart)} — ${err.message}`, err.detail || err);
           results.push({ id: call.id, name: call.name, output, isError: true });
           recordToolEvent(sessionId, {
             kind: 'tool_call', name: call.name, payload: call.input, result: output,
@@ -265,6 +309,7 @@ export async function runTurn(sessionId, userText, emit) {
     emit({ type: 'assistant_text', text: stopped });
     emit({ type: 'done' });
   } catch (err) {
+    log.error('agent', `turn failed  session=${shortId(sessionId)}  ${ms(turnStart)} — ${err.message}`, err);
     emit({ type: 'error', message: err.message });
   }
 }

@@ -1,15 +1,38 @@
+import { logToServer } from './logging.js';
+
 const BASE = '/api';
 
+/**
+ * Every call reports its outcome to the server terminal.
+ *
+ * Failures are logged with the status and the server's own message, so a
+ * 400 the user only saw as a red box is greppable next to the request that
+ * caused it. Bodies are NOT logged: this app posts a ServiceNow password
+ * and an API key through here.
+ */
 async function request(method, path, body) {
-  const res = await fetch(BASE + path, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const start = Date.now();
+  let res;
+  try {
+    res = await fetch(BASE + path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (err) {
+    // The server is unreachable — the one failure the server cannot log.
+    logToServer('error', `${method} ${path} — network failure: ${err.message}`);
+    throw err;
+  }
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
-  if (!res.ok) throw new Error(data?.message || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const message = data?.message || `Request failed (${res.status})`;
+    logToServer('error', `${method} ${path} → ${res.status}  ${message}`, data?.detail);
+    throw new Error(message);
+  }
+  logToServer('debug', `${method} ${path} → ${res.status}  ${Date.now() - start}ms`);
   return data;
 }
 
@@ -36,6 +59,7 @@ export async function sse(path, body, onEvent, method = 'POST') {
   if (!res.ok || !res.body) {
     let msg = 'Stream failed';
     try { msg = (await res.json()).message || msg; } catch { /* keep default */ }
+    logToServer('error', `${method} ${path} (stream) → ${res.status}  ${msg}`);
     throw new Error(msg);
   }
   const reader = res.body.getReader();
@@ -51,7 +75,16 @@ export async function sse(path, body, onEvent, method = 'POST') {
       buf = buf.slice(idx + 2);
       for (const line of chunk.split('\n')) {
         if (line.startsWith('data: ')) {
-          try { onEvent(JSON.parse(line.slice(6))); } catch { /* ignore parse errors */ }
+          let evt = null;
+          try { evt = JSON.parse(line.slice(6)); }
+          catch (err) { logToServer('warn', `${path} sent an unparseable SSE frame: ${err.message}`); }
+          if (evt) {
+            // The failure that started all this arrived here, was rendered as
+            // a red box, and was never written down anywhere.
+            if (evt.type === 'error') logToServer('error', `${path} stream error: ${evt.message}`, evt.detail);
+            try { onEvent(evt); }
+            catch (err) { logToServer('error', `handler for ${path} threw on a ${evt.type} event: ${err.message}`, err.stack); }
+          }
         }
       }
     }

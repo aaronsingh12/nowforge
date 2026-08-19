@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { getDb } from './db.js';
 import { getSettings } from '../config/store.js';
+import { log, shortId } from '../logging.js';
 
 /**
  * D-5 — the audit trail.
@@ -60,6 +61,7 @@ export function startBuildRun({ kind, label = null, request = null, session = nu
      VALUES (?, ?, ?, ?, ?, ?, 'running', ?, NULL, 0, ?, NULL)`
   ).run(id, kind, label, instance, actor, session, request === null ? null : json(request), now());
   dropped.set(id, 0);
+  log.info('build', `${kind} started  run=${shortId(id)}  ${label || ''}`);
   return id;
 }
 
@@ -73,17 +75,19 @@ export function recordBuildEvent(runId, event) {
   } catch (err) {
     // Loud in the log, counted in the row, never fatal to the build in flight.
     dropped.set(runId, (dropped.get(runId) || 0) + 1);
-    console.error(`NowHelpAssist audit: dropped a build event for run ${runId}: ${err.message}`);
+    log.error('audit', `dropped a build event for run ${shortId(runId)}: ${err.message}`);
   }
 }
 
 export function finishBuildRun(runId, { status, summary = null }) {
   if (!runId) return;
   try {
+    const lost = dropped.get(runId) || 0;
     getDb().prepare('UPDATE build_runs SET status = ?, summary = ?, dropped = ?, finished = ? WHERE id = ?')
-      .run(status, summary === null ? null : json(summary), dropped.get(runId) || 0, now(), runId);
+      .run(status, summary === null ? null : json(summary), lost, now(), runId);
+    log[status === 'ok' ? 'info' : 'error']('build', `run=${shortId(runId)} ${status}` + (lost ? `  (${lost} events dropped)` : ''));
   } catch (err) {
-    console.error(`NowHelpAssist audit: could not close run ${runId}: ${err.message}`);
+    log.error('audit', `could not close run ${shortId(runId)}: ${err.message}`);
   } finally {
     dropped.delete(runId);
   }

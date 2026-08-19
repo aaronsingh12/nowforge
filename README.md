@@ -333,6 +333,43 @@ Modeled on Claude Code / opencode:
                  facts (GET · POST) · facts/:id (DELETE) · facts/seed
 ```
 
+## Logs
+
+Both halves of the app write to the terminal running the server — the browser's
+included, forwarded over `POST /api/logs`. A stack trace in a devtools console
+nobody has open is not evidence.
+
+```
+┌──────────────────────────────────────────────┐
+│ NowHelpAssist  ·  http://localhost:4000      │
+│ instance   https://devXXXXXX.service-now.com │
+│ model      ollama · gpt-oss:120b-cloud       │
+│ storage    …/server/data/nowhelpassist.db    │
+│ log level  info                              │
+└──────────────────────────────────────────────┘
+07:36:41.900 INFO  tool      query_records
+      │ {"table":"incident","limit":2,"query":"active=true"}
+07:36:52.520 ERROR tool      query_records failed  10.6s — Could not reach the instance
+07:37:01.431 INFO  tool      create_record (mutating)
+07:37:01.432 WARN  gate      approval required: create_record — waiting for the user
+07:37:01.438 INFO  gate      create_record REJECTED by the user
+07:39:51.206 ERROR ui        uncaught TypeError: undefined is not a function (/audit)
+```
+
+Every request with its status and duration, every agent turn, every tool call
+with arguments and elapsed time, every approval decision — including a loud
+`UNGATED` warning when auto-approve lets one through — every build run, and
+from the browser every navigation, console error, uncaught exception, unhandled
+rejection, failed API call and render error, tagged with the route.
+
+- `LOG_LEVEL=debug` adds the health poll and per-request client timings;
+  `LOG_LEVEL=warn` cuts it to problems only.
+- `NO_COLOR=1`, or piping to a file, drops the ANSI codes.
+- **Secrets are never printed.** Request bodies are not logged at all, and
+  structured metadata is redacted by key at any depth — this app holds a
+  ServiceNow password and an API key, and a debug log is exactly how those get
+  out.
+
 ## Known caveats
 
 - Order-guide rule-base writes target `sc_cat_item_guide_items`; verify the table name on your release (constant `GUIDE_RULE_TABLE` in `server/src/servicenow/catalog.js`).
