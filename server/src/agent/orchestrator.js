@@ -222,7 +222,7 @@ export async function runTurn(sessionId, userText, emit) {
             const output = 'The user rejected this operation. Do not retry it; ask what they would like to change.';
             results.push({ id: call.id, name: call.name, output, isError: true });
             recordToolEvent(sessionId, {
-              kind: 'tool_call', name: call.name, payload: call.input,
+              kind: 'tool_call', name: call.name, payload: call.input, result: output,
               resultStatus: 'rejected', mutating: true, approval,
             });
             emit({ type: 'tool_result', id: call.id, name: call.name, output, isError: true });
@@ -237,8 +237,10 @@ export async function runTurn(sessionId, userText, emit) {
           const raw = await tool.execute(call.input || {});
           const output = truncate(JSON.stringify(raw ?? null, null, 1));
           results.push({ id: call.id, name: call.name, output, isError: false });
+          // The result is the audit trail's payload, not a nicety: the sys_id
+          // of whatever was just created exists here and nowhere else.
           recordToolEvent(sessionId, {
-            kind: 'tool_call', name: call.name, payload: call.input,
+            kind: 'tool_call', name: call.name, payload: call.input, result: output,
             resultStatus: 'ok', mutating: tool.mutating, approval,
           });
           // A-4 write path: a verification that FAILED is the most valuable
@@ -250,7 +252,7 @@ export async function runTurn(sessionId, userText, emit) {
           const output = `Error: ${err.message}${err.detail ? ` — ${JSON.stringify(err.detail).slice(0, 300)}` : ''}`;
           results.push({ id: call.id, name: call.name, output, isError: true });
           recordToolEvent(sessionId, {
-            kind: 'tool_call', name: call.name, payload: call.input,
+            kind: 'tool_call', name: call.name, payload: call.input, result: output,
             resultStatus: 'error', mutating: tool.mutating, approval,
           });
           emit({ type: 'tool_result', id: call.id, name: call.name, output, isError: true });

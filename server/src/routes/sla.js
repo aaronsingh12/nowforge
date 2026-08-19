@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { startBuildRun, finishBuildRun, auditedEmit } from '../memory/audit.js';
 import { listSlas, getSla, slaMeta, createSla, updateSla, deleteSla, validateSlaInput, verifySla } from '../servicenow/sla.js';
 
 export const slaRouter = Router();
@@ -29,7 +30,9 @@ slaRouter.post('/verify', async (req, res) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const write = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const run = startBuildRun({ kind: 'sla_verify', label: name, request: { name, toleranceSec, waitSec } });
+  const emit = auditedEmit(run, write);
   const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
     const result = await verifySla(name, emit, {
@@ -37,8 +40,10 @@ slaRouter.post('/verify', async (req, res) => {
       waitSec: Number(waitSec) || undefined,
     });
     emit({ type: 'done', result });
+    finishBuildRun(run, { status: result?.ok === false ? 'error' : 'ok', summary: result });
   } catch (err) {
     emit({ type: 'error', message: err.message });
+    finishBuildRun(run, { status: 'error', summary: { message: err.message } });
   } finally {
     clearInterval(keepAlive);
     res.end();

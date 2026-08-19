@@ -8,6 +8,7 @@ import Catalog from './pages/Catalog.jsx';
 import Flows from './pages/Flows.jsx';
 import Sla from './pages/Sla.jsx';
 import Access from './pages/Access.jsx';
+import Audit from './pages/Audit.jsx';
 import Settings from './pages/Settings.jsx';
 import Toasts from './components/Toasts.jsx';
 import ConfirmDialog from './components/ConfirmDialog.jsx';
@@ -21,6 +22,7 @@ const TITLES = {
   '/flows': 'Flow Designer',
   '/sla': 'SLA Definitions',
   '/access': 'Access Control',
+  '/audit': 'Audit',
   '/settings': 'Settings',
 };
 
@@ -79,6 +81,7 @@ function Shell() {
         <NavLink to="/flows" className="navlink">Flows</NavLink>
         <NavLink to="/sla" className="navlink">SLA</NavLink>
         <NavLink to="/access" className="navlink">Access</NavLink>
+        <NavLink to="/audit" className="navlink">Audit</NavLink>
         <NavLink to="/settings" className="navlink">Settings</NavLink>
         <div className="sidebar-foot">v0.1 · phase 1</div>
       </aside>
@@ -96,6 +99,7 @@ function Shell() {
               <Route path="/flows" element={<Flows />} />
               <Route path="/sla" element={<Sla />} />
               <Route path="/access" element={<Access />} />
+              <Route path="/audit" element={<Audit />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </ErrorBoundary>

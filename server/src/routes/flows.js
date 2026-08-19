@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { flows, designFlowBlueprint, blueprintToBusinessRule } from '../servicenow/flows.js';
 import { capability, createLiveFlow, listManaged, removeManaged, smokeRun, verify } from '../servicenow/fluent.js';
+import { startBuildRun, finishBuildRun, auditedEmit } from '../memory/audit.js';
 
 export const flowsRouter = Router();
 
@@ -31,15 +32,21 @@ flowsRouter.post('/live', async (req, res) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => {
+  const write = (event) => {
     try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
   };
+  // D-5: this installs a whole application onto the instance, so it is
+  // auditable activity and not just progress on a screen.
+  const run = startBuildRun({ kind: 'flow_build', label: firstLine(text), request: { spec: text, updates: updates || null } });
+  const emit = auditedEmit(run, write);
   const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
     const result = await createLiveFlow(text, emit, { updates: updates || null });
     emit(result.ok ? { type: 'done', result } : { type: 'error', ...result });
+    finishBuildRun(run, { status: result.ok ? 'ok' : 'error', summary: result });
   } catch (err) {
     emit({ type: 'error', message: err.message });
+    finishBuildRun(run, { status: 'error', summary: { message: err.message } });
   } finally {
     clearInterval(keepAlive);
     res.end();
@@ -60,13 +67,19 @@ flowsRouter.post('/live/verify', async (req, res) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const write = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  // Verification writes a real record and deletes it again, which is exactly
+  // the kind of thing someone reading an audit trail needs to see accounted for.
+  const run = startBuildRun({ kind: 'flow_verify', label: name, request: { name } });
+  const emit = auditedEmit(run, write);
   const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
     const result = await verify(name, emit);
     emit({ type: 'done', result });
+    finishBuildRun(run, { status: result?.ok === false ? 'error' : 'ok', summary: result });
   } catch (err) {
     emit({ type: 'error', message: err.message });
+    finishBuildRun(run, { status: 'error', summary: { message: err.message } });
   } finally {
     clearInterval(keepAlive);
     res.end();
@@ -79,20 +92,40 @@ flowsRouter.post('/live/verify', async (req, res) => {
  * Never invoked as part of a deploy — the caller has to ask for it.
  */
 flowsRouter.post('/live/smoke', async (req, res, next) => {
+  const { table, values, wait_ms } = req.body || {};
+  if (!table || !values) return res.status(400).json({ message: 'table and values are required' });
+  // Not SSE, but it creates a record on the instance, so it is recorded as a
+  // single-shot run. An audit that only covered the streaming endpoints would
+  // be an audit with a hole in exactly the shape of "writes we did quickly".
+  const run = startBuildRun({ kind: 'flow_smoke', label: table, request: { table, values, waitMs: wait_ms || 45000 } });
   try {
-    const { table, values, wait_ms } = req.body || {};
-    if (!table || !values) return res.status(400).json({ message: 'table and values are required' });
     const result = await smokeRun({ table, values, waitMs: wait_ms || 45000 });
+    finishBuildRun(run, { status: result.ok ? 'ok' : 'error', summary: result });
     res.status(result.ok ? 200 : 422).json(result);
-  } catch (err) { next(err); }
+  } catch (err) {
+    finishBuildRun(run, { status: 'error', summary: { message: err.message } });
+    next(err);
+  }
 });
 
 flowsRouter.delete('/live/:name', async (req, res, next) => {
+  const name = decodeURIComponent(req.params.name);
+  const run = startBuildRun({ kind: 'flow_delete', label: name, request: { name } });
   try {
-    const result = await removeManaged(decodeURIComponent(req.params.name));
+    const result = await removeManaged(name);
+    finishBuildRun(run, { status: result.ok ? 'ok' : 'error', summary: result });
     res.status(result.ok ? 200 : 422).json(result);
-  } catch (err) { next(err); }
+  } catch (err) {
+    finishBuildRun(run, { status: 'error', summary: { message: err.message } });
+    next(err);
+  }
 });
+
+/** A run's label has to fit a table cell; the request itself is kept whole. */
+function firstLine(text) {
+  const line = String(text || '').split('\n').find((l) => l.trim()) || '';
+  return line.trim().slice(0, 160);
+}
 
 /** A blueprint is already a precise design — flatten it into a spec sentence set. */
 function blueprintToSpec(bp) {

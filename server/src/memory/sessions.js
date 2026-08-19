@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { getDb } from './db.js';
 import { getSettings } from '../config/store.js';
+import { currentActor } from './audit.js';
 
 /**
  * A-1 — session persistence.
@@ -140,24 +141,36 @@ export function loadMessages(sessionId) {
 /**
  * The audit trail. Separate from messages because compaction rewrites history
  * and must never rewrite the record of what was done to the instance.
+ *
+ * D-5 added `result`, `instance` and `actor`. The first is what made this
+ * table able to answer its own question: a created record's sys_id exists only
+ * in the tool's return value, so without it "what did this session do to the
+ * instance" was unanswerable from the audit trail itself. The other two are
+ * captured per event rather than read off the session, because the bound
+ * connection can change underneath a long conversation and the trail has to
+ * say which instance a write actually landed on.
  */
 export function recordToolEvent(sessionId, event) {
   const db = getDb();
   if (!getSession(sessionId)) createSession({ id: sessionId });
   const row = db.prepare('SELECT COALESCE(MAX(seq), -1) AS m FROM tool_events WHERE session = ?').get(sessionId);
   const seq = (row?.m ?? -1) + 1;
+  const { instance, actor } = currentActor();
   db.prepare(
-    `INSERT INTO tool_events (session, seq, kind, name, payload, result_status, mutating, approval, ts)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO tool_events (session, seq, kind, name, payload, result, result_status, mutating, approval, instance, actor, ts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     sessionId,
     seq,
     event.kind,
     event.name ?? null,
     event.payload === undefined ? null : JSON.stringify(event.payload),
+    event.result === undefined || event.result === null ? null : String(event.result),
     event.resultStatus ?? null,
     event.mutating ? 1 : 0,
     event.approval ?? null,
+    instance,
+    actor,
     now()
   );
   return seq;

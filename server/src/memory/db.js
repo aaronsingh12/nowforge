@@ -154,6 +154,59 @@ const MIGRATIONS = [
     FOREIGN KEY (session) REFERENCES sessions(id) ON DELETE CASCADE
   );
   `,
+
+  // 5 — the audit trail (D-5)
+  //
+  // Two gaps this closes, both of which made \`tool_events\` unable to answer
+  // the question it exists for.
+  //
+  // (a) It recorded WHAT was called and whether it succeeded, but never what
+  //     came back — and the sys_id of the thing that was created is in the
+  //     result, nowhere else. "Reconstruct what this session did to the
+  //     instance" was unanswerable from the table named after it.
+  // (b) It is keyed on an agent session, so every build driven from the UI —
+  //     a flow deploy, a catalog UI policy, an SLA verification, each of which
+  //     writes to the instance through the SDK — left no trace anywhere.
+  //
+  // \`actor\` and \`instance\` are captured per event rather than read from the
+  // session, because the bound connection can change underneath a session and
+  // the audit has to say which instance a write actually landed on.
+  `
+  ALTER TABLE tool_events ADD COLUMN result TEXT;
+  ALTER TABLE tool_events ADD COLUMN actor TEXT;
+  ALTER TABLE tool_events ADD COLUMN instance TEXT;
+
+  -- One row per UI-driven build. These are long (a Fluent build and a whole-
+  -- application install take about a minute), so the run and its event stream
+  -- are separate: the run is the auditable unit, the events are the evidence.
+  CREATE TABLE IF NOT EXISTS build_runs (
+    id       TEXT PRIMARY KEY,
+    kind     TEXT NOT NULL,
+    label    TEXT,
+    instance TEXT,
+    actor    TEXT,
+    session  TEXT,               -- set when an agent turn drove it; null for UI
+    status   TEXT NOT NULL,      -- running | ok | error
+    request  TEXT,
+    summary  TEXT,
+    dropped  INTEGER NOT NULL DEFAULT 0,
+    started  TEXT NOT NULL,
+    finished TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS build_events (
+    run     TEXT NOT NULL,
+    seq     INTEGER NOT NULL,
+    type    TEXT,
+    payload TEXT,
+    ts      TEXT NOT NULL,
+    PRIMARY KEY (run, seq),
+    FOREIGN KEY (run) REFERENCES build_runs(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_build_runs_started ON build_runs(started DESC);
+  CREATE INDEX IF NOT EXISTS idx_tool_events_ts ON tool_events(ts DESC);
+  `,
 ];
 
 /**

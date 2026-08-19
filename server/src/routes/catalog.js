@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { startBuildRun, finishBuildRun, auditedEmit } from '../memory/audit.js';
 import { catalog, variableTypes } from '../servicenow/catalog.js';
 import {
   listPoliciesForItem, getPolicy, createPolicy, updatePolicy, deletePolicy,
@@ -128,13 +129,21 @@ catalogRouter.post('/policies', async (req, res) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const write = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const run = startBuildRun({
+    kind: 'ui_policy_create',
+    label: (req.body || {}).short_description || 'catalog UI policy',
+    request: req.body || {},
+  });
+  const emit = auditedEmit(run, write);
   const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
     const result = await createPolicy(req.body || {}, emit);
     emit({ type: 'done', result });
+    finishBuildRun(run, { status: 'ok', summary: result });
   } catch (err) {
     emit({ type: 'error', message: err.message, detail: err.detail || null });
+    finishBuildRun(run, { status: 'error', summary: { message: err.message, detail: err.detail || null } });
   } finally {
     clearInterval(keepAlive);
     res.end();
@@ -152,12 +161,21 @@ catalogRouter.patch('/policies/:sysId', async (req, res) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const write = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const run = startBuildRun({
+    kind: 'ui_policy_update',
+    label: (req.body || {}).short_description || req.params.sysId,
+    request: { sys_id: req.params.sysId, ...(req.body || {}) },
+  });
+  const emit = auditedEmit(run, write);
   const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
-    emit({ type: 'done', result: await updatePolicy(req.params.sysId, req.body || {}, emit) });
+    const result = await updatePolicy(req.params.sysId, req.body || {}, emit);
+    emit({ type: 'done', result });
+    finishBuildRun(run, { status: 'ok', summary: result });
   } catch (err) {
     emit({ type: 'error', message: err.message, detail: err.detail || null });
+    finishBuildRun(run, { status: 'error', summary: { message: err.message, detail: err.detail || null } });
   } finally {
     clearInterval(keepAlive);
     res.end();
@@ -172,12 +190,17 @@ catalogRouter.delete('/policies/:sysId', async (req, res) => {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const write = (event) => { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ } };
+  const run = startBuildRun({ kind: 'ui_policy_delete', label: req.params.sysId, request: { sys_id: req.params.sysId } });
+  const emit = auditedEmit(run, write);
   const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
-    emit({ type: 'done', result: await deletePolicy(req.params.sysId, emit) });
+    const result = await deletePolicy(req.params.sysId, emit);
+    emit({ type: 'done', result });
+    finishBuildRun(run, { status: 'ok', summary: result });
   } catch (err) {
     emit({ type: 'error', message: err.message });
+    finishBuildRun(run, { status: 'error', summary: { message: err.message } });
   } finally {
     clearInterval(keepAlive);
     res.end();
