@@ -319,6 +319,18 @@ declare global {
                         id: '0c379ef11dd346fc819c9f9eadf5e9d9'
                         deleted: true
                     }
+                    etdm_add_work_note: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '1a83dd5e20ad4506b8a4a1c3ea10d7f6'
+                    }
+                    etdm_call_notify_manager: {
+                        table: 'sys_hub_sub_flow_instance_v2'
+                        id: 'f7ce05224be34522b957ba0f4c061542'
+                    }
+                    etdm_escalate_to_duty_manager: {
+                        table: 'sys_hub_flow'
+                        id: '39507ca8439f4d0e8c764db2b3d3838e'
+                    }
                     flag_high_risk_change_flow: {
                         table: 'sys_hub_flow'
                         id: 'bb2a09da78684982b31daf9a0edf3cff'
@@ -562,6 +574,68 @@ declare global {
                         id: '92cb08f2551d4ae0b3d52873ccbf1e5d'
                         deleted: false
                     }
+                    mlsa_mgr_group_lookup: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'f5825a108b544aaf820e924a457a3eb7'
+                    }
+                    mlsa_sec_group_lookup: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '24e080557ad242b5ac6c59e2fb33e780'
+                    }
+                    mlsra_else_manager_rejected: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'bd15e4f800214b10be937de20ff405f4'
+                    }
+                    mlsra_else_security_rejected: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '6e4a55c7ee5443e6beaf741670e318ea'
+                    }
+                    mlsra_flow: {
+                        table: 'sys_hub_flow'
+                        id: '0700e176908f492c9daa80f99fd4de56'
+                    }
+                    mlsra_if_manager_approved: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '116a934a48ba4bcca24b0600366ad11e'
+                    }
+                    mlsra_if_security_approved: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '70763565246f4bafac1756a78bf03cc5'
+                    }
+                    mlsra_lookup_manager_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '8ee1ebc537fb4ef2b0bbb77cfd94501d'
+                        deleted: true
+                    }
+                    mlsra_lookup_security_group: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '6322105e851844388d7c2a7a5f9ab2f4'
+                        deleted: true
+                    }
+                    mlsra_manager_approval: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '85ab7b58890c47a78714d171a0b39f3e'
+                    }
+                    mlsra_security_approval: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '4c0bd275ae8e421382a9b2fb251ffa51'
+                    }
+                    mlsra_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '0b80e8241bec4a5e9a08920c92345597'
+                    }
+                    mlsra_update_approved: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '2925a6817f09448faf7e0c5688ec2ea2'
+                    }
+                    mlsra_update_rejected_manager: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '7cd643f584334539a8d47ebae710b504'
+                    }
+                    mlsra_update_rejected_security: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'dc037ba8259848108c0714f0e509cecb'
+                    }
                     nm_has_manager: {
                         table: 'sys_hub_flow_logic_instance_v2'
                         id: '834bd04cf6684bc6b7109848c7d58257'
@@ -692,6 +766,59 @@ declare global {
                         table: 'sys_module'
                         id: '1fda3d027fcf423e90c0e17dc5298ea2'
                     }
+                    rmah_else_no_manager: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '41d893acbe374b2bad39ad06418a1c7d'
+                    }
+                    rmah_hr_approval_no_mgr: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '0ffa9233cb764d4db2c61dba84da0dc7'
+                    }
+                    rmah_hr_approved_no_mgr: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'e67b872d9b1c4a1998d3714036c39a3f'
+                    }
+                    rmah_if_manager: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '48c3b3a1ac584dfa917209f9ad0a6bf5'
+                    }
+                    rmah_send_email_no_mgr: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'fa9d0b718885448cb851342bd7c3cbb4'
+                    }
+                    rmh_flow: {
+                        table: 'sys_hub_flow'
+                        id: '238b6aa158e14273ad0f58cd310ce483'
+                    }
+                    rmh_hr_approval: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'bb0696a7e9ae45f2bc5e268663e98796'
+                    }
+                    rmh_if_hr_approved: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '18496af9f3854835ac1217ec4f57c03f'
+                    }
+                    rmh_if_manager_approved: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '4aeaffe06a464e67bdfd1f806085da41'
+                    }
+                    rmh_manager_approval: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'ba847f93b36e4398b64ac482697cc9ce'
+                    }
+                    rmh_manager_lookup: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'd69269ae382b47539af69925b1463e28'
+                        deleted: true
+                    }
+                    rmh_send_email: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '845b9dc7dd1d4902824ca81e1deb648a'
+                    }
+                    rmh_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '5bf58a62cf6e48459a31f10afb232fd1'
+                    }
                     send_high_priority_email: {
                         table: 'sys_hub_action_instance_v2'
                         id: '322c28009aa244d89bc607cc05da3c7f'
@@ -711,6 +838,170 @@ declare global {
                     smoke_test_trigger: {
                         table: 'sys_hub_trigger_instance_v2'
                         id: '061486ac8eda4cc6aa85be20b0eeb565'
+                    }
+                    sra_approval_else: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '93f16780d3de4909b0b6f48ee18a58fb'
+                    }
+                    sra_approval_if: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'db9e81608a554dafaa2342dd1d00b88a'
+                    }
+                    sra_create_task: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '6098d572a38f49668b6bd62ce8f03f2a'
+                    }
+                    sra_flow: {
+                        table: 'sys_hub_flow'
+                        id: 'fec554d419dc458690390ddbbbcb6d11'
+                    }
+                    sra_manager_approval: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'c8159aebd187433ebdde2cb8f725e842'
+                    }
+                    sra_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: '7503cd58b73f4c88bae64bf7f9a8f4c7'
+                    }
+                    sra_update_req_approved: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'b8b609e4dd024a49942626cf54f7e877'
+                    }
+                    sra_update_req_rejected: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'a124f8e9ce454d5bbc68d34f621d7977'
+                    }
+                    srf_approval_help: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '94fba8811c5d48e0a59d71cbafa14180'
+                    }
+                    srf_approval_itsm_high: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'a75dc7e0b5e346029b185c284f2b80c4'
+                    }
+                    srf_approval_itsm_low: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'ebb90b9883b14adb8e52251cdf1dc6bf'
+                    }
+                    srf_approval_network_high: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '06eb92b90c2048ecb6f78f2c42c95b68'
+                    }
+                    srf_approval_network_low: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'e6bc0b6c68dc4fc390f0d7532f74061d'
+                    }
+                    srf_create_task_high: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'b9aa67f6331b4ab7802c40ce05b3bc2e'
+                    }
+                    srf_create_task_low: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '42075126bc8c418ba6a7fe39580828e9'
+                    }
+                    srf_else_low_price: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '0e561331d5064c0daecff985977d4688'
+                    }
+                    srf_end_help: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '05af991cb733461f97ae0ce35c74ca3e'
+                    }
+                    srf_end_itsm_high: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '144ffd75d0134c1f94dd34cedac73c0d'
+                    }
+                    srf_end_itsm_low: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'a5f40d0ea7c541408faf4f5617599229'
+                    }
+                    srf_end_network_high: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '8d0b29a5d53141e49c5b7575171d1b9b'
+                    }
+                    srf_end_network_low: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '11cc6d8aaadf4473b293f506f1a0bd54'
+                    }
+                    srf_flow: {
+                        table: 'sys_hub_flow'
+                        id: '0973f797d66849d2bc577dd52661d52c'
+                    }
+                    srf_if_help_approved: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '31f131c6adf34b9fb0a4659fcc20a013'
+                    }
+                    srf_if_itsm_approved_high: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '8cb8a7503c684181ad56b2235ec98894'
+                    }
+                    srf_if_itsm_approved_low: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '8171a87b02a24b7f812ae6541989a8a0'
+                    }
+                    srf_if_network_approved_high: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'bd4215c661ea4ded8a2129c310f809d4'
+                    }
+                    srf_if_network_approved_low: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '24ccd3e4a26b4dfabeef399a16c85d07'
+                    }
+                    srf_if_price_high: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'dd370ca389364bfb8a5b766493cfb39c'
+                    }
+                    srf_reject_help: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '34519b7f6d5a4377ad0817097fe6b0a7'
+                    }
+                    srf_reject_itsm_high: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'fa9f123d5902464a887eb160e89b7c21'
+                    }
+                    srf_reject_itsm_low: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'e5a11ef448064b7385bd7d397673c59b'
+                    }
+                    srf_reject_network_high: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: '3f965175f8024bfdbe2b4fea7bf98997'
+                    }
+                    srf_reject_network_low: {
+                        table: 'sys_hub_flow_logic_instance_v2'
+                        id: 'b6cebbb6bb954bf98be2c495f7663ed5'
+                    }
+                    srf_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: 'bdca632f57f14af3982aba1893909ef7'
+                    }
+                    srf_update_req_high: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '004c964793d743ad92edf6e7c6cc7f50'
+                    }
+                    srf_update_req_low: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '80cf5cd58e244a71821d22165b79f6dc'
+                    }
+                    srf_update_req_reject_help: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '7a9f986b2a3e437b9d44b6307fdf6d40'
+                    }
+                    srf_update_req_reject_itsm_high: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '3c4aa32228a3450698d797a52fb6212a'
+                    }
+                    srf_update_req_reject_itsm_low: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: 'ba1c7b1ac9a541a58b1c9b9fe7e35376'
+                    }
+                    srf_update_req_reject_network_high: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '2442dfd54da84206abe4053d31a12a3d'
+                    }
+                    srf_update_req_reject_network_low: {
+                        table: 'sys_hub_action_instance_v2'
+                        id: '18a25b0589eb424bbe96f4a499686306'
                     }
                     triage_high_urgency_incident_flow: {
                         table: 'sys_hub_flow'
@@ -862,6 +1153,14 @@ declare global {
                         }
                     },
                     {
+                        table: 'sys_hub_flow_input'
+                        id: '0e83c728e4b54874ae1bde715bf50b2b'
+                        key: {
+                            model: '39507ca8439f4d0e8c764db2b3d3838e'
+                            element: 'task'
+                        }
+                    },
+                    {
                         table: 'sys_documentation'
                         id: '0fdbcb22ec3c4054909d2429563fb05c'
                         deleted: true
@@ -878,6 +1177,15 @@ declare global {
                         key: {
                             name: 'var__m_sys_hub_flow_output_af90366362d04879b7ab39f6dc66bcc1'
                             element: 'managerEmail'
+                            language: 'en'
+                        }
+                    },
+                    {
+                        table: 'sys_documentation'
+                        id: '164dc60db6db4376a225fde460965118'
+                        key: {
+                            name: 'var__m_sys_hub_flow_input_39507ca8439f4d0e8c764db2b3d3838e'
+                            element: 'task'
                             language: 'en'
                         }
                     },
@@ -928,6 +1236,14 @@ declare global {
                         }
                     },
                     {
+                        table: 'sys_hub_flow_input'
+                        id: '3877804172674e6092944e37f7979a1f'
+                        key: {
+                            model: '39507ca8439f4d0e8c764db2b3d3838e'
+                            element: 'message'
+                        }
+                    },
+                    {
                         table: 'sys_hub_flow_output'
                         id: '4a6c3214a2c54467a7c94193ca7ff4ae'
                         key: {
@@ -950,6 +1266,15 @@ declare global {
                         key: {
                             name: 'var__m_sys_hub_flow_output_81909828f0db45c99ae91abae7fd380c'
                             element: 'was_created'
+                            language: 'en'
+                        }
+                    },
+                    {
+                        table: 'sys_documentation'
+                        id: '59e3176f8d044310a973e13b99bba369'
+                        key: {
+                            name: 'var__m_sys_hub_flow_input_39507ca8439f4d0e8c764db2b3d3838e'
+                            element: 'message'
                             language: 'en'
                         }
                     },

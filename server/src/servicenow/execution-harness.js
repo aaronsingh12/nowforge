@@ -142,13 +142,60 @@ export function wrapScript({ body, sinkName, token }) {
   ].join('\n');
 }
 
-/** The FlowAPI call itself. Separate so a test can read it without an instance. */
-export function buildSubflowScript({ qualified, inputs = {} }) {
+const TABLE_RE = /^[a-z0-9_]+$/i;
+
+/**
+ * The FlowAPI call itself. Separate so a test can read it without an instance.
+ *
+ * `declaredInputs` is the subflow's own input contract, and it is not optional
+ * decoration: a REFERENCE input will not take a sys_id string. Measured, the
+ * runner answers
+ *
+ *   com.snc.process_flow.exception.ProcessAutomationException:
+ *   Invalid GlideRecord input format found
+ *
+ * and never starts the flow. A reference input has to be handed a real,
+ * positioned GlideRecord, so one is fetched in the script and passed by
+ * variable. A sys_id that matches nothing throws there, with the table and the
+ * id named, instead of producing an execution that fails obscurely later.
+ */
+export function buildSubflowScript({ qualified, inputs = {}, declaredInputs = [] }) {
   assertQualifiedName(qualified);
+  const byName = new Map((declaredInputs || []).map((i) => [i.name, i]));
+
+  const prelude = [];
+  const pairs = [];
+  let n = 0;
+  for (const [name, value] of Object.entries(inputs)) {
+    const declared = byName.get(name);
+    const isEmpty = value === '' || value === null || value === undefined;
+    if (declared?.type !== 'reference' || isEmpty) {
+      // An empty reference is passed through as an empty value: fetching a
+      // GlideRecord for "nothing" would be a record we invented.
+      pairs.push(`${jsLiteral(name)}: ${jsLiteral(value ?? '')}`);
+      continue;
+    }
+    if (!TABLE_RE.test(String(declared.reference || ''))) {
+      throw new Error(
+        `Input "${name}" is a reference but declares no reference table, so the harness cannot fetch the ` +
+        'record the runner requires. Add referenceTable to the ReferenceColumn in the subflow source.'
+      );
+    }
+    const varName = `__in${n++}`;
+    prelude.push(
+      `  var ${varName} = new GlideRecord(${jsLiteral(declared.reference)});`,
+      `  if (!${varName}.get(${jsLiteral(String(value))})) {`,
+      `    throw 'input ${name}: no ${declared.reference} record ' + ${jsLiteral(String(value))};`,
+      '  }'
+    );
+    pairs.push(`${jsLiteral(name)}: ${varName}`);
+  }
+
   return [
+    ...prelude,
     `  var __res = sn_fd.FlowAPI.getRunner().subflow('${qualified}')`,
     '    .inBackground()',
-    `    .withInputs(${jsLiteral(inputs)})`,
+    `    .withInputs({ ${pairs.join(', ')} })`,
     '    .run();',
     '  report.contextId = __res.getContextId();',
   ].join('\n');
@@ -288,6 +335,7 @@ export async function runServerScript({
 export async function executeSubflow({
   qualified,
   inputs = {},
+  declaredInputs = [],
   declaredOutputs = [],
   label = qualified,
   jobTimeoutMs = 90_000,
@@ -298,8 +346,21 @@ export async function executeSubflow({
   assertQualifiedName(qualified);
   emit({ type: 'harness_invoking', qualified, inputs });
 
+  let body;
+  try {
+    body = buildSubflowScript({ qualified, inputs, declaredInputs });
+  } catch (err) {
+    // A contract the harness cannot build a call from is a failure here, before
+    // anything is created on the instance — not a job that dies obscurely.
+    return {
+      mechanism: 'sysauto_script + sn_fd.FlowAPI.getRunner().subflow().inBackground()',
+      qualified, inputs, job: null, cleanup: { jobDeleted: true, sinkDeleted: true, leftovers: [] },
+      ok: false, stage: 'build', execution: null, outputs: {}, message: err.message,
+    };
+  }
+
   const run = await runServerScript({
-    body: buildSubflowScript({ qualified, inputs }),
+    body,
     label,
     timeoutMs: jobTimeoutMs,
     pollMs,

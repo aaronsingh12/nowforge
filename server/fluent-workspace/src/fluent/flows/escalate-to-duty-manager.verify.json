@@ -1,0 +1,45 @@
+{
+  "kind": "subflow",
+  "subflow": "Escalate To Duty Manager",
+  "setup": {
+    "table": "task",
+    "payload": {
+      "short_description": "Escalation verification task"
+    }
+  },
+  "inputs": {
+    "task": "{{setup.sys_id}}",
+    "message": "Escalation verification note 12345"
+  },
+  "wait": {
+    "timeoutSec": 120
+  },
+  "assert": [
+    {
+      "table": "sys_journal_field",
+      "locate": {
+        "byQuery": "element=work_notes^element_id={{setup.sys_id}}^value=Escalation verification note 12345"
+      },
+      "field": "value",
+      "expect": {
+        "value": "Escalation verification note 12345"
+      },
+      "note": "adds a work note on the task recording the escalation"
+    }
+  ],
+  "expectOutputs": [],
+  "cleanup": [
+    {
+      "table": "task",
+      "locate": {
+        "bySetupRecord": true
+      }
+    },
+    {
+      "table": "sys_journal_field",
+      "locate": {
+        "byQuery": "element=work_notes^element_id={{setup.sys_id}}^value=Escalation verification note 12345"
+      }
+    }
+  ]
+}

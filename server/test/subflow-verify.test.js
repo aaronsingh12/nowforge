@@ -142,3 +142,28 @@ test('without a contract the shape is still checked, and the contract rules simp
   spec.inputs.invented = 'x';
   assert.equal(validateSubflowVerifySpec(spec, {}).ok, true);
 });
+
+test('a promise this instance cannot show is excusable — but only once the excuse is confirmed', () => {
+  const spec = base();
+  spec.expectOutputs = [];
+  spec.unverifiable = [{
+    effect: 'notifies the duty manager',
+    kind: 'source_empty',
+    table: 'sys_user_group',
+    field: 'manager',
+    sys_id: '8a5055c9c61122780043563ef53438e3',
+    note: 'the group on this instance has no manager, so no notification can be sent',
+  }];
+  const promisedEffects = ['adds an escalation work note', 'notifies the duty manager'];
+
+  // Claiming the excuse is not enough: verifiedExcuses is what the instance confirmed.
+  assert.equal(validateSubflowVerifySpec(spec, { contract: CONTRACT, promisedEffects }).ok, false);
+  assert.equal(validateSubflowVerifySpec(spec, { contract: CONTRACT, promisedEffects, verifiedExcuses: 1 }).ok, true);
+});
+
+test('a malformed excuse is rejected on its own shape', () => {
+  const spec = base();
+  spec.unverifiable = [{ effect: 'something', kind: 'source_empty', table: 'sys_user_group', field: 'manager' }];
+  const r = validateSubflowVerifySpec(spec, { contract: CONTRACT });
+  assert.equal(r.ok, false);
+});

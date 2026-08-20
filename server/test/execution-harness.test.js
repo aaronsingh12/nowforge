@@ -103,3 +103,57 @@ test('with no declared contract every key is reported rather than dropped', () =
   assert.deepEqual(Object.keys(outputs), ['a']);
   assert.deepEqual(extra, {});
 });
+
+test('a reference input is fetched as a GlideRecord — a sys_id string is refused by the runner', () => {
+  const script = buildSubflowScript({
+    qualified: 'x_2196302_nwforge.escalate_to_duty_manager',
+    inputs: { task: 'f83bb6f583360750b939cc65eeaad3a8', message: 'P1 on vendor hold' },
+    declaredInputs: [
+      { name: 'task', type: 'reference', reference: 'task' },
+      { name: 'message', type: 'string' },
+    ],
+  });
+  assert.match(script, /var __in0 = new GlideRecord\("task"\);/);
+  assert.match(script, /if \(!__in0\.get\("f83bb6f583360750b939cc65eeaad3a8"\)\)/);
+  // The reference goes in by VARIABLE; the string input still goes in as JSON.
+  assert.match(script, /\.withInputs\(\{ "task": __in0, "message": "P1 on vendor hold" \}\)/);
+});
+
+test('a missing referenced record fails in the script, naming the table and the id', () => {
+  const script = buildSubflowScript({
+    qualified: 'x.y', inputs: { task: 'nope' },
+    declaredInputs: [{ name: 'task', type: 'reference', reference: 'task' }],
+  });
+  assert.match(script, /throw 'input task: no task record ' \+ "nope";/);
+});
+
+test('an empty reference is passed as an empty value, not as an invented record', () => {
+  const script = buildSubflowScript({
+    qualified: 'x.y', inputs: { task: '' },
+    declaredInputs: [{ name: 'task', type: 'reference', reference: 'task' }],
+  });
+  assert.ok(!script.includes('GlideRecord'), 'nothing should be fetched for an empty reference');
+  assert.match(script, /\.withInputs\(\{ "task": "" \}\)/);
+});
+
+test('a reference input with no declared table is refused before anything is created', () => {
+  assert.throws(
+    () => buildSubflowScript({
+      qualified: 'x.y', inputs: { task: 'abc' },
+      declaredInputs: [{ name: 'task', type: 'reference', reference: null }],
+    }),
+    /declares no reference table/
+  );
+  assert.throws(
+    () => buildSubflowScript({
+      qualified: 'x.y', inputs: { task: 'abc' },
+      declaredInputs: [{ name: 'task', type: 'reference', reference: "task'); evil('" }],
+    }),
+    /declares no reference table/
+  );
+});
+
+test('without a contract every input is passed as a literal — the old behaviour, unchanged', () => {
+  const script = buildSubflowScript({ qualified: 'x.y', inputs: { a: '1', b: 2 } });
+  assert.match(script, /\.withInputs\(\{ "a": "1", "b": 2 \}\)/);
+});

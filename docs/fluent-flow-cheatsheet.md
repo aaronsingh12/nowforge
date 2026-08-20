@@ -380,6 +380,48 @@ export const mySubflow = Subflow(config, (params) => { /* body */ })
   *every reachable path*; always pass `params.outputs` as the 2nd argument.
 - Always `export const` so parent flows can import it.
 
+### The contract is checked, not just declared ⚠️
+
+A subflow's `inputs` and `outputs` are its public interface, and four rules about them are
+enforced **before the build** — a candidate that breaks one is rejected with the rule quoted:
+
+| rule | why |
+|---|---|
+| `export const` is mandatory | without it no other flow can import it, so it can never be called |
+| **no `wfa.trigger(...)`** | a triggered artifact is stored by the platform as a **flow**, not a subflow, and nothing downstream notices |
+| every declared input must be **read** — `wfa.dataPill(params.inputs.x, '…')` | an input nothing reads is a parameter the caller can pass with no effect |
+| every declared output must be **assigned** in an `assignSubflowOutputs` values object | an unassigned output reads back empty, and the caller cannot tell that from a legitimately empty value |
+
+Declare no outputs at all rather than declaring one and leaving it unassigned.
+
+### Input column types
+
+Import from `@servicenow/sdk/core`: `StringColumn`, `IntegerColumn`, `BooleanColumn`,
+`DecimalColumn`, `FloatColumn`, `DateTimeColumn`, `ReferenceColumn`, `JsonColumn`.
+A **reference input must carry its table**:
+
+```typescript
+inputs: {
+    task: ReferenceColumn({ label: 'Task', referenceTable: 'task', mandatory: true }),
+    message: StringColumn({ label: 'Message', mandatory: true }),
+}
+```
+
+Read a reference input as `'reference'` when a parameter wants the whole record, and as
+`'string'` when it wants the sys_id:
+
+```typescript
+conditions: `sys_id=${wfa.dataPill(params.inputs.task, 'string')}`
+record: wfa.dataPill(params.inputs.task, 'reference')
+```
+
+### Reuse comes first ⚠️
+
+If a subflow that already does the job exists in this project, the flow you write must **call**
+it. Generating a second subflow with the same name — or the same set of input names — is
+rejected before the build, with the existing one named. The existing subflow keeps its
+identity; the `$id` you mint is for the **call**, not for the subflow.
+
 ```typescript
 wfa.flowLogic.assignSubflowOutputs(
   { $id: Now.ID['out'] },
@@ -659,5 +701,8 @@ Before returning generated code, verify:
 - [ ] `ah_body` contains no data pills or template interpolation
 - [ ] Subflow: `export const`, `assignSubflowOutputs` on every path, `waitForCompletion`
       inside the inputs object
+- [ ] Subflow: every declared input is READ, every declared output is ASSIGNED, and a
+      reference input declares its `referenceTable`
+- [ ] Subflow: it does not duplicate one that already exists — call that one instead
 - [ ] Exactly one `wfa.trigger(...)` for a `Flow`; none for a `Subflow`
 - [ ] Body callback declared `() =>` when `params` is unused (scheduled flows) — `TS6133`

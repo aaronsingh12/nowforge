@@ -36,7 +36,17 @@ server (Node 22 + Express :4000)
   │     fluent.js    LIVE AUTHORING: capability probe, LLM codegen against live
   │                  schema, offline compile validation w/ retry, serialized
   │                  install, read-back, managed list/remove, opt-in smoke run,
-  │                  SEMANTIC VERIFICATION (setup/wait/assert/resume/cleanup)
+  │                  SEMANTIC VERIFICATION (setup/wait/assert/resume/cleanup),
+  │                  and for a triggerless artifact setup/invoke/settle/assert
+  │     subflows.js  subflow CONTRACTS, the reuse CATALOG injected into codegen,
+  │                  and the CALL GRAPH — all parsed from the managed sources
+  │                  with a string-aware bracket matcher; plus the artifact-type
+  │                  and prefer-call lints
+  │     execution-harness.js  runs any server-side script through a one-shot
+  │                  sysauto_script and returns its JSON report; used to call a
+  │                  subflow via sn_fd.FlowAPI. Job + result row deleted and
+  │                  read back. Shared infrastructure for v0.4's fix-script and
+  │                  script-include verification (see §32)
   │     sla.js       contract_sla reads/writes, duration decode, breach-clock
   │                  verification matched to the RIGHT definition
   │     acl.js       sys_security_acl report / two-role diff / explain, with

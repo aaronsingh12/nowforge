@@ -1869,10 +1869,18 @@ A subflow has NO trigger. It is proven by CALLING it with real inputs and then r
   // Values the subflow RETURNS. Only names it declares as outputs.
   "expectOutputs": [ { "name": "<declared output>", "expect": { "value": "<raw value>" }, "note": "<the promise this proves>" } ],
 
-  "cleanup": [ { "table": "<table>", "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" } } ]
+  "cleanup": [ { "table": "<table>", "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" } } ],
+
+  // ONLY for a promised effect this instance CANNOT show. Omit when there are none.
+  "unverifiable": [ { "effect": "<the promised effect, quoted exactly from PROMISED EFFECTS>",
+                      "kind": "field_absent" | "source_empty",
+                      "table": "<table>", "field": "<field>",
+                      "sys_id": "<record the empty value would come from — required for source_empty>",
+                      "note": "<why this instance cannot show it>" } ]
 }
 
 RULES:
+0. UNVERIFIABLE PROMISES. A request can promise something this instance has no way to show: the field it would be written to does not exist here, or the value it would be read from is EMPTY on the record it comes from (a group with no manager, for example). Do not fake such an effect and do not silently drop it — list it under "unverifiable". Every excuse is CHECKED against the live instance: if the field turns out to exist, or the value turns out to be non-empty, the excuse is rejected and you must check the effect instead.
 1. inputs is a CONTRACT, not prose. Use exactly the input names listed under SUBFLOW CONTRACT below — every mandatory one, and nothing that is not on the list. An undeclared input is dropped by the runner, so the call would prove something other than what you wrote.
 2. A reference input takes a sys_id. To pass the setup record, write "{{setup.sys_id}}".
 3. Every assertion must test an effect the REQUEST PROMISED. FORBIDDEN: asserting a field that setup.payload itself sets — that is true regardless of what the subflow does.
@@ -1995,7 +2003,7 @@ export function validateVerifySpec(v, { promisedEffects = [], verifiedExcuses = 
   // shape it can take. Its spec is validated against its own rules — including
   // the one a flow spec cannot have: the inputs are a DECLARED contract, so a
   // missing or invented input is a mechanical error, not a judgement call.
-  if (v.kind === 'subflow') return validateSubflowVerifySpec(v, { promisedEffects, contract });
+  if (v.kind === 'subflow') return validateSubflowVerifySpec(v, { promisedEffects, contract, verifiedExcuses });
 
   // A promise this instance cannot store may be excused from coverage, but only
   // with a reason that has been CHECKED against the live instance.
@@ -2159,11 +2167,21 @@ export function validateVerifySpec(v, { promisedEffects = [], verifiedExcuses = 
  * instance, so "you passed an input this subflow does not declare" and "you
  * left out a mandatory one" are arithmetic.
  */
-export function validateSubflowVerifySpec(v, { promisedEffects = [], contract = null } = {}) {
+export function validateSubflowVerifySpec(v, { promisedEffects = [], contract = null, verifiedExcuses = 0 } = {}) {
   const errors = [];
   if (!v.subflow || typeof v.subflow !== 'string') {
     errors.push('subflow is required — the exact name of the subflow this spec proves.');
   }
+
+  // The same escape hatch the flow path has, for the same measured reason
+  // (§20, CLASS D): a promise this instance cannot show — the field is absent,
+  // or the value it would be copied from is EMPTY here — must be excusable, or
+  // the coverage rule and the field-existence check become mutually
+  // unsatisfiable and a correct subflow can never be verified. Only excuses
+  // CONFIRMED against the instance count, which is why the number comes from
+  // the caller rather than from the spec's own claim.
+  errors.push(...validateUnverifiableShape(v.unverifiable).errors);
+  const excused = Math.max(0, Number(verifiedExcuses) || 0);
 
   const setup = v.setup;
   if (setup !== undefined && setup !== null) {
@@ -2217,10 +2235,16 @@ export function validateSubflowVerifySpec(v, { promisedEffects = [], contract = 
       'nothing proves only that it did not crash.'
     );
   }
-  if (promisedEffects.length > 1 && asserts.length + outs.length < promisedEffects.length) {
+  const required = promisedEffects.length - excused;
+  if (promisedEffects.length > 1 && asserts.length + outs.length < required) {
     errors.push(
-      `The request promises ${promisedEffects.length} observable effects but only ${asserts.length + outs.length} ` +
-      `check(s) were written. One per promised effect: ${promisedEffects.map((e, i) => `(${i + 1}) ${e}`).join('; ')}.`
+      `The request promises ${promisedEffects.length} observable effects` +
+      (excused ? ` (${excused} excused as unverifiable, CONFIRMED against this instance, leaving ${required})` : '') +
+      ` but only ${asserts.length + outs.length} check(s) were written. ` +
+      `One per promised effect: ${promisedEffects.map((e, i) => `(${i + 1}) ${e}`).join('; ')}. ` +
+      `If one genuinely CANNOT be observed here — the field does not exist, or the value it would be copied ` +
+      `from is empty on this instance — list it under "unverifiable" with a reason that can be checked, ` +
+      `rather than faking it or dropping it.`
     );
   }
 
@@ -2997,6 +3021,10 @@ export async function verifySubflow(name, spec, emit = () => {}) {
     const run = await executeSubflow({
       qualified: address.qualified,
       inputs,
+      // The contract is not decoration here: a REFERENCE input has to be handed
+      // a positioned GlideRecord, and the harness can only know which inputs
+      // those are from the contract the instance holds.
+      declaredInputs: contract.inputs || [],
       declaredOutputs: (contract.outputs || []).map((o) => o.name),
       label: address.name,
       settleTimeoutSec: Math.min(Math.max(Number(spec.wait?.timeoutSec) || 120, 15), 300),
