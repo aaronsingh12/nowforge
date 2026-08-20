@@ -3751,6 +3751,21 @@ subflow_inputs      → { taskTable: "incident",
 subflow calls and no actions — so "0 actions" cannot be read as "empty" again. The Flows page
 renders it as a **Calls** section with the input mapping. Trap #67.
 
+The reverse direction — *who calls this subflow* — is two hops, and the first one lands
+somewhere unhelpful. A call's `subflow` field does not reference the subflow: it references a
+published **snapshot** (`sys_hub_flow_snapshot`), and the snapshot points back through
+`parent_flow`. Stopping after one hop yields an id that is on no table anyone would think to
+query, which is what made this look like a dead end:
+
+```
+sys_hub_sub_flow_instance_v2.subflow   81d8a545…   → not on sys_hub_flow
+sys_hub_flow_snapshot 81d8a545…        parent_flow → Notify Manager (af903663…)
+```
+
+`flows.callers(sysId)` does both hops, so a subflow's detail view says **Called by** for any
+deployed caller — including callers this project does not manage, which the source-derived
+graph cannot see. A subflow nobody calls now says so, rather than showing an empty section.
+
 Note in passing: `sysparm_fields` dropped `sub_flow` and `active` from the first probe of that
 table without complaint, because neither column exists. Trap #4, still true.
 
@@ -3786,3 +3801,4 @@ table without complaint, because neither column exists. Trap #4, still true.
 | 65 | **`getOutputs()` returns `{}` on a background run** | a subflow that plainly worked reports no outputs, and it reads like the outputs are broken | It has not run yet. Outputs live in `sys_flow_runtime_value` (`type=output`) once it settles — and an errored run mixes `__action_status__` in with them |
 | 66 | **A catalog that lists shape but not purpose** | the agent holds exactly the subflow it needs, can see it takes `task` and `message`, and stops to ask a question that subflow's own description answers | Names and types identify an artifact; only the description says what it is FOR. Ship it wherever the catalog is rendered |
 | 67 | **A subflow CALL is not an action instance** | a flow that installs, activates and reads back as "1 trigger, 0 actions, 0 logic" — a flow that does nothing | Calls live in `sys_hub_sub_flow_instance_v2`, with the input mapping in `subflow_inputs` (same gzip+base64 as `trigger_inputs`). Any reader that enumerates "the steps of a flow" has to read four part tables, not three |
+| 68 | **A call references a SNAPSHOT, not the subflow** | `sys_hub_sub_flow_instance_v2.subflow` resolves to nothing on `sys_hub_flow`, so "who calls this?" looks unanswerable | It is a `sys_hub_flow_snapshot` id. Hop through `parent_flow` to reach the artifact. One hop gets you an id that is on no table you would think to look at |

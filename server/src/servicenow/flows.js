@@ -163,12 +163,20 @@ export const flows = {
     for (const [part, res] of Object.entries({ triggers: result.triggers, actions: result.actions, logic: result.logic, subflows: result.subflows })) {
       if (!res.available) notes.push(`Table ${fam[part].table} does not exist on this instance; ${part} could not be read.`);
     }
+    const isSubflow = raw(flow, 'type') === 'subflow';
     if (result.triggers.available && result.triggers.rows.length === 0) {
       notes.push(
-        raw(flow, 'type') === 'subflow'
+        isSubflow
           ? 'Subflows have no trigger by design — they are invoked by other flows.'
           : 'No trigger instance found for this flow.'
       );
+    }
+
+    // Who invokes this, read off the instance. Only meaningful for a subflow,
+    // and only asked for one — the two-hop lookup is not free.
+    const callers = isSubflow ? await this.callers(sysId).catch(() => []) : [];
+    if (isSubflow && !callers.length) {
+      notes.push('No deployed flow calls this subflow. Nothing will invoke it until one does.');
     }
 
     // Attach decoded trigger configuration (table / condition / strategy).
@@ -197,6 +205,7 @@ export const flows = {
       actions: result.actions.rows,
       logic: result.logic.rows,
       subflowCalls,
+      callers,
       sourceTables: {
         family: result.familyName,
         triggers: fam.triggers.table,
@@ -257,6 +266,42 @@ export const flows = {
       : [];
     const scope = rows[0]?.scope || 'global';
     return { qualified: `${scope}.${internal}`, scope, internal_name: internal, name: raw(flow, 'name'), type: raw(flow, 'type') };
+  },
+
+  /**
+   * Which flows call this subflow, read off the INSTANCE.
+   *
+   * Two hops, because a call does not reference the subflow directly. It
+   * references a published SNAPSHOT (`sys_hub_flow_snapshot`), and the snapshot
+   * points back at the artifact through `parent_flow`. Resolving only the first
+   * hop yields an id that is on no table anyone would think to look at, which is
+   * what made this non-obvious.
+   *
+   * This complements the source-derived graph in subflows.js rather than
+   * replacing it: the source says what the next install will deploy, this says
+   * what is deployed — including callers this project does not manage.
+   */
+  async callers(sysId) {
+    const snaps = await table.query('sys_hub_flow_snapshot', {
+      query: `parent_flow=${sysId}`, fields: 'sys_id', limit: 100, display: 'false',
+    }).catch((err) => { if (isMissingTable(err)) return []; throw err; });
+    if (!snaps.length) return [];
+
+    const ids = snaps.map((r) => r.sys_id).join(',');
+    const calls = await table.query('sys_hub_sub_flow_instance_v2', {
+      query: `subflowIN${ids}`, fields: 'sys_id,flow,comment', limit: 100, display: 'false',
+    }).catch((err) => { if (isMissingTable(err)) return []; throw err; });
+
+    const byFlow = new Map();
+    for (const c of calls) {
+      if (!c.flow || byFlow.has(c.flow)) continue;
+      byFlow.set(c.flow, { sys_id: c.flow, name: null });
+    }
+    if (!byFlow.size) return [];
+    const rows = await table.query('sys_hub_flow', {
+      query: `sys_idIN${[...byFlow.keys()].join(',')}`, fields: 'sys_id,name,type,active', limit: 100, display: 'false',
+    });
+    return rows.map((r) => ({ sys_id: r.sys_id, name: r.name, type: r.type, active: r.active === 'true' }));
   },
 
   executions: (flowSysId) =>

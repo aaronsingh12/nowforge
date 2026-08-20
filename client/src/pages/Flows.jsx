@@ -881,6 +881,22 @@ export default function Flows() {
                 </div>
               ))}
 
+              {detail.callers?.length > 0 && (
+                <>
+                  <div className="card-title" style={{ marginTop: 14 }}>Called by ({detail.callers.length})</div>
+                  {detail.callers.map((c) => (
+                    <div className="step-row" key={c.sys_id}>
+                      <div className="step-num">·</div>
+                      <div className="row">
+                        <span className={`badge ${c.type === 'subflow' ? 'blue' : ''}`}>{c.type}</span>
+                        <b style={{ fontSize: 13 }}>{c.name}</b>
+                        {!c.active && <span className="badge red">inactive</span>}
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+
               {detail.subflowCalls?.length > 0 && (
                 <>
                   <div className="card-title" style={{ marginTop: 14 }}>Calls ({detail.subflowCalls.length})</div>
