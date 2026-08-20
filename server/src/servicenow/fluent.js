@@ -1545,7 +1545,12 @@ export async function listManaged() {
   const contracts = new Map();
   for (const { source } of sources) {
     for (const a of parseArtifactContracts(source)) {
-      if (a.kind === 'subflow' && a.name) contracts.set(a.name, { inputs: a.inputs, outputs: a.outputs, exportName: a.exportName });
+      if (a.kind === 'subflow' && a.name) {
+        // `description` rides along because it is the only field that says what
+        // the subflow DOES. A caller reading input names alone can hold exactly
+        // the subflow it needs and not recognise it — measured in §32 A3.
+        contracts.set(a.name, { description: a.description, inputs: a.inputs, outputs: a.outputs, exportName: a.exportName });
+      }
     }
   }
 

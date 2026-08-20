@@ -310,10 +310,16 @@ export function catalogPromptBlock(catalog = []) {
       : `NOT CALLABLE from generated code: it is not exported as \`export const\`. Do not import it.`;
     return [
       head,
+      // The description is what says what the subflow DOES. Without it a caller
+      // can see that an input is called `task` and still not know the subflow
+      // already derives the manager from it — measured live in §32 A3, where
+      // the agent stopped to ask who the duty manager was while holding a
+      // subflow whose whole job is to work that out.
+      c.description ? `    it does: ${c.description}` : null,
       `    inputs:  ${io(c.inputs, 'inputs')}`,
       `    outputs: ${io(c.outputs, 'outputs')}`,
       `    call it: ${how}`,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
   });
   return (
     'EXISTING SUBFLOWS IN THIS PROJECT — CALL THEM, DO NOT RE-CREATE THEM.\n' +

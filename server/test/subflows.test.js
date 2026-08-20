@@ -278,3 +278,18 @@ test('a sys_id call is kept as an unresolved edge rather than dropped', () => {
   assert.deepEqual(flow.calls, []);
   assert.deepEqual(flow.unresolved, [{ via: 'sys_id', sysId: 'af90366362d04879b7ab39f6dc66bcc1' }]);
 });
+
+test('the catalog tells a caller what the subflow DOES, not only what it takes', () => {
+  // Measured in section 32 A3: the agent held "Escalate To Duty Manager",
+  // could see an input named `task`, and still stopped to ask who the duty
+  // manager was — a question the subflow's own description answers.
+  const block = catalogPromptBlock(buildCatalog(sourcesOf(['escalate-to-duty-manager.now.ts', ESCALATE_SUBFLOW])));
+  assert.match(block, /it does: Notifies the assignment group manager and records the escalation/);
+});
+
+test('a subflow with no description still renders cleanly', () => {
+  const noDesc = ESCALATE_SUBFLOW.replace(/\n\s*description: '[^']*',/, '');
+  const block = catalogPromptBlock(buildCatalog(sourcesOf(['x.now.ts', noDesc])));
+  assert.ok(!block.includes('it does:'));
+  assert.match(block, /inputs:  task: reference/);
+});
