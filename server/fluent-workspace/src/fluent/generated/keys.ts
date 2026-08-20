@@ -226,6 +226,21 @@ declare global {
                         table: 'sys_hub_action_instance_v2'
                         id: '683885121fec49d39198132759a335ae'
                     }
+                    epvh_call_escalate: {
+                        table: 'sys_hub_sub_flow_instance_v2'
+                        id: '8bb7f11b955f40fcb226b24e7f9371e7'
+                        deleted: true
+                    }
+                    epvh_flow: {
+                        table: 'sys_hub_flow'
+                        id: '44a22c907c534135ba3cd3a2b767c047'
+                        deleted: true
+                    }
+                    epvh_trigger: {
+                        table: 'sys_hub_trigger_instance_v2'
+                        id: 'aea08f8fe1a949edb55732f854ffb506'
+                        deleted: true
+                    }
                     escalate_high_priority_problem: {
                         table: 'sys_hub_flow'
                         id: '7b3b6c461a9a47d3be625bc2b168ccb4'
@@ -322,14 +337,17 @@ declare global {
                     etdm_add_work_note: {
                         table: 'sys_hub_action_instance_v2'
                         id: '1a83dd5e20ad4506b8a4a1c3ea10d7f6'
+                        deleted: true
                     }
                     etdm_call_notify_manager: {
                         table: 'sys_hub_sub_flow_instance_v2'
                         id: 'f7ce05224be34522b957ba0f4c061542'
+                        deleted: true
                     }
                     etdm_escalate_to_duty_manager: {
                         table: 'sys_hub_flow'
                         id: '39507ca8439f4d0e8c764db2b3d3838e'
+                        deleted: true
                     }
                     flag_high_risk_change_flow: {
                         table: 'sys_hub_flow'
@@ -1155,6 +1173,7 @@ declare global {
                     {
                         table: 'sys_hub_flow_input'
                         id: '0e83c728e4b54874ae1bde715bf50b2b'
+                        deleted: true
                         key: {
                             model: '39507ca8439f4d0e8c764db2b3d3838e'
                             element: 'task'
@@ -1183,6 +1202,7 @@ declare global {
                     {
                         table: 'sys_documentation'
                         id: '164dc60db6db4376a225fde460965118'
+                        deleted: true
                         key: {
                             name: 'var__m_sys_hub_flow_input_39507ca8439f4d0e8c764db2b3d3838e'
                             element: 'task'
@@ -1238,6 +1258,7 @@ declare global {
                     {
                         table: 'sys_hub_flow_input'
                         id: '3877804172674e6092944e37f7979a1f'
+                        deleted: true
                         key: {
                             model: '39507ca8439f4d0e8c764db2b3d3838e'
                             element: 'message'
@@ -1272,6 +1293,7 @@ declare global {
                     {
                         table: 'sys_documentation'
                         id: '59e3176f8d044310a973e13b99bba369'
+                        deleted: true
                         key: {
                             name: 'var__m_sys_hub_flow_input_39507ca8439f4d0e8c764db2b3d3838e'
                             element: 'message'

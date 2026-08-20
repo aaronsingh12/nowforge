@@ -3701,6 +3701,59 @@ read-back          Escalate P1 Vendor Hold Incident  44a22c90…  type=flow  act
 It is a real caller, and it is not evidence about the model. Both statements belong in the
 record.
 
+#### A4 — dependency safety ✅
+
+All live, with the caller above in place.
+
+| step | result |
+|---|---|
+| A4.1 edges | subflow `calledBy = ["Escalate P1 Vendor Hold Incident"]`; flow `calls = ["Escalate To Duty Manager"]` |
+| A4.2 delete the subflow while it has a caller | **REFUSED**: *"Refusing to delete: \"Escalate To Duty Manager\" is still called by \"Escalate P1 Vendor Hold Incident\". Deleting it would leave those callers pointing at a record that no longer exists — their own source is unchanged, so the build stays green and every execution fails at the subflow step."* |
+| A4.3 delete the caller first | ok, activation **17/17**, `findByName` read-back `[]` |
+| A4.4 edges after | subflow `calledBy = []` |
+| A4.5 delete the subflow | ok, activation **16/16**, `findByName` read-back `[]` |
+| A4.6 final | both absent from the instance and from the workspace |
+
+The activation counts falling 18 → 17 → 16 are the whole-app install semantics of trap #8
+showing through: every delete redeploys everything that is left.
+
+The graph also reads a subflow→subflow edge correctly — `Escalate To Duty Manager` itself
+calls `Notify Manager`, and that edge appears alongside the flow→subflow one.
+
+#### A5 — this section ✅
+
+
+### A subflow CALL is not an action instance ⚠️
+
+Caught in the A4 read-back, and it is the §8 `_v2` bug's shape again. The caller flow deployed
+and installed cleanly, and `flows.detail()` reported it as:
+
+```
+triggers 1   actions 0   logic 0
+```
+
+A flow that does nothing. Its only step is a subflow call, and those live in
+**`sys_hub_sub_flow_instance_v2`** — a table `detail()` did not read. The row carries `order`,
+`wait_for_completion`, the called subflow's reference, and the input mapping in
+`subflow_inputs`, gzipped and base64-encoded exactly like `trigger_inputs`, so one decoder
+serves both:
+
+```
+subflow             81d8a54583f64f10b939cc65eeaad361  (display "Notify Manager")
+wait_for_completion true
+order               2
+subflow_inputs      → { taskTable: "incident",
+                        taskSysId: "{{Created_1.current.sys_id}}",
+                        message:   "P1 escalation - Network group manager notification" }
+```
+
+`detail()` now reads it, reports the family it came from, and adds a note when a flow has
+subflow calls and no actions — so "0 actions" cannot be read as "empty" again. The Flows page
+renders it as a **Calls** section with the input mapping. Trap #67.
+
+Note in passing: `sysparm_fields` dropped `sub_flow` and `active` from the first probe of that
+table without complaint, because neither column exists. Trap #4, still true.
+
 ### What remains
 
 - **A3 end to end.** The generation half is blocked on the provider, not on anything in this
@@ -3709,6 +3762,12 @@ record.
   the widened stall guard, the description — is in place and unit-tested.
 - **The description fix is unmeasured against the model.** It closes the gap the run showed;
   whether it stops the model asking is not known.
+- **Four `syslog` rows from the early probes cannot be removed**, and that is the finding, not
+  an oversight: three probes used `gs.info` as their return channel before the 403 was
+  measured, and their lines are `[NHAPROBEMT12YEKQ]`, `[NHAFAMT12ZWIO]` and two
+  `[NHARUNMT131U0K]`. Nothing that ships uses that channel. Everything else the probes and the
+  acceptance runs created — jobs, sink rows, tasks, incidents, emails — is gone, read back:
+  0 harness jobs, 0 sink rows, 0 probe records, 0 test emails.
 - **`removeManaged` builds twice.** Once itself, once inside `deploy()`, ~20s of the delete's
   wall clock. `deploy()`'s build is what makes invariant (a) hold for every caller, so the
   duplicate is deliberate rather than a bug — noted so the next reader does not rediscover it
@@ -3726,3 +3785,4 @@ record.
 | 64 | **`internal_name` is not the slug** | `High-Priority Incident Escalation Logic` becomes `highpriority_incident_escalation_logic` — the hyphen is DROPPED, not converted — and a derived name is refused by the runner | Read `internal_name` off `sys_hub_flow`. The same applies to the scope prefix: an unqualified name silently becomes `global.<name>` |
 | 65 | **`getOutputs()` returns `{}` on a background run** | a subflow that plainly worked reports no outputs, and it reads like the outputs are broken | It has not run yet. Outputs live in `sys_flow_runtime_value` (`type=output`) once it settles — and an errored run mixes `__action_status__` in with them |
 | 66 | **A catalog that lists shape but not purpose** | the agent holds exactly the subflow it needs, can see it takes `task` and `message`, and stops to ask a question that subflow's own description answers | Names and types identify an artifact; only the description says what it is FOR. Ship it wherever the catalog is rendered |
+| 67 | **A subflow CALL is not an action instance** | a flow that installs, activates and reads back as "1 trigger, 0 actions, 0 logic" — a flow that does nothing | Calls live in `sys_hub_sub_flow_instance_v2`, with the input mapping in `subflow_inputs` (same gzip+base64 as `trigger_inputs`). Any reader that enumerates "the steps of a flow" has to read four part tables, not three |

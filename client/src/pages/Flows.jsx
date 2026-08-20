@@ -881,6 +881,31 @@ export default function Flows() {
                 </div>
               ))}
 
+              {detail.subflowCalls?.length > 0 && (
+                <>
+                  <div className="card-title" style={{ marginTop: 14 }}>Calls ({detail.subflowCalls.length})</div>
+                  {detail.subflowCalls.map((c) => (
+                    <div className="step-row" key={val(c, 'sys_id')}>
+                      <div className="step-num">{disp(c, 'order') || '·'}</div>
+                      <div>
+                        <div className="row">
+                          <span className="badge blue">subflow</span>
+                          <b style={{ fontSize: 13 }}>{disp(c, 'subflow') || disp(c, 'comment')}</b>
+                          {val(c, 'wait_for_completion') === 'true' && <span className="badge">waits for completion</span>}
+                        </div>
+                        {c.inputs && Object.keys(c.inputs).length > 0 && (
+                          <div style={{ marginTop: 4 }}>
+                            {Object.entries(c.inputs).map(([k, v]) => (
+                              <span key={k} className="badge mono" style={{ marginRight: 4 }}>{k} = {String(v)}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+
               {detail.logic.length > 0 && (
                 <>
                   <div className="card-title" style={{ marginTop: 14 }}>Flow logic</div>
@@ -899,6 +924,7 @@ export default function Flows() {
               {detail.sourceTables && (
                 <p className="mono" style={{ marginTop: 12, fontSize: 11, color: 'var(--muted)' }}>
                   read from {detail.sourceTables.family} tables · {detail.sourceTables.triggers} · {detail.sourceTables.actions} · {detail.sourceTables.logic}
+                  {detail.sourceTables.subflows ? ` · ${detail.sourceTables.subflows}` : ''}
                 </p>
               )}
 

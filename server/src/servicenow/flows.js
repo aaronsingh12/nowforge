@@ -34,11 +34,17 @@ const PART_FAMILIES = {
     triggers: { table: 'sys_hub_trigger_instance_v2', fields: 'sys_id,trigger_type,name,comment,trigger_inputs' },
     actions: { table: 'sys_hub_action_instance_v2', fields: 'sys_id,order,action_type,comment' },
     logic: { table: 'sys_hub_flow_logic_instance_v2', fields: 'sys_id,order,logic_definition,comment' },
+    // A subflow CALL is not an action instance. It has its own table, and
+    // omitting it made a flow whose only step is a call read back as
+    // "1 trigger, 0 actions, 0 logic" — a flow that does nothing. Measured on
+    // the §32 A4 caller, which had exactly that shape.
+    subflows: { table: 'sys_hub_sub_flow_instance_v2', fields: 'sys_id,order,comment,subflow,wait_for_completion,subflow_inputs' },
   },
   legacy: {
     triggers: { table: 'sys_hub_trigger_instance', fields: 'sys_id,trigger_type,table,condition,active,sys_class_name' },
     actions: { table: 'sys_hub_action_instance', fields: 'sys_id,order,active,action_type,comment,sys_updated_on' },
     logic: { table: 'sys_hub_flow_logic', fields: 'sys_id,order,active,logic_definition,sys_updated_on' },
+    subflows: { table: 'sys_hub_sub_flow_instance', fields: 'sys_id,order,comment,subflow' },
   },
 };
 
@@ -55,8 +61,11 @@ const isMissingTable = (err) => err?.status === 400 && /invalid table/i.test(err
  * Trigger configuration (table, condition, ...) is not stored in columns — it
  * lives in `trigger_inputs` as gzipped, base64-encoded JSON. Decoding it is the
  * only way to show what a trigger actually listens to.
+ *
+ * A subflow CALL stores its input mapping the same way, in `subflow_inputs`, so
+ * one decoder serves both.
  */
-function decodeTriggerInputs(encoded) {
+function decodeInputs(encoded) {
   if (!encoded) return null;
   try {
     const json = zlib.gunzipSync(Buffer.from(encoded, 'base64')).toString('utf8');
@@ -92,12 +101,13 @@ async function queryPart({ table: t, fields }, sysId, orderBy) {
 
 async function readFamily(familyName, sysId) {
   const fam = PART_FAMILIES[familyName];
-  const [triggers, actions, logic] = await Promise.all([
+  const [triggers, actions, logic, subflows] = await Promise.all([
     queryPart(fam.triggers, sysId),
     queryPart(fam.actions, sysId, 'order'),
     queryPart(fam.logic, sysId, 'order'),
+    queryPart(fam.subflows, sysId, 'order'),
   ]);
-  return { familyName, triggers, actions, logic };
+  return { familyName, triggers, actions, logic, subflows };
 }
 
 export const flows = {
@@ -142,7 +152,7 @@ export const flows = {
     let result = await readFamily('v2', sysId);
     const notes = [];
 
-    const v2Available = result.triggers.available || result.actions.available || result.logic.available;
+    const v2Available = result.triggers.available || result.actions.available || result.logic.available || result.subflows.available;
     if (!v2Available) {
       // Only legitimate reason to read the legacy tables: v2 isn't on this instance.
       result = await readFamily('legacy', sysId);
@@ -150,7 +160,7 @@ export const flows = {
     }
 
     const fam = PART_FAMILIES[result.familyName];
-    for (const [part, res] of Object.entries({ triggers: result.triggers, actions: result.actions, logic: result.logic })) {
+    for (const [part, res] of Object.entries({ triggers: result.triggers, actions: result.actions, logic: result.logic, subflows: result.subflows })) {
       if (!res.available) notes.push(`Table ${fam[part].table} does not exist on this instance; ${part} could not be read.`);
     }
     if (result.triggers.available && result.triggers.rows.length === 0) {
@@ -163,21 +173,36 @@ export const flows = {
 
     // Attach decoded trigger configuration (table / condition / strategy).
     const triggers = result.triggers.rows.map((t) => {
-      const config = decodeTriggerInputs(raw(t, 'trigger_inputs'));
+      const config = decodeInputs(raw(t, 'trigger_inputs'));
       const { trigger_inputs: _drop, ...rest } = t; // the raw blob is noise for clients
       return { ...rest, config };
     });
+
+    // Subflow calls, with the input mapping decoded out of the same kind of blob.
+    const subflowCalls = result.subflows.rows.map((c) => {
+      const inputs = decodeInputs(raw(c, 'subflow_inputs'));
+      const { subflow_inputs: _drop, ...rest } = c;
+      return { ...rest, inputs };
+    });
+    if (subflowCalls.length && result.actions.rows.length === 0) {
+      notes.push(
+        `This flow's ${subflowCalls.length} step(s) are subflow CALLS, not actions — ` +
+        `"0 actions" here does not mean the flow is empty.`
+      );
+    }
 
     return {
       flow,
       triggers,
       actions: result.actions.rows,
       logic: result.logic.rows,
+      subflowCalls,
       sourceTables: {
         family: result.familyName,
         triggers: fam.triggers.table,
         actions: fam.actions.table,
         logic: fam.logic.table,
+        subflows: fam.subflows.table,
       },
       notes,
     };
