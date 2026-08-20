@@ -292,7 +292,9 @@ export const TOOLS = [
     name: 'create_flow_live',
     description:
       'BUILD STEP. Create or UPDATE a REAL, active Flow Designer flow on the instance from a plain-language description or a blueprint from design_flow_blueprint. Generates Fluent TypeScript, compiles it offline (nothing reaches the instance unless it compiles), installs it, and reads the result back. Returns the flow name, sys_id, type and link. Requires user approval. Note: installing deploys the whole managed application, so the response lists every artifact shipped. ' +
-      'TO CHANGE AN EXISTING FLOW — adding a step, a condition, a branch — pass its EXACT current name as `updates`, and describe the flow as it should be when finished. Editing in place keeps the same sys_id. Creating a second flow instead collides with the first on its element keys and fails. Use list_live_flows to get the exact name.',
+      'TO CHANGE AN EXISTING FLOW — adding a step, a condition, a branch — pass its EXACT current name as `updates`, and describe the flow as it should be when finished. Editing in place keeps the same sys_id. Creating a second flow instead collides with the first on its element keys and fails. Use list_live_flows to get the exact name. ' +
+      'TO BUILD A REUSABLE SUBFLOW — the request says "create a subflow", or describes a callable unit with named inputs and no trigger — pass artifact_type: "subflow" and state its inputs and outputs in the description. A subflow has no trigger; it is invoked by other flows. ' +
+      'BEFORE BUILDING A FLOW, call list_live_flows: if a managed subflow already does part of the work, describe the flow as CALLING it by name. Generating a second subflow with the same inputs is rejected before the build.',
     mutating: true,
     inputSchema: {
       type: 'object',
@@ -304,18 +306,29 @@ export const TOOLS = [
           description:
             'Exact name of an existing managed flow or subflow to edit IN PLACE, keeping its sys_id. Omit when creating something new.',
         },
+        artifact_type: {
+          type: 'string',
+          enum: ['flow', 'subflow'],
+          description:
+            'What to build. "flow" (default) has exactly one trigger. "subflow" is a reusable callable unit with typed inputs and outputs and NO trigger — use it when the request asks for a subflow, or for something other flows will call. On an edit this is ignored: an artifact cannot change kind.',
+        },
       },
       required: [],
     },
-    execute: async ({ description, blueprint, updates }) => {
+    execute: async ({ description, blueprint, updates, artifact_type: artifactType }) => {
       const spec = description || (blueprint ? JSON.stringify(blueprint, null, 1) : null);
       if (!spec) throw new Error('Provide either description or blueprint.');
-      return createLiveFlow(spec, () => {}, { updates: updates || null });
+      return createLiveFlow(spec, () => {}, { updates: updates || null, artifactType: artifactType || null });
     },
   },
   {
     name: 'list_live_flows',
-    description: 'List the flows and subflows NowHelpAssist manages as Fluent source, with their current state on the instance.',
+    description:
+      'List the flows and subflows NowHelpAssist manages as Fluent source, with their current state on the instance. ' +
+      'Each subflow carries its I/O CONTRACT (input and output names, types and reference tables) and each artifact carries ' +
+      'its dependency edges: `calls` and `calledBy`. Read this BEFORE building a flow — if a subflow already does part of ' +
+      'the work, the new flow should call it rather than re-implement it — and before deleting anything, because a subflow ' +
+      'with callers cannot be removed.',
     mutating: false,
     inputSchema: { type: 'object', properties: {}, required: [] },
     execute: () => listManaged(),
@@ -323,7 +336,8 @@ export const TOOLS = [
   {
     name: 'delete_live_flow',
     description:
-      'Delete a NowHelpAssist-managed flow by name: removes its Fluent source, reinstalls, and confirms it is gone from the instance. Destructive — confirm with the user in conversation first. Requires user approval.',
+      'Delete a NowHelpAssist-managed flow or subflow by name: removes its Fluent source, reinstalls, and confirms it is gone from the instance. Destructive — confirm with the user in conversation first. Requires user approval. ' +
+      'A subflow that a managed flow still calls is REFUSED, with the callers named: delete or edit those callers first, then remove the subflow.',
     mutating: true,
     inputSchema: {
       type: 'object',
@@ -335,7 +349,11 @@ export const TOOLS = [
   {
     name: 'verify_flow_live',
     description:
-      'SEMANTIC VERIFICATION. Prove a deployed record-triggered flow actually does what was asked: creates a record matching its trigger, waits for the execution to settle, asserts the promised effects (field set, note added, record created), then deletes the test data. Compiling only proves a flow is well-formed — this proves it is correct. Writes real records, so it needs its own approval and never runs automatically after a deploy.',
+      'SEMANTIC VERIFICATION. Prove a deployed artifact actually does what was asked, then delete the test data. ' +
+      'A record-triggered FLOW is fired by creating a record that matches its trigger. A SUBFLOW has no trigger, so it is CALLED: ' +
+      'a one-shot scheduled job invokes it through sn_fd.FlowAPI with the test inputs in its spec, and both its effects on records and ' +
+      'the values it RETURNS are asserted. Compiling only proves an artifact is well-formed — this proves it is correct. ' +
+      'Writes real records, so it needs its own approval and never runs automatically after a deploy.',
     mutating: true,
     inputSchema: {
       type: 'object',

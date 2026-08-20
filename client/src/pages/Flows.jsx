@@ -75,6 +75,11 @@ const PROGRESS_LABEL = {
   verify_spec_stalled: 'Verification stopped — a retry would have repeated itself',
   verify_spec_ready: 'Verification spec ready',
   verify_spec_failed: 'No valid verification spec could be produced',
+  // Subflows as first-class artifacts.
+  artifact_type: 'Artifact type',
+  artifact_type_rejected: 'Rejected — wrong artifact shape',
+  subflow_catalog: 'Existing subflows offered for reuse',
+  subflow_reuse_rejected: 'Rejected — would duplicate an existing subflow',
 };
 
 function progressLine(e) {
@@ -99,13 +104,48 @@ function progressLine(e) {
     return `${base} (attempt ${e.attempt})${e.evidenceAdded ? ` — ${e.evidenceAdded} new field inventory` : ''}`;
   }
   if (e.type === 'verify_spec_ready') return `${base}: ${e.assertions} assertion(s) in ${e.attempts} attempt(s)`;
+  if (e.type === 'artifact_type') return `${base}: ${e.artifactType} (decided by ${e.decidedBy})${e.note ? ` — ${e.note}` : ''}`;
+  if (e.type === 'artifact_type_rejected') return `${base} (attempt ${e.attempt}): expected a ${e.artifactType}`;
+  if (e.type === 'subflow_catalog') return `${base}: ${e.subflows.map((c) => `“${c.name}” (${c.inputs.join(', ') || 'no inputs'})`).join(', ')}`;
+  if (e.type === 'subflow_reuse_rejected') return `${base} (attempt ${e.attempt})`;
   return base;
+}
+
+/** An input/output contract, rendered the same way wherever it appears. */
+function Contract({ contract, deployed }) {
+  if (!contract) return null;
+  const line = (f) => `${f.name}: ${f.type}${f.reference ? ` → ${f.reference}` : ''}${f.mandatory ? ' (required)' : ''}`;
+  const side = (label, list) => (
+    <div style={{ marginTop: 4 }}>
+      <span style={{ fontSize: 12, color: 'var(--muted)' }}>{label}</span>{' '}
+      {list?.length
+        ? list.map((f) => <span key={f.name} className="badge mono" style={{ marginRight: 4 }}>{line(f)}</span>)
+        : <span style={{ fontSize: 12, color: 'var(--muted)' }}>none</span>}
+    </div>
+  );
+  // The instance read-back is shown only when it DISAGREES with the source.
+  // Two identical lists side by side is noise; a difference is the whole point.
+  const names = (l) => (l || []).map((f) => f.name).join(',');
+  const drift = deployed && (names(deployed.inputs) !== names(contract.inputs) || names(deployed.outputs) !== names(contract.outputs));
+  return (
+    <div style={{ marginTop: 6 }}>
+      {side('inputs', contract.inputs)}
+      {side('outputs', contract.outputs)}
+      {drift && (
+        <div className="note warn" style={{ marginTop: 6 }}>
+          The contract on the instance differs from the source: inputs <span className="mono">{names(deployed.inputs) || '(none)'}</span>,
+          outputs <span className="mono">{names(deployed.outputs) || '(none)'}</span>.
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Spec in → streamed build log → result card. */
 function LiveBuild({ capOk, seedSpec, managed = [], onDeployed }) {
   const [spec, setSpec] = useState('');
   const [updates, setUpdates] = useState('');
+  const [artifactType, setArtifactType] = useState('flow');
   const [events, setEvents] = useState([]);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
@@ -116,7 +156,7 @@ function LiveBuild({ capOk, seedSpec, managed = [], onDeployed }) {
   const run = async () => {
     setRunning(true); setEvents([]); setResult(null); setFailure(null);
     try {
-      await sse('/flows/live', { spec, updates: updates || undefined }, (e) => {
+      await sse('/flows/live', { spec, updates: updates || undefined, artifact_type: artifactType }, (e) => {
         if (e.type === 'done' && e.result) { setResult(e.result); onDeployed?.(); }
         else if (e.type === 'error') setFailure(e);
         else setEvents((prev) => [...prev, e]);
@@ -128,22 +168,31 @@ function LiveBuild({ capOk, seedSpec, managed = [], onDeployed }) {
 
   return (
     <div className="card">
-      <div className="card-title">Live build — deploy a real flow</div>
+      <div className="card-title">Live build — deploy a real flow or subflow</div>
       <textarea
         className="textarea"
-        placeholder="e.g. When a P1 incident is created for the Network group, notify the group manager and add a work note…"
+        placeholder={artifactType === 'subflow'
+          ? "e.g. Create a subflow named 'Escalate To Duty Manager' with inputs task (reference to task) and message (string): look up the task's assignment group manager, notify them, and add a work note…"
+          : 'e.g. When a P1 incident is created for the Network group, notify the group manager and add a work note…'}
         value={spec}
         onChange={(e) => setSpec(e.target.value)}
       />
       <div className="row" style={{ marginTop: 8 }}>
         <button className="btn amber" onClick={run} aria-busy={running} disabled={running || !spec.trim() || !capOk}>
-          {running ? 'Building…' : updates ? 'Regenerate & deploy' : 'Generate & deploy'}
+          {running ? 'Building…' : updates ? 'Regenerate & deploy' : `Generate & deploy ${artifactType}`}
         </button>
-        {managed.filter((m) => m.kind === 'flow').length > 0 && (
+        <select
+          className="input" style={{ maxWidth: 190 }} value={artifactType} disabled={running || Boolean(updates)}
+          onChange={(e) => setArtifactType(e.target.value)} aria-label="Artifact type"
+        >
+          <option value="flow">Flow (has a trigger)</option>
+          <option value="subflow">Subflow (called, no trigger)</option>
+        </select>
+        {managed.length > 0 && (
           <select className="input" style={{ maxWidth: 260 }} value={updates} onChange={(e) => setUpdates(e.target.value)} disabled={running}>
-            <option value="">Create a new flow</option>
-            {managed.filter((m) => m.kind === 'flow').map((m) => (
-              <option key={m.name} value={m.name}>Update “{m.name}” in place</option>
+            <option value="">Create something new</option>
+            {managed.map((m) => (
+              <option key={m.name} value={m.name}>Update {m.kind} “{m.name}” in place</option>
             ))}
           </select>
         )}
@@ -151,7 +200,14 @@ function LiveBuild({ capOk, seedSpec, managed = [], onDeployed }) {
       </div>
       {updates && (
         <p style={{ fontSize: 12, color: 'var(--muted)', margin: '6px 0 0' }}>
-          Editing an existing flow: it keeps its sys_id and history rather than becoming a second flow.
+          Editing “{updates}”: it keeps its sys_id and history rather than becoming a second artifact. An artifact cannot
+          change kind, so the type selector does not apply.
+        </p>
+      )}
+      {!updates && artifactType === 'subflow' && (
+        <p style={{ fontSize: 12, color: 'var(--muted)', margin: '6px 0 0' }}>
+          Name the inputs and outputs in the description — they become the subflow’s contract, and other flows are
+          generated against it.
         </p>
       )}
 
@@ -174,13 +230,24 @@ function LiveBuild({ capOk, seedSpec, managed = [], onDeployed }) {
         <div className="note" style={{ marginTop: 12, borderLeftColor: 'var(--verdigris)' }}>
           <div className="row">
             <b>{result.name}</b>
-            <span className={`badge ${result.verified?.type === 'subflow' ? 'blue' : ''}`}>{result.verified?.type || 'flow'}</span>
+            <span className={`badge ${result.verified?.type === 'subflow' ? 'blue' : ''}`}>{result.verified?.type || result.artifactType || 'flow'}</span>
             {result.verified?.active && <span className="badge green">active</span>}
           </div>
           <div style={{ fontSize: 12.5, marginTop: 6 }}>
             Compiled on attempt {result.attempts} · flows activated {result.activation} ·
             {' '}{result.verified?.triggers ?? 0} trigger, {result.verified?.actions ?? 0} actions, {result.verified?.logic ?? 0} logic
           </div>
+          {result.contract && <Contract contract={result.contract} deployed={result.verified?.contract} />}
+          {result.verification?.available && (
+            <div style={{ fontSize: 12.5, marginTop: 6 }}>
+              Verification spec ready: {result.verification.assertions} check
+              {result.verification.assertions === 1 ? '' : 's'}
+              {result.verification.kind === 'subflow' ? ' — run it to call the subflow with test inputs.' : ''}
+            </div>
+          )}
+          {result.verification && !result.verification.available && result.verification.reason && (
+            <div className="note warn" style={{ marginTop: 6, fontSize: 12.5 }}>{result.verification.reason}</div>
+          )}
           <div className="mono" style={{ fontSize: 11, marginTop: 4 }}>sys_id {result.verified?.sys_id}</div>
           {result.verified?.link && (
             <a className="btn sm" style={{ marginTop: 8, display: 'inline-block' }} href={result.verified.link} target="_blank" rel="noreferrer">
@@ -217,12 +284,21 @@ function LiveBuild({ capOk, seedSpec, managed = [], onDeployed }) {
 }
 
 const VERIFY_LABEL = {
-  verify_setup: 'Creating a record that matches the trigger…',
+  verify_setup: 'Creating a record for the test…',
   verify_setup_done: 'Test record created',
   verify_waiting: 'Waiting for the flow to run…',
   verify_execution: 'Execution state',
   verify_assert: 'Assertion',
   verify_cleanup: 'Deleting test data…',
+  // A subflow has no trigger, so it is CALLED through the execution harness:
+  // a one-shot scheduled job, deleted again with its result row.
+  verify_invoking: 'Calling the subflow…',
+  harness_job_creating: 'Creating a one-shot scheduled job',
+  harness_job_created: 'Scheduled job created',
+  harness_waiting: 'Waiting for the job to report…',
+  harness_invoking: 'Invoking through sn_fd.FlowAPI',
+  harness_execution: 'Subflow execution state',
+  harness_cleanup: 'Job and result row removed',
 };
 
 function verifyLine(e) {
@@ -231,6 +307,11 @@ function verifyLine(e) {
   if (e.type === 'verify_setup_done') return `${base}: ${e.record}`;
   if (e.type === 'verify_waiting') return `${base} (up to ${e.timeoutSec}s)`;
   if (e.type === 'verify_execution') return `${base}: ${e.state}`;
+  if (e.type === 'verify_invoking') return `${base} ${e.qualified} with ${JSON.stringify(e.inputs)}`;
+  if (e.type === 'harness_execution') return `${base}: ${e.state}`;
+  if (e.type === 'harness_cleanup') {
+    return e.leftovers?.length ? `Cleanup INCOMPLETE — left behind: ${e.leftovers.join(', ')}` : base;
+  }
   if (e.type === 'verify_assert') {
     return `${e.pass ? '✓' : '✗'} ${e.field}: expected "${e.expected}"${e.pass ? '' : `, got "${e.actual ?? ''}"`}`;
   }
@@ -280,6 +361,23 @@ function VerifyPanel({ name, onClose }) {
           {result.execution && (
             <div className="mono" style={{ fontSize: 11, marginTop: 4 }}>
               execution {result.execution.name} — {result.execution.state}
+              {result.execution.error_message ? ` — ${result.execution.error_message}` : ''}
+            </div>
+          )}
+          {result.kind === 'subflow' && (
+            <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 4 }}>
+              Called as <span className="mono">{result.subflow?.qualified}</span> via {result.mechanism}.
+              {result.harness && (result.harness.leftovers?.length
+                ? <span> Cleanup INCOMPLETE: {result.harness.leftovers.join(', ')}.</span>
+                : <span> The scheduled job and its result row were deleted and read back.</span>)}
+            </div>
+          )}
+          {result.outputs && Object.keys(result.outputs).length > 0 && (
+            <div style={{ marginTop: 6 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>outputs returned</span>{' '}
+              {Object.entries(result.outputs).map(([k, v]) => (
+                <span key={k} className="badge mono" style={{ marginRight: 4 }}>{k} = {JSON.stringify(v.value)}</span>
+              ))}
             </div>
           )}
           {result.assertions?.length > 0 && (
@@ -289,7 +387,7 @@ function VerifyPanel({ name, onClose }) {
                 {result.assertions.map((a, i) => (
                   <tr key={i}>
                     <td><span className={`badge ${a.pass ? 'green' : 'red'}`}>{a.pass ? 'pass' : 'fail'}</span></td>
-                    <td className="mono" style={{ fontSize: 11.5 }}>{a.table}.{a.field}</td>
+                    <td className="mono" style={{ fontSize: 11.5 }}>{a.type === 'output' ? `output: ${a.field}` : `${a.table}.${a.field}`}</td>
                     <td style={{ fontSize: 11.5 }}>{String(a.expected ?? '')}</td>
                     <td style={{ fontSize: 11.5 }}>{a.reason || String(a.actual ?? '')}</td>
                     <td style={{ fontSize: 11.5, color: 'var(--muted)' }}>{a.note}</td>
@@ -334,7 +432,11 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
       await load();
       onChanged?.();
       toast.success(`Deleted "${name}" and reinstalled the application.`);
-    } catch (e) { setError(e.message); toast.error(e.message); }
+    } catch (e) {
+      // A refused delete is the dependency guard, not a failure: the message
+      // already names the callers, so it is shown as-is rather than summarised.
+      setError(e.message); toast.error(e.message);
+    }
     finally { setBusy(''); }
   };
 
@@ -360,12 +462,34 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
       )}
       {data.managed.length > 0 && (
         <table className="table">
-          <thead><tr><th>Name</th><th>Kind</th><th>On instance</th><th>Verification</th><th /></tr></thead>
+          <thead><tr><th>Name</th><th>Kind</th><th>Contract / dependencies</th><th>On instance</th><th>Verification</th><th /></tr></thead>
           <tbody>
             {data.managed.map((m) => (
               <tr key={m.file + m.name}>
                 <td>{m.name}<div className="mono" style={{ fontSize: 10.5, color: 'var(--muted)' }}>{m.file}</div></td>
                 <td><span className={`badge ${m.kind === 'subflow' ? 'blue' : ''}`}>{m.kind}</span></td>
+                <td>
+                  {m.contract && <Contract contract={m.contract} />}
+                  {m.calls?.length > 0 && (
+                    <div style={{ fontSize: 11.5, marginTop: 4 }}>
+                      <span style={{ color: 'var(--muted)' }}>Calls:</span> {m.calls.join(', ')}
+                    </div>
+                  )}
+                  {m.calledBy?.length > 0 && (
+                    <div style={{ fontSize: 11.5, marginTop: 4 }}>
+                      <span style={{ color: 'var(--muted)' }}>Called by:</span> {m.calledBy.join(', ')}
+                    </div>
+                  )}
+                  {m.unresolvedCalls?.length > 0 && (
+                    <div style={{ fontSize: 11.5, marginTop: 4, color: 'var(--muted)' }}>
+                      Calls a subflow this project does not manage:{' '}
+                      {m.unresolvedCalls.map((u) => u.sysId || u.binding).join(', ')}
+                    </div>
+                  )}
+                  {!m.contract && !m.calls?.length && !m.calledBy?.length && !m.unresolvedCalls?.length && (
+                    <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>—</span>
+                  )}
+                </td>
                 <td>
                   {m.live
                     ? <span className={`badge ${m.live.active ? 'green' : ''}`}>{m.live.active ? 'active' : 'inactive'}</span>
@@ -383,7 +507,11 @@ function ManagedArtifacts({ reloadKey, onChanged }) {
                         Verify
                       </button>
                     )}
-                    <button className="btn sm" onClick={() => remove(m)} aria-busy={busy === m.name} disabled={busy === m.name}>
+                    <button
+                      className="btn sm" onClick={() => remove(m)} aria-busy={busy === m.name}
+                      disabled={busy === m.name || m.calledBy?.length > 0}
+                      title={m.calledBy?.length ? `Called by ${m.calledBy.join(', ')} — delete or edit the caller first.` : undefined}
+                    >
                       {busy === m.name ? 'Removing…' : 'Delete'}
                     </button>
                   </div>

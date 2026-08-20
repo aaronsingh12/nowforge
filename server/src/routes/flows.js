@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { flows, designFlowBlueprint, blueprintToBusinessRule } from '../servicenow/flows.js';
-import { capability, createLiveFlow, listManaged, removeManaged, smokeRun, verify } from '../servicenow/fluent.js';
+import { capability, createLiveFlow, listManaged, removeManaged, smokeRun, subflowCatalog, verify } from '../servicenow/fluent.js';
 import { startBuildRun, finishBuildRun, auditedEmit } from '../memory/audit.js';
 
 export const flowsRouter = Router();
@@ -17,14 +17,22 @@ flowsRouter.get('/live', async (_req, res, next) => {
   try { res.json(await listManaged()); } catch (err) { next(err); }
 });
 
+/** The reuse catalog exactly as codegen is shown it. Read-only. */
+flowsRouter.get('/live/catalog', async (_req, res, next) => {
+  try { res.json({ subflows: await subflowCatalog() }); } catch (err) { next(err); }
+});
+
 /**
  * POST /api/flows/live { spec } | { blueprint }
  * Streams SSE progress, mirroring /api/agent/chat.
  */
 flowsRouter.post('/live', async (req, res) => {
-  const { spec, blueprint, updates } = req.body || {};
+  const { spec, blueprint, updates, artifact_type: artifactType } = req.body || {};
   const text = spec || (blueprint ? blueprintToSpec(blueprint) : null);
   if (!text) return res.status(400).json({ message: 'spec (or blueprint) is required' });
+  if (artifactType && !['flow', 'subflow'].includes(artifactType)) {
+    return res.status(400).json({ message: 'artifact_type must be "flow" or "subflow"' });
+  }
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -37,11 +45,15 @@ flowsRouter.post('/live', async (req, res) => {
   };
   // D-5: this installs a whole application onto the instance, so it is
   // auditable activity and not just progress on a screen.
-  const run = startBuildRun({ kind: 'flow_build', label: firstLine(text), request: { spec: text, updates: updates || null } });
+  const run = startBuildRun({
+    kind: 'flow_build',
+    label: firstLine(text),
+    request: { spec: text, updates: updates || null, artifactType: artifactType || null },
+  });
   const emit = auditedEmit(run, write);
   const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
   try {
-    const result = await createLiveFlow(text, emit, { updates: updates || null });
+    const result = await createLiveFlow(text, emit, { updates: updates || null, artifactType: artifactType || null });
     emit(result.ok ? { type: 'done', result } : { type: 'error', ...result });
     finishBuildRun(run, { status: result.ok ? 'ok' : 'error', summary: result });
   } catch (err) {
@@ -114,7 +126,10 @@ flowsRouter.delete('/live/:name', async (req, res, next) => {
   try {
     const result = await removeManaged(name);
     finishBuildRun(run, { status: result.ok ? 'ok' : 'error', summary: result });
-    res.status(result.ok ? 200 : 422).json(result);
+    // A delete refused because a live flow still calls the subflow is a
+    // CONFLICT, not a validation error: nothing about the request was wrong,
+    // and the caller list is the thing the client has to show.
+    res.status(result.ok ? 200 : result.blocked ? 409 : 422).json(result);
   } catch (err) {
     finishBuildRun(run, { status: 'error', summary: { message: err.message } });
     next(err);

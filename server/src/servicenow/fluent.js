@@ -16,6 +16,17 @@ import {
   lintTriggerStrategy,
   RetryLedger,
 } from './codegen-guards.js';
+import {
+  buildCatalog,
+  catalogPromptBlock,
+  lintArtifactType,
+  lintSubflowReuse,
+  parseSubflowContract,
+  parseArtifactContracts,
+  buildDependencyGraph,
+  callersOf,
+} from './subflows.js';
+import { executeSubflow } from './execution-harness.js';
 import { getSchema, referenceLookup } from './schema.js';
 import { queryFieldRoots } from './conditions.js';
 import { assertTaskSla, findSla, SLA_TOLERANCE_DEFAULT_SEC } from './sla.js';
@@ -893,6 +904,22 @@ const HARD_RULES = `HARD RULES — a violation fails the build:
 11. waitForCompletion belongs in the subflow INPUTS object (3rd arg), not the instance config (2nd arg).
 12. Use the resolved sys_ids given below. If a name was not resolved, match by name in an encoded query — never invent an identifier.`;
 
+/**
+ * The extra rules a STANDALONE subflow has to satisfy.
+ *
+ * A subflow is not "a flow without a trigger": it is a callable unit whose
+ * inputs and outputs are a published interface. Each rule below is checked
+ * mechanically after generation (subflows.js `lintArtifactType`), so it is
+ * stated here in the same words the rejection will use.
+ */
+const SUBFLOW_RULES = `THIS REQUEST IS FOR A SUBFLOW, NOT A FLOW. Additional hard rules:
+S1. Emit exactly one \`export const <camelCaseName> = Subflow({ ... }, (params) => { ... })\` and NOTHING else — no Flow(...), no wfa.trigger(...). A subflow runs because another flow calls it; a triggered artifact is stored by the platform as a flow, not a subflow.
+S2. The export is mandatory. Without \`export const\` no other flow can import it, so it can never be called.
+S3. Declare the INPUTS the request names, in the config's \`inputs\` object, with column types from '@servicenow/sdk/core': StringColumn, IntegerColumn, BooleanColumn, DateTimeColumn, ReferenceColumn. A reference input MUST carry its table: ReferenceColumn({ label: 'Task', referenceTable: 'task', mandatory: true }).
+S4. Every declared input MUST be READ in the body via wfa.dataPill(params.inputs.<name>, '<type>'). An input nothing reads is a parameter the caller can pass with no effect.
+S5. Declare an OUTPUT for every value the request says the subflow returns, and assign every one of them with wfa.flowLogic.assignSubflowOutputs({ $id: Now.ID['<key>'] }, params.outputs, { <output>: <value>, ... }) on EVERY reachable path. params.outputs is the second argument, always. An output that is never assigned comes back empty and the caller cannot tell that from a legitimately empty value.
+S6. If the request promises nothing back, declare no outputs at all rather than declaring one and leaving it unassigned.`;
+
 async function readCheatsheet() {
   try { return await fsp.readFile(CHEATSHEET, 'utf8'); } catch { return ''; }
 }
@@ -901,7 +928,7 @@ async function readCheatsheet() {
  * Generate one Fluent source file from a plain-language spec.
  * `priorError` carries build diagnostics back into the prompt on a retry.
  */
-export async function generate(spec, { intent, context, priorSource, priorError, existingSource, decoding, ledger } = {}) {
+export async function generate(spec, { intent, context, priorSource, priorError, existingSource, decoding, ledger, artifactType = 'flow', catalog = [] } = {}) {
   // Guard 3: the model never sees a live Now.ID key. Every source fed back into
   // the prompt is neutralised through ONE shared map, so the same record keeps
   // the same placeholder across the deployed source and the retry source, and
@@ -914,11 +941,17 @@ export async function generate(spec, { intent, context, priorSource, priorError,
   const system = [
     'You are a ServiceNow Fluent SDK code generator. You emit ServiceNow Flow Designer flows as TypeScript for @servicenow/sdk v4.',
     HARD_RULES,
+    artifactType === 'subflow' ? SUBFLOW_RULES : null,
     '--- SYNTAX REFERENCE (authoritative, build-verified) ---',
     cheatsheet,
-  ].join('\n\n');
+  ].filter(Boolean).join('\n\n');
 
   const userParts = [`AUTOMATION REQUEST:\n${spec}`];
+  // The catalog is context, not a suggestion: the prefer-call rule that goes
+  // with it is enforced after generation, so a candidate that ignores this is
+  // rejected before the build rather than deployed as a duplicate.
+  const catalogText = catalogPromptBlock(catalog);
+  if (catalogText) userParts.push(`--- ${catalogText}`);
   if (context?.text) userParts.push(`--- LIVE INSTANCE CONTEXT ---\n${context.text}`);
   if (existingSan) {
     // Regeneration of a request already deployed: this must UPDATE the existing
@@ -1030,7 +1063,7 @@ export const WORKSPACE_DIRS = {
  * not assumed, so a failed generation provably leaves nothing behind and never
  * reaches the instance — invariants (a), (b) and (d).
  */
-export async function generateAndValidate(spec, emit = () => {}, { updates = null } = {}) {
+export async function generateAndValidate(spec, emit = () => {}, { updates = null, artifactType = null } = {}) {
   const settings = getSettings();
   emit({ type: 'generating' });
 
@@ -1082,6 +1115,34 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
     if (existing) emit({ type: 'regenerating', file: existing.file, note: 'Updating the artifact this request already deployed.' });
   }
 
+  // What KIND of artifact is being built. Three sources, in falling order of
+  // authority, and the winner is reported rather than assumed:
+  //   existing  — a regeneration cannot change an artifact's kind. The platform
+  //               stores flows and subflows in the same table under different
+  //               `type` values, so flipping the kind would orphan the record
+  //               the Now.ID keys still point at.
+  //   explicit  — the panel's selector, or the agent's `artifact_type`.
+  //   intent    — the extractor's `kind`, which is the weakest of the three
+  //               and is only consulted when nobody said.
+  const existingArtifacts = existing ? parseArtifactContracts(existing.source) : [];
+  const existingKind = existingArtifacts.length && existingArtifacts.every((a) => a.kind === 'subflow') ? 'subflow' : null;
+  const requestedType = artifactType === 'subflow' || artifactType === 'flow' ? artifactType : null;
+  const intentType = intent?.kind === 'subflow' ? 'subflow' : 'flow';
+  const kind = existingKind || requestedType || intentType;
+  emit({
+    type: 'artifact_type',
+    artifactType: kind,
+    decidedBy: existingKind ? 'existing source' : requestedType ? 'the request' : 'intent extraction',
+    ...(requestedType && existingKind && requestedType !== existingKind
+      ? { note: `"${updates}" is already a ${existingKind}; a regeneration cannot change its kind.` }
+      : {}),
+  });
+
+  // Step 3: the reuse catalog. Built from every OTHER managed source, so a
+  // regeneration is never told to call itself.
+  const catalog = buildCatalog(await readProjectSources({ except: existing?.file || null }));
+  if (catalog.length) emit({ type: 'subflow_catalog', subflows: catalog.map((c) => ({ name: c.name, file: c.file, inputs: c.inputs.map((i) => i.name) })) });
+
   // Guard 2, second half: ONE filename for every attempt of this request.
   // Regeneration writes the artifact's own source; a new artifact writes a
   // fingerprint-named candidate and is renamed to its slug only once it builds.
@@ -1101,8 +1162,8 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
   // already matching on). On a new request it is the intent name, which is
   // extracted once and therefore stable across this request's attempts.
   const pins = existing
-    ? findArtifactNames(existing.source).map(({ kind, name }) => ({ kind, name }))
-    : (intent?.name ? [{ kind: intent.kind === 'subflow' ? 'subflow' : 'flow', name: intent.name }] : []);
+    ? findArtifactNames(existing.source).map(({ kind: k, name }) => ({ kind: k, name }))
+    : (intent?.name ? [{ kind, name: intent.name }] : []);
   if (pins.length) emit({ type: 'identity_pinned', pins });
 
   // A5 — refuses to send a retry that repeats an earlier prompt verbatim.
@@ -1125,6 +1186,8 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
       // backend honours it is measured and reported, never assumed.
       decoding: codegenDecoding(fingerprint, attempt),
       ledger,
+      artifactType: kind,
+      catalog,
     });
     source = stampSource(source, fingerprint);
 
@@ -1137,7 +1200,13 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
     }
 
     const artifacts = parseArtifacts(source);
-    const name = artifacts.find((a) => a.kind === 'flow')?.name || artifacts[0]?.name || intent.name || 'Generated Flow';
+    // For a subflow request the subflow IS the artifact, so it names the file
+    // and the read-back. Taking the flow first would name a subflow-only
+    // source after nothing at all.
+    const primary = kind === 'subflow'
+      ? artifacts.find((a) => a.kind === 'subflow')
+      : artifacts.find((a) => a.kind === 'flow');
+    const name = primary?.name || artifacts[0]?.name || intent.name || 'Generated Flow';
 
     // Pre-build static gate. All three checks run TOGETHER and their diagnostics
     // are fed back as one message: rejecting on the first problem only would
@@ -1151,6 +1220,26 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
       staticErrors.push(litCheck.diagnostic);
       stages.push('literals');
       emit({ type: 'literals_rejected', attempt, missing: litCheck.missing });
+    }
+
+    // Step 1 — the artifact that was asked for is the artifact that must come
+    // back, and a subflow's declared contract must be one the body honours.
+    const typeCheck = lintArtifactType(source, kind);
+    if (!typeCheck.ok) {
+      staticErrors.push(typeCheck.diagnostic);
+      stages.push('artifact_type');
+      emit({ type: 'artifact_type_rejected', attempt, artifactType: kind, errors: typeCheck.errors });
+    }
+
+    // Step 3 — the prefer-call rule. A candidate that re-creates a subflow this
+    // project already deploys is rejected with the existing one named, because
+    // a duplicate does not collide: it builds cleanly and doubles the number of
+    // records that have to be kept in step.
+    const reuseCheck = lintSubflowReuse(source, catalog, { file: path.basename(targetFile) });
+    if (!reuseCheck.ok) {
+      staticErrors.push(reuseCheck.diagnostic);
+      stages.push('subflow_reuse');
+      emit({ type: 'subflow_reuse_rejected', attempt, errors: reuseCheck.errors });
     }
 
     // A4 — an updated trigger without an explicit strategy inherits `once`,
@@ -1221,7 +1310,13 @@ export async function generateAndValidate(spec, emit = () => {}, { updates = nul
           file = finalPath;
         }
       }
-      return { ok: true, source, file, name, artifacts, intent, context, attempts: attempt };
+      return {
+        ok: true, source, file, name, artifacts, intent, context, attempts: attempt,
+        artifactType: kind,
+        // The contract is parsed from the source that just compiled, so it is
+        // what the install is about to deploy — not a summary of it.
+        contract: kind === 'subflow' ? parseSubflowContract(source) : null,
+      };
     }
 
     lastDiagnostics = extractDiagnostics(res);
@@ -1324,10 +1419,16 @@ export async function deploy(name, emit = () => {}) {
     if (row) {
       const sysId = row.sys_id?.value ?? row.sys_id;
       const detail = await flows.detail(sysId);
+      const type = detail.flow.type?.value ?? detail.flow.type;
       verified = {
         sys_id: sysId,
         name: detail.flow.name?.value ?? detail.flow.name,
-        type: detail.flow.type?.value ?? detail.flow.type,
+        type,
+        internal_name: detail.flow.internal_name?.value ?? detail.flow.internal_name ?? null,
+        // A subflow's contract is read back off the instance, not inferred from
+        // the source that was just installed. The two are reported side by side
+        // so a drift is visible instead of assumed away.
+        contract: type === 'subflow' ? await flows.contract(sysId).catch(() => null) : null,
         active: (detail.flow.active?.value ?? detail.flow.active) === 'true',
         link: base ? `${base}/nav_to.do?uri=sys_hub_flow.do?sys_id=${sysId}` : null,
         sourceTables: detail.sourceTables,
@@ -1353,24 +1454,29 @@ export async function deploy(name, emit = () => {}) {
  * ------------------------------------------------------------------ */
 
 /** Full pipeline: spec → validated source → install → read-back. */
-export async function createLiveFlow(spec, emit = () => {}, { updates = null } = {}) {
+export async function createLiveFlow(spec, emit = () => {}, { updates = null, artifactType = null } = {}) {
   const cap = await capability();
   if (!cap.ok) {
     return { ok: false, stage: 'capability', message: 'Live Fluent authoring is not available in this environment.', capability: cap };
   }
 
-  const gen = await generateAndValidate(spec, emit, { updates });
+  const gen = await generateAndValidate(spec, emit, { updates, artifactType });
   if (!gen.ok) return { ok: false, stage: 'validate', ...gen };
 
-  // Verification spec: only record-triggered flows can be proven by firing them.
-  // Scheduled flows and subflows are covered by verifySchedule()/their caller.
+  // Verification spec. A record-triggered flow is proven by firing it; a
+  // SUBFLOW is proven by calling it through the execution harness. Only a
+  // scheduled flow is left with metadata-only verification, and that is
+  // because no supported manual-execute path exists for one (§11).
   let verification = { available: false, reason: null };
-  const isRecordTriggered = String(gen.intent?.trigger_kind || '').startsWith('record');
-  if (isRecordTriggered) {
+  const isSubflow = gen.artifactType === 'subflow';
+  const isRecordTriggered = !isSubflow && String(gen.intent?.trigger_kind || '').startsWith('record');
+  if (isSubflow || isRecordTriggered) {
     const vr = await generateVerification(
       {
         spec, source: gen.source, context: gen.context, flowName: gen.name,
         promisedEffects: gen.intent?.promised_effects || [],
+        artifactType: gen.artifactType,
+        contract: gen.contract ? { ...gen.contract, name: gen.name } : null,
       },
       emit
     );
@@ -1380,14 +1486,18 @@ export async function createLiveFlow(spec, emit = () => {}, { updates = null } =
         available: true,
         file: path.basename(verifyPath(gen.name)),
         attempts: vr.attempts,
-        assertions: vr.spec.assert.length,
+        kind: isSubflow ? 'subflow' : 'flow',
+        // A subflow spec proves effects AND returned values, so the count a
+        // reader sees has to include both or a spec that checks two outputs
+        // reads as one that checks nothing.
+        assertions: (vr.spec.assert?.length || 0) + (vr.spec.expectOutputs?.length || 0),
         // Promises this instance cannot show, each confirmed by measurement.
         // Reported so a partial proof never reads as a complete one.
         unverifiable: vr.unverifiable || [],
       };
       emit({
         type: 'verify_spec_ready',
-        assertions: vr.spec.assert.length,
+        assertions: verification.assertions,
         attempts: vr.attempts,
         unverifiable: (vr.unverifiable || []).length,
       });
@@ -1414,6 +1524,11 @@ export async function createLiveFlow(spec, emit = () => {}, { updates = null } =
     artifacts: gen.artifacts,
     attempts: gen.attempts,
     source: gen.source,
+    artifactType: gen.artifactType,
+    // Two readings of the same contract: what the source that just compiled
+    // declares, and what the instance actually stored. Reported side by side
+    // rather than one standing in for the other.
+    contract: gen.contract,
     verification,
   };
 }
@@ -1421,6 +1536,19 @@ export async function createLiveFlow(spec, emit = () => {}, { updates = null } =
 /** Managed artifacts: the source files, plus their live state on the instance. */
 export async function listManaged() {
   const files = await listSourceFiles();
+  const sources = await readProjectSources();
+  // One parse of the whole project answers "what does this call" and "what
+  // calls this" for every artifact — asking per artifact would re-read every
+  // source once per row.
+  const { nodes } = buildDependencyGraph(sources);
+  const edges = new Map(nodes.map((n) => [n.name, n]));
+  const contracts = new Map();
+  for (const { source } of sources) {
+    for (const a of parseArtifactContracts(source)) {
+      if (a.kind === 'subflow' && a.name) contracts.set(a.name, { inputs: a.inputs, outputs: a.outputs, exportName: a.exportName });
+    }
+  }
+
   const out = [];
   for (const f of files) {
     const src = await fsp.readFile(path.join(FLOWS_DIR, f), 'utf8').catch(() => '');
@@ -1443,10 +1571,25 @@ export async function listManaged() {
       if (fs.existsSync(vf)) {
         try {
           const vs = JSON.parse(await fsp.readFile(vf, 'utf8'));
-          verification = { available: true, file: path.basename(vf), assertions: vs.assert?.length ?? 0, setupTable: vs.setup?.table };
+          verification = {
+            available: true,
+            file: path.basename(vf),
+            kind: vs.kind === 'subflow' ? 'subflow' : 'flow',
+            // Output checks count: a subflow spec that proves two returned
+            // values and touches no record is not a spec with zero assertions.
+            assertions: (vs.assert?.length ?? 0) + (vs.expectOutputs?.length ?? 0),
+            setupTable: vs.setup?.table,
+          };
         } catch { verification = { available: false, error: 'verification spec unreadable' }; }
       }
-      out.push({ file: f, name: a.name, kind: a.kind, live, verification });
+      const edge = edges.get(a.name) || { calls: [], calledBy: [], unresolved: [] };
+      out.push({
+        file: f, name: a.name, kind: a.kind, live, verification,
+        contract: contracts.get(a.name) || null,
+        calls: edge.calls,
+        calledBy: edge.calledBy,
+        unresolvedCalls: edge.unresolved,
+      });
     }
   }
   const staged = await fsp.readdir(STAGED_DIR).catch(() => []);
@@ -1462,10 +1605,50 @@ export async function listManaged() {
 export async function removeManaged(name, emit = () => {}) {
   const file = sourcePath(name);
   if (!fs.existsSync(file)) {
+    // "No managed source file" is true and useless when the artifact IS managed
+    // and simply shares a file with another one — a flow+subflow pair lives in
+    // one source named after the flow. Say which file holds it instead.
+    const holder = (await readProjectSources()).find((s) => parseArtifacts(s.source).some((a) => a.name === name));
+    if (holder) {
+      const siblings = parseArtifacts(holder.source).filter((a) => a.name !== name).map((a) => `"${a.name}"`);
+      return {
+        ok: false,
+        message:
+          `"${name}" is declared in ${holder.file}, together with ${siblings.join(', ') || 'nothing else'}, so it has no ` +
+          `source file of its own to remove. Deleting that file would remove every artifact in it. Regenerate ` +
+          `${siblings.length ? siblings.join(', ') : 'the file'} without this artifact, or delete the file's own artifact by name.`,
+      };
+    }
     return { ok: false, message: `No managed source file for "${name}" (expected ${path.basename(file)}).` };
   }
   const src = await fsp.readFile(file, 'utf8');
   const artifacts = parseArtifacts(src);
+
+  // Dependency safety. Removing a source is a pending DELETE: the next install
+  // takes the record off the instance. If a live flow still calls it, that flow
+  // keeps its wfa.subflow step pointing at a record that no longer exists — the
+  // build stays green (the caller's own source is untouched) and every
+  // execution fails at that step. So the delete is refused with the callers
+  // NAMED, which is the only form of this message anyone can act on.
+  const sources = await readProjectSources();
+  const blocked = [];
+  for (const a of artifacts) {
+    const callers = callersOf(a.name, sources).filter((c) => !artifacts.some((x) => x.name === c));
+    if (callers.length) blocked.push({ artifact: a.name, callers });
+  }
+  if (blocked.length) {
+    const detail = blocked
+      .map((b) => `"${b.artifact}" is still called by ${b.callers.map((c) => `"${c}"`).join(', ')}`)
+      .join('; ');
+    return {
+      ok: false,
+      blocked,
+      message:
+        `Refusing to delete: ${detail}. Deleting it would leave those callers pointing at a record that no ` +
+        `longer exists — their own source is unchanged, so the build stays green and every execution fails ` +
+        `at the subflow step. Delete or edit the caller first, then remove this.`,
+    };
+  }
 
   await fsp.rm(file, { force: true });
   // The verification spec belongs to the source; it must not outlive it.
@@ -1659,13 +1842,67 @@ RULES:
     - "assertAfterResume" holds the effects that follow approval (the work note, the field update).
     Putting a post-approval effect in "assert" is wrong — it has not happened yet and the run will fail a correct flow.`;
 
-/** Ask the model for a verification spec for a freshly generated flow. */
-async function generateVerifySpec({ spec, source, context, flowName, promisedEffects, priorErrors, evidence, decoding, ledger }) {
+const SUBFLOW_VERIFY_SYSTEM = `You write a VERIFICATION SPEC that proves a ServiceNow SUBFLOW actually does what a request asked for.
+
+A subflow has NO trigger. It is proven by CALLING it with real inputs and then reading what it changed. Respond with ONLY a JSON object — no prose, no markdown fences:
+
+{
+  "kind": "subflow",
+  "subflow": "<exact subflow name>",
+
+  // OPTIONAL scenery: a record the subflow acts on. Omit only if the subflow needs no record at all.
+  "setup":   { "table": "<table>", "payload": { "<field>": "<value>", ... } },
+
+  // The CALL. One key per input the subflow declares; the value may be a literal
+  // or the token {{setup.sys_id}}, which is replaced with the setup record's sys_id.
+  "inputs":  { "<declaredInputName>": "<value or {{setup.sys_id}}>" },
+
+  "wait":    { "timeoutSec": 120 },
+
+  // Effects on records, read back after the execution settles.
+  "assert":  [ { "table": "<table>",
+                 "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" },
+                 "field": "<field name>",
+                 "expect": { "value": "<raw value>" } | { "display": "<display value>" },
+                 "note": "<the promise this proves>" } ],
+
+  // Values the subflow RETURNS. Only names it declares as outputs.
+  "expectOutputs": [ { "name": "<declared output>", "expect": { "value": "<raw value>" }, "note": "<the promise this proves>" } ],
+
+  "cleanup": [ { "table": "<table>", "locate": { "bySetupRecord": true } | { "byQuery": "<encoded query>" } } ]
+}
+
+RULES:
+1. inputs is a CONTRACT, not prose. Use exactly the input names listed under SUBFLOW CONTRACT below — every mandatory one, and nothing that is not on the list. An undeclared input is dropped by the runner, so the call would prove something other than what you wrote.
+2. A reference input takes a sys_id. To pass the setup record, write "{{setup.sys_id}}".
+3. Every assertion must test an effect the REQUEST PROMISED. FORBIDDEN: asserting a field that setup.payload itself sets — that is true regardless of what the subflow does.
+4. COVER EVERY PROMISE: one assertion or expectOutputs entry per observable effect listed under PROMISED EFFECTS.
+5. expectOutputs reads the raw stored value, so booleans are "true"/"false" and an empty string is "". Only name outputs the contract declares.
+6. Use "display" for reference and choice fields; "value" for raw strings, numbers and journal text. For journal fields (work_notes, comments) assert the distinctive text — a substring match is applied.
+7. {{setup.sys_id}} is the ONLY token, and it works in inputs values and in locate.byQuery. NEVER in an expect value: nothing substitutes it there and it fails a correct subflow. If an expected value is generated (a number, a sys_id), move the proof into the LOCATOR and assert a field whose value you know.
+8. EXPECTED VALUES ARE LITERAL. No "*", no "%", no "not empty", no "<something>". To prove a field is merely set, put ISNOTEMPTY in the locator and assert a field you know.
+9. Never assert a field that is not in the REAL SCHEMA below, and never assume a value for a field the live context reports as EMPTY on this instance.
+10. DERIVED FIELDS: on task tables "priority" is CALCULATED from "impact" and "urgency". To create a P1 record set {"impact":"1","urgency":"1"} and never write priority directly.
+11. cleanup MUST include the setup record ({ "bySetupRecord": true }) plus every record the subflow creates.
+12. Keep setup.payload minimal: what the subflow needs to do its job, plus a short_description so the record is identifiable.`;
+
+/** Ask the model for a verification spec for a freshly generated flow or subflow. */
+async function generateVerifySpec({ spec, source, context, flowName, promisedEffects, priorErrors, evidence, decoding, ledger, artifactType = 'flow', contract = null }) {
+  const isSubflow = artifactType === 'subflow';
   const parts = [
     `AUTOMATION REQUEST (the promises to verify):\n${spec}`,
-    `FLOW NAME: ${flowName}`,
+    `${isSubflow ? 'SUBFLOW' : 'FLOW'} NAME: ${flowName}`,
     `COMPILED FLUENT SOURCE:\n${source}`,
   ];
+  if (isSubflow && contract) {
+    const fmt = (list) => (list?.length
+      ? list.map((f) => `  ${f.name}: ${f.type}${f.reference ? ` (reference to ${f.reference})` : ''}${f.mandatory ? ' — MANDATORY' : ''}`).join('\n')
+      : '  (none)');
+    parts.push(
+      `SUBFLOW CONTRACT — these names are exact, and the spec is rejected if it invents one or omits a mandatory input:\n` +
+      `inputs:\n${fmt(contract.inputs)}\noutputs:\n${fmt(contract.outputs)}`
+    );
+  }
   if (promisedEffects?.length) {
     parts.push(`PROMISED EFFECTS — one assertion each, ${promisedEffects.length} in total:\n${promisedEffects.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}`);
   }
@@ -1686,7 +1923,7 @@ async function generateVerifySpec({ spec, source, context, flowName, promisedEff
   const user = parts.join('\n\n');
   ledger?.record(user);
 
-  const raw = await chatOnce({ system: VERIFY_SYSTEM, user, maxTokens: 6000, decoding });
+  const raw = await chatOnce({ system: isSubflow ? SUBFLOW_VERIFY_SYSTEM : VERIFY_SYSTEM, user, maxTokens: 6000, decoding });
   const cleaned = String(raw || '').replace(/```json|```/g, '').trim();
   try { return JSON.parse(cleaned); } catch {
     const m = cleaned.match(/\{[\s\S]*\}/);
@@ -1750,9 +1987,15 @@ export function validateSlaAssertion(a, at = 'assert[0]') {
  * HERE rather than trusted to the prompt: an assertion that reads a field the
  * setup payload already wrote would pass no matter what the flow does.
  */
-export function validateVerifySpec(v, { promisedEffects = [], verifiedExcuses = 0 } = {}) {
+export function validateVerifySpec(v, { promisedEffects = [], verifiedExcuses = 0, contract = null } = {}) {
   const errors = [];
   if (!v || typeof v !== 'object') return { ok: false, errors: ['Not a JSON object.'] };
+
+  // A subflow has no trigger, so "create a record that satisfies it" is not a
+  // shape it can take. Its spec is validated against its own rules — including
+  // the one a flow spec cannot have: the inputs are a DECLARED contract, so a
+  // missing or invented input is a mechanical error, not a judgement call.
+  if (v.kind === 'subflow') return validateSubflowVerifySpec(v, { promisedEffects, contract });
 
   // A promise this instance cannot store may be excused from coverage, but only
   // with a reason that has been CHECKED against the live instance.
@@ -1897,6 +2140,145 @@ export function validateVerifySpec(v, { promisedEffects = [], verifiedExcuses = 
   }
 
   if (!Array.isArray(v.cleanup) || !v.cleanup.some((c) => c?.locate?.bySetupRecord)) {
+    errors.push('cleanup must include the setup record ({ "locate": { "bySetupRecord": true } }).');
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * A subflow verification spec.
+ *
+ * The flow shape does not fit: there is no trigger to satisfy, so `setup` is
+ * scenery rather than the thing that fires the artifact, and the artifact is
+ * fired by an explicit CALL with explicit inputs.
+ *
+ * That call is what makes this validator stricter than the flow one. A flow's
+ * trigger condition has to be read out of source and mirrored, which is a
+ * judgement the model can get subtly wrong in the same direction twice. A
+ * subflow's inputs are a DECLARED contract, read off the source and the
+ * instance, so "you passed an input this subflow does not declare" and "you
+ * left out a mandatory one" are arithmetic.
+ */
+export function validateSubflowVerifySpec(v, { promisedEffects = [], contract = null } = {}) {
+  const errors = [];
+  if (!v.subflow || typeof v.subflow !== 'string') {
+    errors.push('subflow is required — the exact name of the subflow this spec proves.');
+  }
+
+  const setup = v.setup;
+  if (setup !== undefined && setup !== null) {
+    if (!setup.table) errors.push('setup.table is required when a setup record is used.');
+    if (!setup.payload || typeof setup.payload !== 'object' || !Object.keys(setup.payload).length) {
+      errors.push('setup.payload must be a non-empty object when setup is present.');
+    }
+  }
+  const setupWrites = setup?.payload && typeof setup.payload === 'object' ? setup.payload : {};
+
+  if (!v.inputs || typeof v.inputs !== 'object' || Array.isArray(v.inputs)) {
+    errors.push('inputs must be an object of the values to call the subflow with (use {} only if it declares no inputs).');
+  } else if (contract) {
+    const declared = new Map((contract.inputs || []).map((i) => [i.name, i]));
+    for (const key of Object.keys(v.inputs)) {
+      if (declared.has(key)) continue;
+      errors.push(
+        `inputs."${key}" is not an input of "${contract.name}". Its declared inputs are ` +
+        `${[...declared.keys()].map((k) => `"${k}"`).join(', ') || '(none)'}. ` +
+        'An undeclared input is dropped by the runner, so the call would prove something other than what is written here.'
+      );
+    }
+    for (const [key, def] of declared) {
+      if (!def.mandatory || key in v.inputs) continue;
+      errors.push(`inputs."${key}" is mandatory on "${contract.name}" and is missing, so the call cannot run.`);
+    }
+  }
+
+  // Token discipline, identical to the flow path: {{setup.sys_id}} is the only
+  // substitution, and here it is also allowed in an INPUT value because that is
+  // how the setup record is handed to the subflow.
+  for (const [key, val] of Object.entries(v.inputs || {})) {
+    if (typeof val !== 'string') continue;
+    for (const token of val.match(/\{\{[^}]*\}\}/g) || []) {
+      if (token === '{{setup.sys_id}}') {
+        if (!setup) errors.push(`inputs."${key}" uses {{setup.sys_id}} but the spec has no setup record to substitute.`);
+        continue;
+      }
+      errors.push(`inputs."${key}" contains ${token}, which the runner does not substitute. The only token is {{setup.sys_id}}.`);
+    }
+  }
+
+  const asserts = Array.isArray(v.assert) ? v.assert : [];
+  const outs = Array.isArray(v.expectOutputs) ? v.expectOutputs : [];
+  if (v.expectOutputs !== undefined && !Array.isArray(v.expectOutputs)) {
+    errors.push('expectOutputs, when present, must be an array of { name, expect } entries.');
+  }
+  if (!asserts.length && !outs.length) {
+    errors.push(
+      'A subflow spec needs at least one assertion or one expected output. Running a subflow and checking ' +
+      'nothing proves only that it did not crash.'
+    );
+  }
+  if (promisedEffects.length > 1 && asserts.length + outs.length < promisedEffects.length) {
+    errors.push(
+      `The request promises ${promisedEffects.length} observable effects but only ${asserts.length + outs.length} ` +
+      `check(s) were written. One per promised effect: ${promisedEffects.map((e, i) => `(${i + 1}) ${e}`).join('; ')}.`
+    );
+  }
+
+  asserts.forEach((a, i) => {
+    const at = `assert[${i}]`;
+    if (a?.type === 'sla') { errors.push(...validateSlaAssertion(a, at)); return; }
+    if (!a?.field) errors.push(`${at}.field is required.`);
+    if (!a?.table) errors.push(`${at}.table is required.`);
+    if (!a?.locate?.bySetupRecord && !a?.locate?.byQuery) errors.push(`${at}.locate needs bySetupRecord or byQuery.`);
+    if (a?.locate?.bySetupRecord && !setup) errors.push(`${at}.locate.bySetupRecord needs a setup record, and this spec has none.`);
+    const hasExpect = a?.expect && (a.expect.value !== undefined || a.expect.display !== undefined);
+    if (!hasExpect) errors.push(`${at}.expect needs a value or display.`);
+    for (const half of ['value', 'display']) {
+      const rawValue = a?.expect?.[half];
+      if (typeof rawValue !== 'string') continue;
+      const token = rawValue.match(/\{\{[^}]*\}\}/g);
+      if (token) {
+        errors.push(
+          `${at}.expect.${half} contains ${token.join(', ')}, which the runner does not substitute — it is ` +
+          'compared literally and FAILS a correct subflow. Put the proof in locate.byQuery instead.'
+        );
+      }
+      if (/[*%]/.test(rawValue) || /^\s*(not\s+empty|non-?empty|any.*|<.+>)\s*$/i.test(rawValue)) {
+        errors.push(
+          `${at}.expect.${half} is "${rawValue}", which is not a literal value. Comparison is exact for ` +
+          'ordinary fields and containment for journal fields; wildcards and phrases fail a correct subflow.'
+        );
+      }
+    }
+    // The anti-trivial rule, unchanged in spirit: an assertion on a field the
+    // setup payload already wrote is true whatever the subflow does.
+    if (a?.locate?.bySetupRecord && a?.table === setup?.table && a.field in setupWrites) {
+      errors.push(
+        `${at} asserts "${a.field}" on the setup record, but setup.payload already sets it to ` +
+        `"${setupWrites[a.field]}". That assertion is true regardless of what the subflow does.`
+      );
+    }
+  });
+
+  outs.forEach((o, i) => {
+    const at = `expectOutputs[${i}]`;
+    if (!o?.name) { errors.push(`${at}.name is required.`); return; }
+    if (!o?.expect || o.expect.value === undefined) {
+      errors.push(`${at}.expect.value is required — outputs are read back as raw values, not display values.`);
+    }
+    if (contract) {
+      const declared = (contract.outputs || []).map((x) => x.name);
+      if (!declared.includes(o.name)) {
+        errors.push(
+          `${at}.name "${o.name}" is not an output of "${contract.name}". Its declared outputs are ` +
+          `${declared.map((d) => `"${d}"`).join(', ') || '(none)'}. An undeclared output reads back as absent, ` +
+          'so this check would fail a correct subflow.'
+        );
+      }
+    }
+  });
+
+  if (setup && (!Array.isArray(v.cleanup) || !v.cleanup.some((c) => c?.locate?.bySetupRecord))) {
     errors.push('cleanup must include the setup record ({ "locate": { "bySetupRecord": true } }).');
   }
   return { ok: errors.length === 0, errors };
@@ -2196,9 +2578,15 @@ async function generateVerification(args, emit = () => {}) {
     // unproven assertion — otherwise the hatch becomes a way to assert nothing
     // and still report a clean pass.
     const excuseCheck = await checkUnverifiableClaims(candidate);
+    // A subflow spec carries `kind: "subflow"`, which validateVerifySpec
+    // dispatches on. If the model forgets it, the flow validator runs and
+    // rejects the spec for missing a trigger it never had — so the
+    // discriminator is imposed here rather than asked for.
+    if (args.artifactType === 'subflow') candidate.kind = 'subflow';
     const check = validateVerifySpec(candidate, {
       promisedEffects: args.promisedEffects || [],
       verifiedExcuses: excuseCheck.verified.length,
+      contract: args.contract || null,
     });
     const fieldCheck = check.ok ? await checkVerifySpecFields(candidate) : { ok: true, errors: [] };
     if (check.ok && fieldCheck.ok && excuseCheck.ok) {
@@ -2317,6 +2705,40 @@ async function runSlaAssertion(a, { setupSysId, phase }) {
 }
 
 /**
+ * Run a list of assertions against a settled execution.
+ *
+ * Hoisted out of `verify()` so the SUBFLOW runner asserts effects with exactly
+ * the same code: the journal read path, the containment-vs-exact comparison and
+ * the locator semantics are subtle enough that a second implementation would
+ * drift, and a drifting assertion runner reports a green nobody earned.
+ */
+async function runAssertionList(list, phase, { setupSysId }, emit = () => {}) {
+  const out = [];
+  for (const a of list || []) {
+    if (a?.type === 'sla') {
+      const outcome = await runSlaAssertion(a, { setupSysId, phase });
+      out.push(outcome.assertion);
+      emit({ type: 'verify_assert', phase, pass: outcome.assertion.pass, field: `sla:${a.sla}`, reason: outcome.assertion.reason });
+      continue;
+    }
+    const target = await locate(a.locate, a.table, { setupSysId });
+    if (!target) {
+      out.push({ phase, pass: false, table: a.table, field: a.field, note: a.note, reason: 'No record matched the locator.' });
+      emit({ type: 'verify_assert', phase, pass: false, field: a.field, reason: 'no record matched' });
+      continue;
+    }
+    const actual = await readFieldValue(a.table, target, a.field);
+    const cmp = compare(actual, a.expect);
+    out.push({
+      phase, pass: cmp.pass, table: a.table, field: a.field, note: a.note,
+      expected: cmp.want, actual: cmp.got, mode: cmp.mode, sys_id: target,
+    });
+    emit({ type: 'verify_assert', phase, pass: cmp.pass, field: a.field, expected: cmp.want, actual: cmp.got });
+  }
+  return out;
+}
+
+/**
  * Execute a verification spec: setup → wait → assert → cleanup.
  * Cleanup runs in `finally`, so a failed assertion never leaves test data behind.
  * A wait timeout is a FAIL carrying the last observed context state, not a hang.
@@ -2324,9 +2746,11 @@ async function runSlaAssertion(a, { setupSysId, phase }) {
 export async function verify(name, emit = () => {}) {
   const file = verifyPath(name);
   if (!fs.existsSync(file)) {
-    return { ok: false, available: false, message: `No verification spec for "${name}" (expected ${path.basename(file)}). Scheduled flows and subflows are verified by metadata instead.` };
+    return { ok: false, available: false, message: `No verification spec for "${name}" (expected ${path.basename(file)}). Scheduled flows are verified by metadata instead.` };
   }
   const spec = JSON.parse(await fsp.readFile(file, 'utf8'));
+  // A triggerless artifact cannot be proven by creating a record. It is called.
+  if (spec.kind === 'subflow') return verifySubflow(name, spec, emit);
   const check = validateVerifySpec(spec);
   // A stored spec is checked against the live schema too: a locator naming a
   // field that does not exist passes vacuously, so running it would report a
@@ -2436,27 +2860,7 @@ export async function verify(name, emit = () => {}) {
 
     // --- assert ---
     const runAssertions = async (list, phase) => {
-      for (const a of list) {
-        if (a?.type === 'sla') {
-          const outcome = await runSlaAssertion(a, { setupSysId, phase });
-          assertions.push(outcome.assertion);
-          emit({ type: 'verify_assert', phase, pass: outcome.assertion.pass, field: `sla:${a.sla}`, reason: outcome.assertion.reason });
-          continue;
-        }
-        const target = await locate(a.locate, a.table, { setupSysId });
-        if (!target) {
-          assertions.push({ phase, pass: false, table: a.table, field: a.field, note: a.note, reason: 'No record matched the locator.' });
-          emit({ type: 'verify_assert', phase, pass: false, field: a.field, reason: 'no record matched' });
-          continue;
-        }
-        const actual = await readFieldValue(a.table, target, a.field);
-        const cmp = compare(actual, a.expect);
-        assertions.push({
-          phase, pass: cmp.pass, table: a.table, field: a.field, note: a.note,
-          expected: cmp.want, actual: cmp.got, mode: cmp.mode, sys_id: target,
-        });
-        emit({ type: 'verify_assert', phase, pass: cmp.pass, field: a.field, expected: cmp.want, actual: cmp.got });
-      }
+      assertions.push(...await runAssertionList(list, phase, { setupSysId }, emit));
     };
     await runAssertions(spec.assert, 'paused');
 
@@ -2521,6 +2925,138 @@ export async function verify(name, emit = () => {}) {
     for (const c of created) {
       await table.remove(c.table, c.sys_id).catch(() => {});
     }
+  }
+}
+
+/**
+ * Prove a deployed SUBFLOW by calling it: setup → invoke → settle → assert →
+ * cleanup, with the same finally-block discipline as the flow runner.
+ *
+ * The invocation goes through execution-harness.js (a one-shot scheduled job
+ * driving sn_fd.FlowAPI), which is shared infrastructure — the same path will
+ * verify fix scripts and script includes.
+ *
+ * Everything the runner needs about the subflow is read off the INSTANCE, not
+ * guessed: its sys_id by name, its `<scope>.<internal_name>` address, and its
+ * declared outputs. A subflow that is not deployed fails here rather than
+ * producing a job that calls a name the runner cannot resolve.
+ */
+export async function verifySubflow(name, spec, emit = () => {}) {
+  const hits = await flows.findByName(spec.subflow || name, 'subflow');
+  if (!hits.length) {
+    return {
+      ok: false, available: true, kind: 'subflow', stage: 'resolve',
+      message: `"${spec.subflow || name}" is not on the instance as a subflow, so there is nothing to call.`,
+    };
+  }
+  const sysId = hits[0].sys_id?.value ?? hits[0].sys_id;
+  let address;
+  let contract;
+  try {
+    [address, contract] = await Promise.all([flows.qualifiedName(sysId), flows.contract(sysId)]);
+  } catch (err) {
+    return { ok: false, available: true, kind: 'subflow', stage: 'resolve', message: err.message };
+  }
+
+  const check = validateVerifySpec(spec, { contract: { ...contract, name: address.name } });
+  const fieldCheck = check.ok ? await checkVerifySpecFields(spec) : { ok: true, errors: [] };
+  if (!check.ok || !fieldCheck.ok) {
+    return {
+      ok: false, available: true, kind: 'subflow',
+      message: 'The stored verification spec is invalid — it was NOT run, because it could report a false pass.',
+      errors: [...check.errors, ...fieldCheck.errors],
+    };
+  }
+
+  const created = [];
+  let setupSysId = null;
+  let setupLabel = null;
+  let execution = null;
+  let outputs = {};
+  const assertions = [];
+
+  try {
+    if (spec.setup?.table) {
+      emit({ type: 'verify_setup', table: spec.setup.table, payload: spec.setup.payload });
+      const rec = await table.create(spec.setup.table, spec.setup.payload);
+      setupSysId = rec.sys_id?.value ?? rec.sys_id;
+      setupLabel = rec.number?.value ?? rec.name?.value ?? setupSysId;
+      created.push({ table: spec.setup.table, sys_id: setupSysId });
+      emit({ type: 'verify_setup_done', record: setupLabel, sys_id: setupSysId });
+    }
+
+    // The token substitution that hands the setup record to the subflow. Done
+    // here rather than in the harness: the harness knows nothing about
+    // verification specs, and should not learn.
+    const inputs = {};
+    for (const [key, value] of Object.entries(spec.inputs || {})) {
+      inputs[key] = typeof value === 'string' ? value.replace(/\{\{setup\.sys_id\}\}/g, setupSysId ?? '') : value;
+    }
+
+    emit({ type: 'verify_invoking', subflow: address.name, qualified: address.qualified, inputs });
+    const run = await executeSubflow({
+      qualified: address.qualified,
+      inputs,
+      declaredOutputs: (contract.outputs || []).map((o) => o.name),
+      label: address.name,
+      settleTimeoutSec: Math.min(Math.max(Number(spec.wait?.timeoutSec) || 120, 15), 300),
+      emit,
+    });
+    execution = run.execution;
+    outputs = run.outputs || {};
+
+    if (!run.ok) {
+      return {
+        ok: false, available: true, kind: 'subflow', stage: run.stage,
+        subflow: address, mechanism: run.mechanism, harness: run.cleanup,
+        setup: setupSysId ? { record: setupLabel, sys_id: setupSysId, payload: spec.setup.payload } : null,
+        execution, outputs, assertions: [],
+        message: run.message,
+      };
+    }
+
+    // Actions land a moment after the context settles — the same gap the
+    // record-triggered runner allows for.
+    await new Promise((r) => setTimeout(r, 4000));
+
+    assertions.push(...await runAssertionList(spec.assert || [], 'called', { setupSysId }, emit));
+
+    for (const o of spec.expectOutputs || []) {
+      const cell = outputs[o.name];
+      const got = cell === undefined ? null : String(cell.value ?? '');
+      const want = String(o.expect?.value ?? '');
+      const pass = cell !== undefined && norm(got) === norm(want);
+      assertions.push({
+        phase: 'output', pass, type: 'output', field: o.name, note: o.note,
+        expected: want, actual: got, mode: 'exact',
+        reason: cell === undefined ? `The execution returned no output named "${o.name}".` : undefined,
+      });
+      emit({ type: 'verify_assert', phase: 'output', pass, field: o.name, expected: want, actual: got });
+    }
+
+    const passed = assertions.filter((x) => x.pass).length;
+    return {
+      ok: assertions.length > 0 && passed === assertions.length,
+      available: true, kind: 'subflow', stage: 'assert',
+      subflow: address, mechanism: run.mechanism, harness: run.cleanup,
+      setup: setupSysId ? { record: setupLabel, sys_id: setupSysId, payload: spec.setup.payload } : null,
+      inputs, execution, outputs, assertions,
+      summary: `${passed}/${assertions.length} checks passed`,
+      message: passed === assertions.length
+        ? `Verified: ${passed}/${assertions.length} checks passed against a real subflow execution.`
+        : `${assertions.length - passed} of ${assertions.length} checks FAILED.`,
+    };
+  } finally {
+    emit({ type: 'verify_cleanup' });
+    for (const c of spec.cleanup || []) {
+      try {
+        const t = c.table || spec.setup?.table;
+        if (!t || c.locate?.bySetupRecord) continue; // the setup record is handled below
+        const id = await locate(c.locate, t, { setupSysId });
+        if (id) await table.remove(t, id).catch(() => {});
+      } catch { /* cleanup must never mask the real result */ }
+    }
+    for (const c of created) await table.remove(c.table, c.sys_id).catch(() => {});
   }
 }
 
@@ -2649,5 +3185,14 @@ export async function verifySchedule(name, expected = {}) {
 export const fluent = {
   capability, createLiveFlow, generateAndValidate, deploy,
   listManaged, removeManaged, smokeRun, slugify, parseArtifacts,
-  verify, verifySchedule, validateVerifySpec, regenerateVerification,
+  verify, verifySubflow, verifySchedule, validateVerifySpec,
+  validateSubflowVerifySpec, regenerateVerification, subflowCatalog,
 };
+
+/**
+ * The reuse catalog, for callers that want to see what codegen will be told.
+ * Read-only, and derived from the same sources the pipeline builds it from.
+ */
+export async function subflowCatalog() {
+  return buildCatalog(await readProjectSources());
+}
