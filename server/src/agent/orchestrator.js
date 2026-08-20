@@ -114,11 +114,63 @@ function awaitApproval(state, approvalId) {
  * not match, because it does not ask for permission to proceed.
  * ------------------------------------------------------------------ */
 
-/** "Shall I ...?", "Let me know if you want me to ...", "Confirm and I will ...". */
-const ASKS_TO_PROCEED = /(\bshall i\b|\bwould you like me to\b|\bdo you want me to\b|\blet me know if\b|\bshould i (?:go ahead|proceed|create|update|delete|apply)\b|\bconfirm(?:\s+and)?\b[^.?!]*\bi(?:'ll| will)\b|\bplease confirm\b|\bgive me the go[- ]ahead\b|\bwaiting for your (?:approval|confirmation|go)\b)/i;
+/**
+ * "Shall I ...?", "Let me know ...", "If you're happy with this, I'll ...".
+ *
+ * Widened after a measured miss (§32, A3): the model produced a complete flow
+ * design and closed with "If you're happy with this design, I'll create the
+ * flow on the instance. Let me know!" — every bit as stalled as the shape this
+ * guard was written for, and matched by none of its patterns. "let me know IF"
+ * required an "if" the model did not write, and an offer phrased as a promise
+ * ("I'll create ...") was not covered at all.
+ *
+ * Widening is safe precisely because the guard also requires the turn to have
+ * changed NOTHING: "Created it. Let me know if you want anything else" carries
+ * a mutation and never reaches these patterns.
+ */
+const ASKS_TO_PROCEED = new RegExp(
+  [
+    String.raw`\bshall i\b`,
+    String.raw`\bwould you like me to\b`,
+    String.raw`\bdo you want me to\b`,
+    String.raw`\blet me know\b`,
+    String.raw`\bshould i (?:go ahead|proceed|create|update|delete|apply)\b`,
+    String.raw`\bconfirm(?:\s+and)?\b[^.?!]*\bi(?:'ll| will)\b`,
+    String.raw`\bplease confirm\b`,
+    String.raw`\bgive me the go[- ]ahead\b`,
+    String.raw`\bwaiting for your (?:approval|confirmation|go)\b`,
+    // An offer phrased as a promise. Only reachable when nothing was changed.
+    String.raw`\bif you(?:'re| are)? ?(?:happy|ok|okay|good)\b`,
+    String.raw`\bi(?:'ll| will) (?:then )?(?:create|build|add|update|deploy|apply|set up|go ahead|proceed)\b`,
+    String.raw`\bjust say the word\b`,
+    String.raw`\bready to (?:create|build|deploy|proceed)\b`,
+  ].join('|'),
+  'i'
+);
 
-/** The user told us to do something, rather than asking about something. */
-const IS_DIRECTIVE = /\b(make|create|add|set|update|change|remove|delete|rename|build|configure|hide|show|require|attach|enable|disable|reorder|fix)\b/i;
+/**
+ * The user told us to do something, rather than asking about something.
+ *
+ * Also widened by the same measurement. "When a P1 incident is UPDATED to state
+ * On Hold ... escalate to the duty manager" is as directive as a sentence gets,
+ * and it matched nothing: \bupdate\b does not match "updated", and none of the
+ * automation verbs a flow request is actually phrased with were listed. A request
+ * for automation is usually written as a RULE ("when X, do Y") rather than as an
+ * order, so the verbs of the DO half have to be here too.
+ */
+const DIRECTIVE_VERBS = [
+  'make', 'create', 'add', 'set', 'update', 'change', 'remove', 'delete', 'rename', 'build',
+  'configure', 'hide', 'show', 'require', 'attach', 'enable', 'disable', 'reorder', 'fix',
+  'escalate', 'notify', 'assign', 'route', 'send', 'email', 'trigger', 'close', 'reopen',
+  'generate', 'deploy', 'schedule', 'approve',
+];
+// Some of these are also ordinary nouns ("the email", "the trigger"), so this
+// list alone would over-match. It never fires alone: the assistant must ALSO
+// have asked to proceed and changed nothing. When it is wrong the cost is one
+// extra iteration carrying a nudge; when it was too narrow the cost was a whole
+// acceptance run that designed a flow and built nothing. "log" is deliberately
+// absent — it is a noun far more often than a verb here.
+const IS_DIRECTIVE = new RegExp(`\\b(?:${DIRECTIVE_VERBS.join('|')})(?:s|d|es|ed|ing)?\\b`, 'i');
 
 export function detectStalledTurn({ assistantText, userText, mutatingCallCount = 0 }) {
   // The test is whether the turn CHANGED anything, not whether it called

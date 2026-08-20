@@ -346,6 +346,38 @@ test('A6 recognises the other phrasings of the same stall', () => {
   }
 });
 
+test('A6 catches the flow-design stall measured in section 32', () => {
+  // Verbatim from the A3 acceptance run: a complete design, the right subflow
+  // named, "we don't duplicate logic" — and nothing built. Neither half of the
+  // guard matched. "let me know IF" wanted an "if" the model did not write, and
+  // update does not match "updated".
+  const userText =
+    "When a P1 incident is updated to state On Hold with hold reason Awaiting Vendor, " +
+    "escalate to the duty manager with the message 'P1 on vendor hold'.";
+  const out = detectStalledTurn({
+    assistantText:
+      'This flow simply re-uses the existing **Escalate To Duty Manager** subflow, so we do not duplicate logic. ' +
+      "If you're happy with this design, I'll create the flow on the instance. Let me know!",
+    userText,
+    mutatingCallCount: 0,
+  });
+  assert.ok(out, 'the measured stall must be caught');
+  // And the same text, once something was actually built, must not be nudged.
+  assert.equal(detectStalledTurn({ assistantText: 'Created it. Let me know if you want anything else.', userText, mutatingCallCount: 1 }), null);
+});
+
+test('A6 recognises an offer phrased as a promise rather than a question', () => {
+  const user = 'notify the duty manager when a P1 goes on hold';
+  for (const text of [
+    "If you're happy with this, I'll create the flow.",
+    'I will build it once you confirm.',
+    'Just say the word and it is done.',
+    'Ready to create the flow whenever you are.',
+  ]) {
+    assert.ok(detectStalledTurn({ assistantText: text, userText: user, mutatingCallCount: 0 }), `missed: ${text}`);
+  }
+});
+
 test('A6 does NOT fire once the turn has actually changed something', () => {
   // The first version counted calls in the closing iteration, so a turn that
   // created the policy and then signed off politely was nudged into a
