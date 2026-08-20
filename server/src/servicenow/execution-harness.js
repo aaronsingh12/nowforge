@@ -35,7 +35,7 @@ import { table } from './client.js';
  *      - foreground THROWS on a failing subflow
  *        (FlowObjectAPIException: The current operation ended in state: ERROR...),
  *        which loses the contextId the caller was about to store;
- *      - background returns in ~15ms with a valid contextId, and the failure
+ *      - background returns in 14-29ms with a valid contextId, and the failure
  *        shows up as `sys_flow_context.state = ERROR` with a full
  *        `error_message` — the same vocabulary the record-triggered runner
  *        already speaks. A subflow that pauses therefore times out as a FAIL

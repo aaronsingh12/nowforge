@@ -87,7 +87,10 @@ The item view itself has three tabs:
 ### Flows
 - **Read everything:** flows *and subflows* from `sys_hub_flow`, trigger instances, ordered action instances, logic blocks, and execution history from `sys_flow_context`. Activate/deactivate with one click. Trigger configuration (table, condition, run-in) is decoded from the platform's compressed `trigger_inputs` blob, because current releases keep none of it in columns.
 - **Live build (the real thing):** type an automation in plain language → NowHelpAssist generates Fluent TypeScript, compiles it **offline**, installs it, and reads the result back. You get an active flow with its sys_id and a link, or a readable compile error and nothing on the instance.
-- **Semantic verification:** press **Verify** and NowHelpAssist fires the flow on a real record, asserts the effects your sentence promised, and deletes the test data. Compiling proves a flow is well-formed; this proves it is *correct*. See [docs/demo.md](docs/demo.md) for a five-minute walkthrough.
+- **Subflows are first class.** Pick **Subflow** in the Live build card (or pass `artifact_type: "subflow"` to the agent) and describe a reusable unit with named inputs and outputs. What comes back has a real **contract** — input names, types and reference tables — parsed from the source and read back off the instance, shown side by side so a drift is visible rather than assumed away. Before the build, four contract rules are enforced: a subflow may not have a trigger (the platform would store it as a flow), it must be exported, every declared input must be read, and every declared output must be assigned.
+- **Reuse, not regeneration.** Existing subflows are injected into the codegen prompt with their contract, their description and a filled-in call. A candidate that re-creates one — same name, or same input set — is rejected before the build, with the existing one named.
+- **Semantic verification:** press **Verify** and NowHelpAssist fires the flow on a real record, asserts the effects your sentence promised, and deletes the test data. Compiling proves a flow is well-formed; this proves it is *correct*. A **subflow** has no trigger, so it is *called* instead: a one-shot scheduled job invokes it through `sn_fd.FlowAPI` with the spec's test inputs, and both its effects on records and the values it **returns** are asserted. The job and its result row are deleted and read back. See [docs/demo.md](docs/demo.md) for a five-minute walkthrough, and `docs/fluent-research.md` §32 for the measurements behind the harness.
+- **Dependency safety:** every managed artifact carries `calls` and `calledBy`. Deleting a subflow a live flow still calls is refused, with the callers named — deleting it would leave their sources untouched, so the build would stay green and every execution would fail at the subflow step.
 - **Design with AI:** describe an automation → a precise blueprint (trigger, exact actions, configs, reference fields, test plan). Download it, or hit **Deploy as real flow** to feed it straight into the live pipeline.
 - **Classic fallback:** where the SDK can't run, record-triggered blueprints still become an equivalent **Business Rule** (`sys_script`), always created **inactive** for review.
 
@@ -164,6 +167,11 @@ Three tiers. **LIVE (verified)** means it was exercised end-to-end against a rea
 | Flow logic — if / else, forEach | present in read-back on every UC |
 | Actions exercised: Look Up Record(s), Update Record, Send Email, Log, **Ask For Approval** | across UC1–UC4 |
 | Subflow invocation with typed I/O + `waitForCompletion` | UC1 calls UC2; downstream steps land |
+| **Standalone subflow authoring, with a declared I/O contract** | "Escalate To Duty Manager" built from a plain-language spec on the FIRST compile attempt, `type = subflow`, active, 17/17 activated; contract parsed from source (`task: reference → task`, `message: string`) and read back off `sys_hub_flow_input` **identical** |
+| **Executing a triggerless artifact — subflows are CALLED, not fired** | a one-shot `sysauto_script` drives `sn_fd.FlowAPI.getRunner().subflow(...).inBackground().run()`; execution COMPLETE in 186 ms, work note asserted, job + result row + test record all deleted and read back (0 leftovers) |
+| **Subflow OUTPUTS read back off the platform** | `sys_flow_runtime_value` (`type=output`) — `{notified: false, managerEmail: ""}` on a real execution, with the engine's `__action_status__` bookkeeping separated from the declared contract |
+| **A notification effect asserted, not assumed** | same subflow driven against a group that has a manager: work note **and** the `sys_email` row addressed to `don.goodliffe@example.com`, 2/2, both cleaned up |
+| **Dependency safety** | deleting a subflow with a live caller is REFUSED with the caller named (HTTP 409); the caller deletes first, then the subflow deletes clean — both read back off the instance |
 | **Approvals, including the approve-and-continue path** | approval raised for the right approver by identity, patched to approved, flow resumed to COMPLETE, post-approval effect asserted |
 | In-place update (same spec, or edited spec via `updates`) | same `sys_id` across repeated and modified deploys |
 | Delete | read-back returns 0 rows |
@@ -319,9 +327,10 @@ Modeled on Claude Code / opencode:
                  order-guides (+items, delete) · record-producers (+delete)
 /api/flows       list (flows + subflows, type filter) · :id detail · executions · :id/active
                  design · blueprint-to-rule
-                 live (POST, SSE — accepts `updates` to edit in place)
-                 live (GET managed) · live/capability
-                 live/verify (POST, SSE) · live/smoke · live/:name (DELETE)
+                 live (POST, SSE — accepts `updates` to edit in place, `artifact_type` flow|subflow)
+                 live (GET managed: + contract, calls, calledBy) · live/capability · live/catalog
+                 live/verify (POST, SSE — fires a flow, CALLS a subflow) · live/smoke
+                 live/:name (DELETE — 409 when a subflow still has callers)
 /api/sla         meta · validate (dry run) · list · create · :id (GET · PATCH · DELETE)
                  verify (POST, SSE)
 /api/access      acl/:table · diff/:table?a=&b= · explain (POST)

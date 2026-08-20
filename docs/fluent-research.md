@@ -3382,3 +3382,347 @@ to change in passing.
 | 58 | **A compaction that lands just under the line** | the transcript folds, fits, and is pushed straight back over by the next tool result — three times in one turn | Require a minimum GAIN, not just a threshold breach. A fold that saves less than it costs is an LLM call and a loss of history in exchange for nothing |
 | 59 | **A constant that outlived its measurement** | 18,000 was honestly derived from a real cliff; re-measured a track later, 35/35 succeeded at four times that size | Date the measurement in the comment. When a constant is load-bearing and cheap to re-measure, re-measure it before building on it |
 | 60 | **A restart that silently did not happen** | `pkill` reports nothing, the new process dies on EADDRINUSE, and the old binary serves the "new" measurement | Verify the change is live from OUTSIDE the process — an endpoint that reports the number you just changed. A rising fixed-overhead count nearly passed for a prompt edit that had not loaded |
+
+---
+
+## 32. Subflows as first-class artifacts
+
+§11 closed the question of executing a triggerless artifact like this:
+
+> **`sn_fd.FlowAPI`** … exists, but it is **server-side script only**. Reaching it over REST
+> would mean creating a Scripted REST API or running a background script purely to trigger a
+> flow — neither is a supported path, and both are exactly the kind of hack this project
+> refuses.
+
+The first sentence is right. The conclusion was wrong, and this section is the measurement
+that replaced it.
+
+### The mechanism: a one-shot scheduled job, created over the ordinary Table API
+
+There is a third option §11 did not consider. `sysauto_script` — Scheduled Script Execution —
+is an ordinary table. A row with `run_type = 'once'`, `active = true` and `run_start`
+backdated is claimed by the platform scheduler and **runs within seconds** of the insert. No
+Scripted REST API, no update set, no UI.
+
+Measured, first probe, end to end:
+
+```
+POST sysauto_script  { run_type: 'once', run_start: <now - 60s>, script: "gs.info('[TOKEN] …')" }
+  → created                                                          05:28:48
+  → syslog row                                                       05:28:50   (~2s)
+  → script field round-trips byte-identical                          true
+  → DELETE sysauto_script                                            gone
+```
+
+Two things about that probe are worth keeping:
+
+- **The `sys_id` may be minted client-side.** POSTing an explicit `sys_id` is honoured, which
+  is what makes the job correlatable to its own execution before it reports anything.
+- **`syslog` cannot be deleted over REST.** `DELETE /api/now/table/syslog/<id>` answers
+  **403**. So `gs.info` is unusable as the job's return channel: it would make "every test
+  record was removed" a claim the harness cannot honour. Trap #61.
+
+### The runner's real signature
+
+Confirmed against the live instance rather than against documentation — the SDK docs shipped
+in `@servicenow/sdk@4.10.1` mention `sn_fd.FlowAPI` exactly once, in an unrelated paragraph
+about `resumeFlow`.
+
+```javascript
+sn_fd.FlowAPI.getRunner()
+  .subflow('<scope>.<internal_name>')
+  .inBackground()                        // or .inForeground()
+  .withInputs({ … })
+  .run()
+```
+
+The returned object answers `getContextId()` and `getOutputs()`. Introspection is otherwise
+useless: `sn_fd.FlowAPI` is a native function, `getRunner()` returns an object with **no
+enumerable keys**, and `String(sn_fd.FlowAPI.getRunner)` is `function getRunner() { [native
+code] }`.
+
+| behaviour | measured |
+|---|---|
+| scope prefix | **mandatory**. `.subflow('notify_manager')` resolves as `global.notify_manager` and throws `java.lang.IllegalArgumentException: flow object for 'global.notify_manager' does not exist` |
+| `internal_name` is not the slug | `High-Priority Incident Escalation Logic` → `highpriority_incident_escalation_logic` — the hyphen is **dropped**, not converted. Read it off `sys_hub_flow`, never derive it |
+| `.inBackground()` | returns in **14–29 ms** with a valid contextId; the flow then runs asynchronously |
+| `.inForeground()` | blocks (measured 175–742 ms) and returns outputs directly — but **throws** when the subflow errors: `com.glide.plan.runners.FlowObjectAPIException: The current operation ended in state: ERROR. Detail: <reason>. Context id: <id>` |
+| a subflow that errors, in background | `sys_flow_context.state = ERROR` with the full reason in `error_message` |
+| correlation | `sys_flow_context.source_record` = **the sysauto_script sys_id**, `source_table = 'sysauto_script'` |
+
+**Background ships, foreground does not.** Foreground's throw takes the contextId with it —
+the caller loses the one handle that would let it report what actually happened — and a
+subflow that pauses would block a scheduled job to its own timeout. Background makes a failing
+subflow arrive as a state the existing record-triggered runner already knows how to talk
+about, so a timeout is a FAIL carrying the last observed state instead of a hang.
+
+### Outputs ARE capturable
+
+Not from the script, and not from `sys_flow_context`, which has no output column. They are in
+`sys_flow_runtime_value`:
+
+```
+query : context=<contextId>^type=output
+value : {"managerEmail":{"@class":"com.snc.process_flow.val.OutVal","value":"",
+          "displayValue":"","hasValue":true,"simpleType":"OPAQUE"},
+         "notified":{…,"value":false,"displayValue":"false",…}}
+```
+
+Two traps in that shape:
+
+- `getOutputs()` in **background** mode returns `{}` — the flow has not run yet. The runtime
+  value table is the authority, not the script's return value.
+- an **errored** run mixes engine bookkeeping into the same map: `__action_status__`,
+  `__dont_treat_as_error__`. The parser is therefore given the subflow's DECLARED output names
+  and reports anything else separately, instead of presenting `__action_status__` as an output
+  the subflow promised.
+
+### A reference input will not take a sys_id ⚠️
+
+The first live run of the finished harness failed at the call, and this is the finding the
+acceptance run bought:
+
+```
+com.snc.process_flow.exception.ProcessAutomationException: Invalid GlideRecord input format found
+```
+
+`withInputs({ task: '<sys_id>' })` does not start the flow at all when `task` is declared as a
+`ReferenceColumn`. Two formats work, both measured:
+
+```javascript
+var gr = new GlideRecord('task'); gr.get(id);     // { task: gr }          ✅
+                                                  // { task: { table: 'task', sys_id: id } }  ✅
+```
+
+The GlideRecord form ships, because it can fail usefully: `.get()` returning false becomes
+`input task: no task record <id>` **before** the flow is invoked, rather than an execution
+that dies later for a reason nobody can trace back to an input. This is also why the harness
+takes the subflow's CONTRACT and not just a bag of values — only the declared types say which
+inputs need a record fetched.
+
+### The return channel
+
+One namespaced `sys_user_preference` row (`x_2196302_nwforge.exec_harness.<token>`), written
+by the job, read by the harness, then deleted and **read back**. `value` holds 65,000
+characters, and create/read/delete over REST all work. The wrapper puts the sink insert
+*after* the catch, so a body that throws still reports — failing to report is precisely the
+condition the harness times out on.
+
+### What ships
+
+`server/src/servicenow/execution-harness.js`, deliberately artifact-agnostic:
+`runServerScript({ body })` runs any server-side script through the job/sink/cleanup dance and
+hands back its JSON report; `executeSubflow({ qualified, inputs, declaredInputs,
+declaredOutputs })` is the subflow case built on top. v0.4's fix-script and script-include
+verification calls the first one rather than growing a second copy.
+
+Injection surface: the qualified name is the only value concatenated into the generated
+script and it is validated against `^[a-z0-9_]+\.[a-z0-9_]+$`; a reference table is validated
+against `^[a-z0-9_]+$`; everything else goes through `jsLiteral()`, which also escapes
+U+2028/U+2029 — legal in JSON, illegal in the platform's ES5 string literals.
+
+### Contracts, the catalog and the graph are PARSED, not asked for
+
+A subflow's inputs and outputs are its public interface: a caller wires itself to input
+NAMES, so a rename is a broken call. That is the A2 argument about artifact names applied one
+level down, so `subflows.js` reads the contract out of the source rather than taking a model's
+summary of it.
+
+The parser is bracket-matched with a string-aware matcher, and that is load-bearing rather
+than tidy. The existing matcher in `codegen-guards.js` counts braces blindly, which is right
+for finding a `name:` literal and wrong for walking INTO a config object: a description
+containing `{`, or a condition written as a template literal with `${...}` in it, closes the
+block early and yields **half a contract** — the exact shape of a confidently wrong answer.
+Both cases are fixtures in `server/test/subflows.test.js`.
+
+Three things come out of the same parse:
+
+| product | used for |
+|---|---|
+| the CONTRACT | the result card, the managed listing, the verification spec validator, and the harness's reference-input handling |
+| the CATALOG | injected into codegen with the real import path, a filled-in `wfa.subflow(...)` call, and the subflow's description |
+| the CALL GRAPH | `calls` / `calledBy` on every managed artifact, and the delete guard |
+
+A `wfa.subflow('<sys_id>', …)` call is kept as an **unresolved** edge rather than dropped. An
+edge nobody can see is how a delete gets to break a live caller.
+
+### The instance is read back beside the source
+
+`sys_hub_flow_input` / `sys_hub_flow_output`, keyed by `model = <flow sys_id>`, are
+var_dictionary-shaped rows whose `element` is the internal input name. So a deployed subflow's
+contract can be read off the instance and compared with the one parsed from the source that
+produced it. Both are reported; the card shows the instance half only when the two disagree.
+
+`internal_name` is read, never derived — see the table above.
+
+### Two lints, because a good diagnostic is not a fix (trap #53)
+
+`artifact_type` — the artifact the request asked for is the artifact that must come back, and
+a declared contract must be one the body honours:
+
+| rejected | because |
+|---|---|
+| a "subflow" containing `wfa.trigger(...)` | the platform stores a triggered artifact as a **flow**. The badge says flow, `type` says flow, and nothing downstream notices the request was for something else |
+| a `Subflow(...)` that is not `export const` | no other flow can import it, so it can never be called |
+| a declared output never named in an `assignSubflowOutputs` values object | it reads back empty, and the caller cannot tell that from a legitimately empty value |
+| `assignSubflowOutputs` handed anything but `params.outputs` | it compiles and assigns nothing |
+| a declared input never read via `params.inputs.<name>` | the caller can pass it with no effect |
+
+`subflow_reuse` — the prefer-call rule, enforced rather than requested. A candidate that
+re-creates a catalogued subflow by NAME, or by an identical set of input names, is rejected
+before the build with the existing one named and the call spelled out. Its false positive —
+two genuinely different subflows that happen to take identical inputs — is stated in the
+rejection text, so a human reading it can see what the rule decided rather than guessing.
+
+### Dependency safety
+
+Removing a source is a pending DELETE: the next install takes the record off the instance. If
+a managed flow still calls it, that flow's own source is untouched, so **the build stays green
+and every execution fails at the subflow step**. `removeManaged` therefore refuses, with the
+callers named, and the route answers **409** rather than 422 — nothing about the request was
+wrong.
+
+One message was also fixed on the way: deleting an artifact that shares a file with another (a
+flow+subflow pair lives in one source named after the flow) used to answer "No managed source
+file for X", which is true and useless. It now names the file and what else is in it.
+
+### Acceptance
+
+#### A1 — standalone subflow authoring ✅
+
+Panel path, `artifactType: 'subflow'`, spec verbatim from the request.
+
+| measure | result |
+|---|---|
+| compiled on attempt | **1** of 3 |
+| deployed | `Escalate To Duty Manager`, `sys_id 39507ca8439f4d0e8c764db2b3d3838e`, `type = subflow`, **active** |
+| `internal_name` | `escalate_to_duty_manager` |
+| flow activation | **17/17** |
+| contract, parsed from source | `task: reference → task (required)`, `message: string (required)`; no outputs |
+| contract, read back off the instance | **identical** |
+| triggers on the instance | **0**, and `flows.detail` says so: *"Subflows have no trigger by design"* |
+| verification spec | produced on attempt 1, `kind: subflow`, 1 assertion |
+
+Declaring no outputs is correct here and is rule S6: the request promises nothing back, and a
+declared-but-unassigned output is worse than none.
+
+**The catalog changed what got written, on the first live run.** Asked for a subflow that
+"looks up the task's assignment group manager, sends them the message as a notification, and
+adds a work note", the model did not re-implement the lookup — it imported `notifyManager` and
+called it, then added the work note itself. That is the prefer-call rule producing composition
+rather than duplication, unprompted.
+
+#### A2 — harness verification ✅
+
+The pipeline's own spec, run through `verifySubflow`:
+
+```
+setup      task TASK0020272 created
+invoke     x_2196302_nwforge.escalate_to_duty_manager  (job e7cfd485…, deleted)
+execution  COMPLETE, run_time 186 ms
+assert     sys_journal_field.value = "Escalation verification note 12345"   PASS
+cleanup    job deleted ✓   sink row deleted ✓   setup record gone ✓   leftovers []
+```
+
+1/1. Independent read-back after the run: 0 harness jobs, 0 sink rows, 0 test records.
+
+**The notification half was not asserted, and that is not an oversight to hide.** The intent
+extractor deliberately does not count "sends an email" as an effect observable on a record, so
+the request yielded ONE promised effect and the spec covered it. The setup task also had no
+assignment group, so no notification could have been sent — the Hardware-fixture shape from
+§14 again.
+
+So a second run, spec hand-written, drove the same subflow against a group that HAS a manager
+(`Database` → Don Goodliffe) and asserted both halves:
+
+```
+execution  COMPLETE, run_time 305 ms
+assert     sys_journal_field.value  = "A2B-AJ1PT9"                    PASS
+assert     sys_email.recipients     = "don.goodliffe@example.com"     PASS
+cleanup    job ✓  sink ✓  incident ✓  sys_email row ✓   (0 of each left)
+```
+
+2/2. Note that `sys_email` rows **can** be deleted over REST, unlike `syslog`.
+
+#### A3 — reuse ⚠️ BLOCKED, with partial evidence
+
+Spec, through the agent: *"When a P1 incident is updated to state On Hold with hold reason
+Awaiting Vendor, escalate to the duty manager with the message 'P1 on vendor hold'."*
+
+**What was proven.** Both live runs did what the reuse work was for: the agent called
+`list_live_flows` unprompted, read the catalog, and designed a flow that CALLS
+`Escalate To Duty Manager` — in its own words, *"This flow simply re-uses the existing Escalate
+To Duty Manager subflow, so we don't duplicate logic."* The no-duplicate counters held across
+both runs:
+
+| counter | before | after |
+|---|---|---|
+| subflow sources in the workspace | 3 | 3 |
+| `sys_hub_flow` subflows in scope | 3 | 3 |
+| `escalate-to-duty-manager.now.ts` sha256 | `272f88fa0356e06e` | unchanged |
+| its `Now.ID` keys in `keys.ts` | 3 | byte-identical |
+| new source files | — | none |
+
+**What was NOT proven.** No flow was deployed, so "the generated flow calls the subflow" is
+evidence from a design, not from a source that compiled. Two separate causes:
+
+1. **Run 1 stalled** — trap #29 again. The model produced the whole design and closed with
+   *"If you're happy with this design, I'll create the flow on the instance. Let me know!"* and
+   the A6 guard did not fire. It missed on **both** conditions: `ASKS_TO_PROCEED` required
+   "let me know **if**" and the model wrote "Let me know!"; `IS_DIRECTIVE` had `\bupdate\b`,
+   which does not match "updat**ed**", and none of the verbs an automation request is actually
+   written with. Both widened, with the measured text as a regression test. Trap #62.
+2. **Run 2 was cut off by the provider.** The widened guard **fired** (`nudged {reason:
+   stalled, asked: "let me know"}`) and the agent resumed acting — then Ollama answered
+   `429 you (…) have reached your weekly usage limit` on 11 consecutive calls, and every cloud
+   model on the account answers the same. No generation of any kind is possible until the limit
+   resets, so A3 cannot be completed in this session.
+
+The run also exposed a real gap, fixed: the agent stopped to ask **who the duty manager was**
+while holding a subflow whose description is *"Looks up the task assignment group manager,
+notifies them, and adds a work note"*. The catalog was rendering identity and shape and
+dropping the one field that says what the thing is FOR. It now carries the description into
+both the codegen prompt block and the managed listing — fixed and unit-tested, but **not**
+measured to move the model, because the provider was gone before the run could be repeated.
+
+So A4 needed a caller that generation could not provide. One was **hand-authored** —
+`escalate-p1-vendor-hold-incident.now.ts`, and the file says so in its own header — put
+through the pipeline's five pre-build gates and deployed by the same build/install/read-back
+path:
+
+```
+artifact_type      PASS        subflow_reuse     PASS
+trigger_strategy   PASS        identity          PASS
+literals           PASS   ("P1 on vendor hold" survives into the source)
+install            activation 18/18, 18 artifacts from 17 sources
+read-back          Escalate P1 Vendor Hold Incident  44a22c90…  type=flow  active  1 trigger
+```
+
+It is a real caller, and it is not evidence about the model. Both statements belong in the
+record.
+
+### What remains
+
+- **A3 end to end.** The generation half is blocked on the provider, not on anything in this
+  repo. When the limit resets the run is one command: the spec, through the agent, with the
+  no-duplicate counters above re-measured. Everything it depends on — the catalog, the lint,
+  the widened stall guard, the description — is in place and unit-tested.
+- **The description fix is unmeasured against the model.** It closes the gap the run showed;
+  whether it stops the model asking is not known.
+- **`removeManaged` builds twice.** Once itself, once inside `deploy()`, ~20s of the delete's
+  wall clock. `deploy()`'s build is what makes invariant (a) hold for every caller, so the
+  duplicate is deliberate rather than a bug — noted so the next reader does not rediscover it
+  as one.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 61 | **`syslog` cannot be deleted over REST** | a probe that logs its result works perfectly, and "every test record was cleaned up" quietly becomes false | DELETE answers 403. Anything a harness writes as a RETURN CHANNEL has to be on a table it can also delete — `sys_user_preference` and `sys_email` both are |
+| 62 | **A guard's regex is only as good as the phrasings it was measured on** | the stall guard misses a turn that designs the whole thing and builds nothing, because the model wrote "Let me know!" instead of "let me know if", and "updated" instead of "update" | Both halves of a conjunction have to be widened together, and the widening has to be tested against the exact text that got through. `\bupdate\b` does not match "updated" |
+| 63 | **A reference input to `FlowAPI` will not take a sys_id** | `Invalid GlideRecord input format found`, and the flow never starts — so nothing appears anywhere to debug | Fetch a positioned `GlideRecord` (or pass `{table, sys_id}`). Which inputs need it is knowable only from the subflow's declared contract |
+| 64 | **`internal_name` is not the slug** | `High-Priority Incident Escalation Logic` becomes `highpriority_incident_escalation_logic` — the hyphen is DROPPED, not converted — and a derived name is refused by the runner | Read `internal_name` off `sys_hub_flow`. The same applies to the scope prefix: an unqualified name silently becomes `global.<name>` |
+| 65 | **`getOutputs()` returns `{}` on a background run** | a subflow that plainly worked reports no outputs, and it reads like the outputs are broken | It has not run yet. Outputs live in `sys_flow_runtime_value` (`type=output`) once it settles — and an errored run mixes `__action_status__` in with them |
+| 66 | **A catalog that lists shape but not purpose** | the agent holds exactly the subflow it needs, can see it takes `task` and `message`, and stops to ask a question that subflow's own description answers | Names and types identify an artifact; only the description says what it is FOR. Ship it wherever the catalog is rendered |
