@@ -15,6 +15,34 @@ const DEFAULTS = {
 };
 
 /**
+ * F6 — how long a model call may hang before it counts as a failure.
+ *
+ * There was no bound at all, so a queued or wedged upstream held a turn open
+ * on whatever the platform's socket defaults happen to be — and a hang is the
+ * one failure the retry cannot help with, because it never gets to fail.
+ *
+ * 120s is generous on purpose: the measurements in memory/budget.js put a real
+ * request at 1.0-1.5s up to 51k prompt tokens, so this is not a latency budget.
+ * It is the line past which "slow" has become "not coming back".
+ */
+export const LLM_REQUEST_TIMEOUT_MS = 120_000;
+
+/**
+ * The warm-up asks for one token and BLOCKS while the model loads, so it is
+ * bounded separately and much tighter. It is an optimisation — losing it costs
+ * a slower retry, not a failed one — and a warm-up that hangs would add its own
+ * wait to every attempt it was supposed to make cheaper.
+ */
+export const WARMUP_TIMEOUT_MS = 15_000;
+
+/**
+ * `AbortSignal.timeout` rejects with a TimeoutError. undici sometimes surfaces
+ * it directly and sometimes wrapped as the `cause` of a TypeError, so both are
+ * checked — reading only the outer error reports a timeout as a dead daemon.
+ */
+const isTimeout = (err) => err?.name === 'TimeoutError' || err?.cause?.name === 'TimeoutError';
+
+/**
  * Neutral history -> /chat/completions messages.
  *
  * Every `content` is a STRING, never null, and that is not defensive tidying —
@@ -144,6 +172,7 @@ async function warmUp({ url, headers, model }) {
     method: 'POST',
     headers,
     body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'ok' }] }),
+    signal: AbortSignal.timeout(WARMUP_TIMEOUT_MS),
   });
   await res.json().catch(() => null);
   log.warn('llm', `warm-up request finished in ${Date.now() - started}ms (status ${res.status}) — model should now be resident`);
@@ -217,8 +246,22 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
       const payload = JSON.stringify(body);
       let res;
       try {
-        res = await fetch(url, { method: 'POST', headers, body: payload });
+        res = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: payload,
+          signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
+        });
       } catch (err) {
+        // A hang and a dead daemon are different problems and must not read the
+        // same. The timeout is shaped like the 408 it stands in for, so it goes
+        // through exactly the retry path an upstream-reported timeout would.
+        if (isTimeout(err)) {
+          throw retryable(
+            new Error(`${provider} did not respond within ${LLM_REQUEST_TIMEOUT_MS}ms at ${url}`),
+            408
+          );
+        }
         // Nothing came back at all — the daemon is down, or the network blinked.
         throw retryable(new Error(`${provider} unreachable at ${url}: ${err.message}`));
       }
