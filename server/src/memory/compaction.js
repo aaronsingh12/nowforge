@@ -209,7 +209,51 @@ export async function compactIfNeeded(
   const db = getDb();
   const rows = db.prepare('SELECT seq FROM messages WHERE session = ? ORDER BY seq ASC').all(sessionId);
   let cutIndex = Math.max(0, rows.length - keepLast);
-  if (!cutIndex) return { compacted: false, tokens: before, budget };
+
+  /*
+   * F2 — THE CUT IS ROLE-AWARE, because a row count is not a turn boundary.
+   *
+   * MEASURED, from the session that produced this fix. A long tool loop ran
+   * thirteen assistant/tool rows past its opening user message, compaction
+   * fired mid-turn on iteration seven, and `rows.length - 8` landed AFTER that
+   * message. The fold deleted it. What went to the model was
+   * `[system, assistant(tool_calls), tool, ...]` with no user turn anywhere in
+   * it, and Ollama answered 200 with `finish_reason: "load"` and no content —
+   * six times, because the retry and the UI's Retry both re-send the same
+   * history.
+   *
+   * So the cut never crosses the newest user row. That row is the only thing
+   * in the request that says what is being asked, and `keepLast` cannot know
+   * it: eight rows is four tool round-trips, and a real turn routinely runs
+   * longer than that. Clamping here rather than compacting only at iteration 0
+   * is deliberate — budget pressure PEAKS during a long tool loop, which is
+   * exactly when mid-turn compaction has to keep working.
+   *
+   * The clamp only ever moves the cut EARLIER, so it cannot split a pair the
+   * row-count cut would have kept whole, and it lands the fold on a user turn —
+   * a real boundary rather than an arithmetic one.
+   */
+  const newestUserIndex = history.reduce((acc, m, i) => (m?.role === 'user' ? i : acc), -1);
+  const clampedToUserTurn = newestUserIndex >= 0 && newestUserIndex < cutIndex;
+  if (clampedToUserTurn) cutIndex = newestUserIndex;
+
+  if (!cutIndex) {
+    // Nothing foldable. When the clamp is what made it so, say that: "the
+    // session is over budget and compaction did nothing" is the shape of a
+    // silent failure, and this one has a nameable reason.
+    return clampedToUserTurn
+      ? {
+        compacted: false,
+        tokens: before,
+        budget,
+        skipped: 'user-turn-clamp',
+        warning:
+          `Skipped compaction: everything older than the active turn's user message has already been folded, ` +
+          `so there is nothing left to compact without deleting that message. The session is over budget ` +
+          `(~${before} vs ${budget}) and will stay there for this turn.`,
+      }
+      : { compacted: false, tokens: before, budget };
+  }
 
   /*
    * DIGESTS ARE ANCHORED, and it costs nothing to keep them that way.
