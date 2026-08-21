@@ -91,7 +91,21 @@ export function toOpenAiMessages(system, history) {
       repairs.push(`dropped a history row with an unknown role: ${String(m.role)}`);
     }
   }
-  return { messages: out, repairs };
+  /*
+   * F3 — a PRESENCE invariant, alongside all the absence ones above.
+   *
+   * Every other check here removes a shape that cannot legally be sent. This
+   * one reports a shape that is missing: a conversation with no user message in
+   * it. That request is perfectly well-formed and Ollama accepts it — with a
+   * 200, `finish_reason: "load"` and no content, which is how a compaction that
+   * folded away the active turn's user row read as a broken model for six
+   * attempts.
+   *
+   * REPORTED here, refused in `chat()`. This function's contract is that it
+   * translates and tells the caller what it had to repair; throwing from it
+   * would make it the one shape it handles by exploding instead.
+   */
+  return { messages: out, repairs, hasUserTurn: out.some((m) => m.role === 'user') };
 }
 
 /**
@@ -139,7 +153,7 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
   const d = DEFAULTS[provider] || DEFAULTS.openai;
   const url = `${(baseUrl || d.baseUrl).replace(/\/$/, '')}/chat/completions`;
   const resolvedModel = model || d.model;
-  const { messages, repairs } = toOpenAiMessages(system, history);
+  const { messages, repairs, hasUserTurn } = toOpenAiMessages(system, history);
 
   // Loud, not silent. A repair means something upstream wrote a message that
   // cannot legally be sent, and the only way that gets fixed is by being seen.
@@ -147,6 +161,23 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
     log.warn('llm', `outbound request repaired: ${repairs.length} unsendable message(s) removed`, {
       repairs: [...new Set(repairs)],
     });
+  }
+
+  /*
+   * F3 — the tripwire. Terminal, and deliberately NOT repaired.
+   *
+   * Injecting a synthetic user message here would make this send succeed while
+   * the state that produced it stayed broken — and the turn would carry on into
+   * the approval gate with mutations, on a conversation nobody actually had.
+   * Refusing is the only honest option: it is not retryable (three attempts at
+   * the same corrupt history is what turned this into six identical failures),
+   * and it names the invariant so the fix lands upstream where it belongs.
+   */
+  if (!hasUserTurn) {
+    throw new Error(
+      'outbound conversation contains no user message — refusing to send ' +
+      '(invariant: compaction/sanitation must preserve the active user turn)'
+    );
   }
 
   const body = {

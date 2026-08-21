@@ -54,7 +54,7 @@ export function isBlankTurn(entry) {
 /**
  * Drop what cannot legally be sent, and report what was dropped.
  *
- * Returns `{ history, dropped, reasons }`. `dropped` is 0 for a healthy
+ * Returns `{ history, dropped, reasons, hasUserTurn }`. `dropped` is 0 for a healthy
  * session, which is the common case and must stay cheap — this runs on every
  * iteration of every turn.
  *
@@ -104,5 +104,15 @@ export function sanitizeHistory(history) {
     out.push(entry);
   }
 
-  return { history: out, dropped: (history || []).length - out.length, reasons };
+  return {
+    history: out,
+    dropped: (history || []).length - out.length,
+    reasons,
+    // F3 — the one PRESENCE fact in a report otherwise made of absences.
+    // A history with no user turn is not repairable here (inventing one would
+    // be inventing what was asked), so this is reported rather than fixed; the
+    // adapter refuses the send. It is on the report because by the time the
+    // request is refused, the useful question is which layer lost the row.
+    hasUserTurn: out.some((m) => m.role === 'user'),
+  };
 }
