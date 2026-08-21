@@ -3827,6 +3827,10 @@ needed correcting, and the correction is the most load-bearing result here.
 | delete a `sys_update_xml` row | ✅ (28/28, global) | — |
 | read `sys_store_app` | ❌ 403 for `admin` | not probed |
 
+**The matrix line, stated as the standing rule it became (AD-2):**
+
+> REST-created artifacts are global; scoped artifacts are born via the SDK tier.
+
 The shape of that table is the phase's real finding: **the REST tier is global-tier**. It is not
 that scoped writes are awkward over REST — they are accepted, answered `201`, and silently
 demoted to `global`. Which is exactly why the SDK tier exists, and why only the REST tier needs
@@ -4269,3 +4273,191 @@ acceptance started from.
 | 77 | **CDATA cannot nest, and the platform knows it** | your exporter always wraps payloads in CDATA, and every business rule, script include and UI action produces a file that truncates at the first `]]>` | The platform escapes instead whenever the payload already contains CDATA. Always-escape is unconditionally valid and round-trips identically |
 | 78 | **`export_update_set.do` is a UI processor** | the obvious endpoint answers 401 to perfectly good basic auth, and it reads like a credentials problem | It wants a session cookie. `sys_update_xml_list.do?XML` authenticates but emits the generic `<xml>` list, not the `<unload>` an import expects — a reference, not a substitute |
 | 79 | **A row constraint is not a set constraint** | you assume the same-scope rule that blocks re-parenting also blocks batch parenting, and build per-scope sets with no grouping | Measured: a scoped child set took a GLOBAL parent over plain REST and kept its own application. The rule in trap #72 is on `sys_update_xml.update_set` alone |
+
+---
+
+## 35. Session 1 addendum — AD-1 to AD-5
+
+Five follow-ups folded in from the Session 1 verdicts. Two of them found live defects; one
+of those was in code this project shipped one commit earlier.
+
+### AD-5 — did the last install ship anything unintended? No.
+
+The dirty tree Session 1 committed was verified by `now-sdk build` before committing but never
+installed, so the question is really about the install that preceded it. Answered by comparing
+three things that should agree, and do:
+
+| | |
+|---|---|
+| source files in `src/fluent/flows` | 24 |
+| artifacts those files declare | **25** — `escalate-network-p1-incident.now.ts` declares a Subflow *and* a Flow, the same-file pair from §32 |
+| `sys_hub_flow` rows in the scope | **25** |
+| live `sys_hub_flow` ids in `keys.ts` | **25** — 0 in keys.ts missing from the instance, 0 on the instance missing from keys.ts |
+
+And the part records line up exactly with what `keys.ts` claims:
+
+```
+sys_hub_action_instance_v2      352 rows -> 103 on a live flow  (keys.ts: 103)
+sys_hub_flow_logic_instance_v2  172 rows ->  80 on a live flow  (keys.ts:  80)
+sys_hub_sub_flow_instance_v2     23 rows ->   7 on a live flow  (keys.ts:   7)
+sys_hub_trigger_instance_v2      17 rows ->  17 on a live flow  (keys.ts:  17)
+```
+
+The remainder is 357 snapshot-parented parts (normal — a flow keeps versioned copies) and
+**58 orphaned parts** whose parent no longer exists in scope. Those are debris from earlier
+regenerate/delete cycles, not from the last install, and the dates say so rather than the
+reasoning: all 58 were created 2026-08-17 → 2026-08-20, **0** inside the install's 13:18–13:20
+window. Nothing at all was created in the scope on 2026-08-21.
+
+**Noted, not fixed:** 58 orphaned part records are real debris and a hygiene item for a later
+pass. And the controlled install below surfaced one broken artifact among the committed sources
+— `Resolve Approval Matrix` fails activation with *"At least one Action Instance is required to
+publish a subflow"* (24/25 succeeded). That is a source defect inherited from an earlier
+session, shipped faithfully; it is not something the install did wrong.
+
+### AD-3 — does `now-sdk install` emit update rows? YES. And the answer exposed a defect.
+
+Measured properly: snapshot every `application = x_2196302_nwforge` update row, install, diff.
+
+```
+nwforge update rows: 56 BEFORE -> 56 AFTER  (delta 0)
+NEW rows created by the install : 0
+EXISTING rows whose payload changed: 24
+EXISTING rows whose sys_mod_count moved: 24
+```
+
+So install **does** emit update rows, tagged with the app's scope — 46 of the 56 sit in the
+scope's own Default set. But it emits them by **rewriting rows that already exist**, because
+one row per record already existed for each artifact (trap #76, from the other direction).
+
+That is the part that mattered, and it broke the sweep this repo shipped one commit earlier:
+
+| | |
+|---|---|
+| `sys_created_on` moved on | **0 / 24** |
+| `sys_updated_on` moved on | **24 / 24** |
+| a sweep asking `sys_created_on>=since` finds | **0 rows** |
+| a sweep asking `sys_updated_on>=since` finds | **24 rows** |
+
+```
+CONFIRMED: an install is INVISIBLE to a created-only sweep
+```
+
+An entire SDK install — 24 artifacts changed — would have reported "nothing captured", with no
+error anywhere. The window locator now asks for created **or** updated, and the same probe
+after the fix returns all 24:
+
+```
+findCandidateRows(since=2026-08-21 06:13:47) -> 24 rows
+by application: { "c44f3c6c37c24793be9f8b759c7818e4": 24 }
+```
+
+`sys_created_by` is applied only to the created half: the row was created by whoever first
+changed that artifact, which for an install over an existing app is a previous session or a
+previous day.
+
+**AD-3's decision, per the brief's YES branch:** S2-B and S2-C **merge** — app creation and
+flow deploy run inside ONE captured agent session, asserting that the per-scope set
+materialises and that a same-session global config change links both under the batch parent.
+Cross-scope batch parenting was already measured clean (§34, trap #79).
+
+### AD-1 — the three defects, confirmed fixed, and a fourth 403 shape
+
+`SkeletonRows` and the HTML-decoding were fixed in Session 1 and are confirmed: the browser
+pass reports **0 console errors** across every page visited, and `decodeEntities` is asserted
+offline.
+
+The 403 classifier needed more than confirming. AD-1 asks specifically for a **row-level** ACL
+403, and that shape was NOT handled — it fell through to the credentials branch. Measured:
+
+| probe | detail | was | now |
+|---|---|---|---|
+| `DELETE syslog` | `ACL Exception Delete Failed due to security constraints` | *"the password is wrong…"* | `row-acl` — names the operation, table and sys_id |
+| `GET sys_store_app` | `Failed API level ACL Validation` | `table-acl` | unchanged |
+| `PATCH` cross-scope | `aborted by Business Rule '…'` | `business-rule` | unchanged |
+| `GET` a missing record | `Record doesn't exist or ACL restricts the record retrieval` | *"No Record found"* | `missing-or-hidden`, ruling neither out |
+
+This sits directly on the sweep: `collapseDuplicates` **deletes** superseded `sys_update_xml`
+rows, so a protected row lands on exactly this branch. Table-level and row-level are kept
+distinct because the remedy differs — one is "this table is unreachable over REST at all", the
+other is "you can read the table, you may not touch that record".
+
+Live, after the fix:
+
+```
+delete was refused by a record-level ACL on dev442675.service-now.com for
+syslog a24153138322031059c0cc65eeaad364. "admin" can reach the table but not delete
+that row — a permissions constraint on the record, not a credentials problem.
+```
+
+### AD-2 — E4 as a pipeline invariant
+
+`assertScopeIntentHeld()` runs on every REST create at the one funnel they all pass through. If
+a payload carries scope intent — `sys_scope`, or `application` on the update-set tables — the
+created record's value is read back and a mismatch throws, naming both values and where scoped
+artifacts actually come from. Asking for `global` and getting `global` is not a mismatch; the
+only thing refused is a silent demotion.
+
+Matrix line, verbatim, now in README and in §33's capability matrix:
+
+> REST-created artifacts are global; scoped artifacts are born via the SDK tier.
+
+### AD-4 — the collision guard
+
+The existing exclusion (skip rows already in a NowHelpAssist set) covers the *sequential* case.
+It does nothing for the live one: two captured sessions running at once, both sweeping, both
+seeing a row still unclaimed in Default. Whichever sweeps first takes it — which is E1's
+contamination with a different mechanism.
+
+A row inside more than one open capture window is now **contested**, and is never assigned on
+timing. It is resolved by provenance — whether this session's own `tool_events` report touching
+that record, which is the one honest tiebreak because a created record's sys_id exists only in
+a tool's return value. Four outcomes, all tested:
+
+| situation | verdict |
+|---|---|
+| only one window covers the row | mine |
+| contested, my audit trail reports the record | mine |
+| contested, the rival's audit trail reports it | **theirs — never taken** |
+| contested, neither reports it | **unassigned, reported, not moved** |
+| contested, **both** report it | **unassigned** — never duplicated |
+
+Windows open at turn start and close in a `finally`, so a crashed turn cannot leave one open
+and make every later session's rows look contested. Unassigned rows are surfaced in the capture
+event and the audit row rather than silently skipped: left behind in Default is recoverable,
+filed under the wrong session is not.
+
+### A leak this phase's own lens exposed
+
+The execution harness writes its return channel as a `sys_user_preference` with `system = true`
+— which makes it **configuration**. Every harness run therefore emitted a `sys_update_xml` row,
+and deleting the sink record did not remove it (trap #74 again). Measured: **10** rows had
+accumulated in the global Default, one per run since 2026-08-20.
+
+Untidy is the smaller half. A captured session that runs a subflow verification would have
+**swept one into its update set**, and the export would carry a meaningless "User Preference"
+artifact into whatever instance it was imported on. The harness now deletes its own update rows
+as part of cleanup, verified on a fresh run (`updateRowsDeleted: 1`, count unchanged), and the
+10 historical ones were removed.
+
+### Instance state
+
+`sys_update_set` **22** (baseline). Global Default **402** — 412 minus the 10 harness leaks
+just cleaned, which is a correction rather than drift. Zero NHA artifacts, zero harness rows.
+
+**One thing to record against myself:** an AD-1 probe wrote `label = "NHA probe"` to
+`sys_db_object` for `incident` without a guaranteed revert, and the platform cascaded it to two
+Modules and a Field Label. Caught on the next read, reverted to `Incident`, cascade records
+confirmed correct, and the 3 update rows it produced deleted. A probe that mutates a platform
+table should revert in a `finally`, the same rule the verification runner has had since §11.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 80 | **An SDK install REWRITES update rows rather than creating them** | a capture sweep reports "nothing captured" for an install that changed 24 artifacts, and no error appears anywhere | Measured: `sys_updated_on` moved on 24/24, `sys_created_on` on 0/24, because a row already existed per artifact. Any window over `sys_update_xml` has to be created **OR** updated |
+| 81 | **`ACL Exception <Op> Failed due to security constraints` is a ROW-level denial, not a login problem** | a delete that the table plainly permits fails, and the error sends you to check a password that is fine | Distinct from `Failed API level ACL Validation`, which is the whole table. The remedies differ, so the diagnosis has to. Both are 403 |
+| 82 | **A harness return channel written as a `system` preference is CONFIGURATION** | "every test record was cleaned up" is true, and the update set has one new row per run — 10 of them here | `system = true` on `sys_user_preference` makes it tracked. Anything a harness creates has to be checked for an update row too, or a captured session exports it |
+| 83 | **Two sweeps racing for an unclaimed row is a different bug from two sweeps racing for a claimed one** | the "already in one of our sets" exclusion looks like it solves concurrency, and it only solves the sequential half | A row still sitting in Default is unclaimed by construction. Arbitrate on provenance from the audit trail, and leave a genuinely ambiguous row where it is |

@@ -210,6 +210,8 @@ Three tiers. **LIVE (verified)** means it was exercised end-to-end against a rea
 | ACL authoring | **out of scope on purpose**, not a gap to close later with a REST write. The SDK route — `sys_security_acl` as managed source, reviewed and installed like any other artifact — is the only defensible way to author one |
 | Editing a catalog UI policy NowHelpAssist did not author | read-only here. Without a Fluent source there is nothing to edit or remove through the toolchain, and the REST path cannot write the fields that matter. Marked "platform" in the UI rather than offered and then failing |
 
+**Scope tiering — a standing invariant, not a caveat.** *REST-created artifacts are global; scoped artifacts are born via the SDK tier.* Measured on dev442675 (`docs/fluent-research.md` §33 E4): `sys_scope` on a REST insert, and `application` on a new `sys_update_set`, are both **accepted with `201` and silently demoted to `global`** — the control row that asked for nothing is indistinguishable from the two that asked. Nothing in the response says it did not do what you asked. So every create that carries scope intent now reads the value back and fails loudly on mismatch, enforced in `client.js` at the one funnel all REST creates pass through rather than remembered at each call site.
+
 There is still **no supported REST API for writing `sys_hub_*` directly**, and NowHelpAssist never attempts it. Live authoring works because it drives ServiceNow's own toolchain.
 
 #### Model-proofing floor (A1–A5)
@@ -245,6 +247,28 @@ That surfaced a worse failure that was **ours**: the field check told the model 
 Storage is the built-in **`node:sqlite`** — probed, not assumed: `DatabaseSync`, BLOB round-trip for float32 vectors, and FTS5 are all present on Node 24, so the layer is dependency-free (no node-gyp on this Windows machine). One gitignored file, `server/data/nowhelpassist.db`, with idempotent migrations on boot.
 
 ---
+
+### Applications and Transport
+
+**Applications** lists every scope on the instance — 743 on dev442675: 3 custom, 739 store, and `global` — each with its version, vendor, and whether NowHelpAssist manages it. The managed flag comes from the SDK **workspace registry** (any directory holding a `now.config.json`), so it is derived rather than a hardcoded scope that would go stale the moment a second scoped app exists. Store applications are read through their `sys_scope` parent because `sys_store_app` itself answers 403 to this user over REST, and the page says so: an instance with 739 store apps showing none would otherwise look exactly like an instance with none.
+
+**Transport** gives the REST tier what the SDK tier already had. An agent session with *Capture changes* on (the default) owns update sets named `NHA · <session> · <scope>`, created lazily per scope on the first captured change, and every mutating tool reports what it captured — or why it did not.
+
+The mechanism is a **sweep**: after each mutating call, the update rows it produced are re-parented into the session's set. Pointing the platform's current-set preference at a named set also works and is deliberately **not** used — it is a per-*user* setting while every session shares one API user, and two interleaved sessions measured **8 of 16** changes landing in each other's set with no error anywhere.
+
+Three rules the sweep obeys, each enforced by the platform rather than chosen:
+
+| rule | what happens otherwise |
+|---|---|
+| group by the **row's** `application`, one set per scope | business rule `Handle updates moving between sets` aborts with a 403 mid-sweep |
+| scoped sets are minted server-side, not over REST | REST hands back a *global* set that then refuses every row |
+| collapse rows sharing a name inside a set | the count reads high and the export applies the same record twice |
+
+Two concurrent captured sessions never claim each other's rows: a row inside more than one open capture window is assigned by provenance from the audit trail, or left **unassigned** and reported. Left behind in Default is recoverable; filed under the wrong session silently is not.
+
+**Update sets carry configuration, never task data.** Anything extending `sys_metadata` travels — catalog items, business rules, flows, UI policies, SLA definitions. An incident does not, and a mutation on one says *"not captured — data, not configuration"* rather than going quiet, because silence there reads as a failure.
+
+**Export** builds the update-set XML from Table API reads — the platform's own `export_update_set.do` answers 401 to basic auth, wanting a UI session. Payloads are always entity-escaped rather than wrapped in CDATA: the platform itself only wraps when the payload has no CDATA of its own, and a business rule's payload carries `<script><![CDATA[…]]></script>`, so always-wrapping would emit invalid XML for every script-bearing artifact. Parity is verified against the source rows — count, names and payload hashes — *before* the file is offered, and a mismatch is a 422 with the differences rather than a download.
 
 ### Audit
 

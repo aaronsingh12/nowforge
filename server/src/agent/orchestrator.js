@@ -17,6 +17,7 @@ import { sanitizeHistory, isBlankText } from '../memory/sanitize.js';
 import { recordVerificationFailure } from '../memory/facts.js';
 import { indexMessage } from '../memory/recall.js';
 import { captureAfterTool, captureMark, reconcileTurn } from './capture.js';
+import { openCaptureWindow, closeCaptureWindow } from '../servicenow/transport.js';
 
 /**
  * The backbone, modeled on Claude Code / opencode:
@@ -226,6 +227,9 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
   // everything the turn produced — including rows no tool reported.
   const turnCaptureMark = captureMark();
   const sessionTitle = loadSessionRow(sessionId)?.title || null;
+  // Declare this session's capture window so a CONCURRENT captured session
+  // cannot claim rows this one produced, and vice versa (AD-4).
+  openCaptureWindow(sessionId, turnCaptureMark);
   log.info('agent', `turn ${retry ? 'RETRY' : 'start'}  session=${shortId(sessionId)} ${info.provider}/${info.model}`,
     { message: userText.slice(0, 200) });
 
@@ -491,5 +495,10 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
     // shows the error alone, because retrying a malformed request or a
     // rejected mutation just fails again more slowly.
     emit({ type: 'error', message: err.message, retryable: Boolean(err.retryable) });
+  } finally {
+    // ALWAYS — a window left open by a crashed turn would make every later
+    // session's rows look contested, and the guard would stop capturing
+    // anything at all.
+    closeCaptureWindow(sessionId);
   }
 }

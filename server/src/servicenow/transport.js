@@ -3,7 +3,7 @@ import { getTableHierarchy } from './schema.js';
 import { workspaceForScope } from './workspaces.js';
 import { runServerScript, utcStamp } from './execution-harness.js';
 import { getDb } from '../memory/db.js';
-import { currentActor } from '../memory/audit.js';
+import { currentActor, harvestSysIds } from '../memory/audit.js';
 import { log } from '../logging.js';
 
 /**
@@ -270,6 +270,88 @@ export async function ensureSetForScope({ sessionId, sessionTitle, scopeId }) {
 /** `<table>_<sys_id>` — the exact name the platform gives an update row. */
 export const updateRowName = (tableName, sysId) => `${tableName}_${sysId}`;
 
+/** The record a row describes, recovered from its name. */
+export const targetSysIdOf = (rowName) => (/([0-9a-f]{32})$/i.exec(String(rowName || ''))?.[1] || null);
+
+/* ------------------------------------------------------------------ *
+ * Collision guard — two captured sessions must never claim each other's rows
+ * ------------------------------------------------------------------ */
+
+/**
+ * Sessions with a sweep window currently open.
+ *
+ * The exclusion in `findCandidateRows` stops a session claiming a row ANOTHER
+ * session already swept. It does nothing about the live case: two captured
+ * sessions running at once, both sweeping, both seeing a row that is still
+ * sitting unclaimed in Default. Whichever sweeps first takes it — and E1
+ * measured what that costs when sessions share one identity (8/16 wrong).
+ *
+ * So a row inside more than one open window is CONTESTED, and is never
+ * assigned on timing. It is resolved by provenance — did this session's own
+ * tool events actually report touching that record — and if provenance cannot
+ * settle it, the row is left where it is and reported unassigned. Left behind
+ * in Default is recoverable; silently filed under the wrong session is not.
+ */
+const openWindows = new Map(); // sessionId -> { since, sinceIso }
+
+export function openCaptureWindow(sessionId, since) {
+  if (!sessionId || !since) return;
+  openWindows.set(sessionId, { since, sinceIso: new Date().toISOString() });
+}
+
+export function closeCaptureWindow(sessionId) { openWindows.delete(sessionId); }
+
+/** Exported for the offline suite, which needs to simulate two live sessions. */
+export function _openWindows() { return new Map(openWindows); }
+export function _resetWindows() { openWindows.clear(); }
+
+/**
+ * The record sys_ids a session's own audit trail says it touched.
+ *
+ * This is the provenance the guard arbitrates on: not what the sweep found on
+ * the instance, but what THIS session's tool calls actually returned. A tool
+ * result is the only place a created record's sys_id exists (the reason the
+ * audit stores results at all), which makes it the one honest tiebreak.
+ */
+export function sessionTouchedIds(sessionId, sinceIso) {
+  const rows = getDb().prepare(
+    `SELECT payload, result FROM tool_events
+      WHERE session = ? AND mutating = 1 AND ts >= ?`
+  ).all(sessionId, sinceIso || '');
+  const ids = new Set();
+  for (const r of rows) for (const id of harvestSysIds(r.payload, r.result)) ids.add(id.toLowerCase());
+  return ids;
+}
+
+/**
+ * Decide who a candidate row belongs to.
+ *
+ * Returns 'mine' | 'theirs' | 'unassigned'. Only 'mine' is ever moved.
+ */
+export function resolveContention({ rowName, sessionId, rowCreatedOn, windows = openWindows, touched = sessionTouchedIds }) {
+  const rivals = [...windows.entries()].filter(([id, w]) =>
+    id !== sessionId && rowCreatedOn && String(rowCreatedOn) >= String(w.since));
+  if (!rivals.length) return { verdict: 'mine', contestedWith: [] };
+
+  const target = targetSysIdOf(rowName);
+  const mineIds = touched(sessionId, windows.get(sessionId)?.sinceIso);
+  const mine = Boolean(target) && mineIds.has(target.toLowerCase());
+  const claimedByRival = rivals.filter(([id, w]) => Boolean(target) && touched(id, w.sinceIso).has(target.toLowerCase()));
+
+  const contestedWith = rivals.map(([id]) => id);
+  if (mine && !claimedByRival.length) return { verdict: 'mine', contestedWith };
+  if (!mine && claimedByRival.length) return { verdict: 'theirs', contestedWith, owner: claimedByRival[0][0] };
+  // Neither reported it, or BOTH did. Splitting on timing is the failure this
+  // guard exists to prevent, so nothing moves and it is surfaced for review.
+  return {
+    verdict: 'unassigned',
+    contestedWith,
+    reason: mine
+      ? 'more than one open session reports touching this record'
+      : 'no open session reports touching this record, and more than one window covers it',
+  };
+}
+
 /** A stamp the Table API will compare against `sys_created_on`, which is UTC. */
 export const sweepMark = (ms = Date.now()) => utcStamp(ms - SWEEP_BACKDATE_MS);
 
@@ -300,10 +382,25 @@ export async function findCandidateRows({ since, targets = [], sysIds = [] }) {
   const FIELDS = 'sys_id,name,type,target_name,action,update_set,application,payload_hash,sys_created_on,sys_updated_on,sys_created_by';
 
   if (since) {
-    const clauses = [`sys_created_on>=${since}`];
-    if (actor) clauses.push(`sys_created_by=${actor}`);
+    // CREATED **or** UPDATED. A created-only window misses an entire SDK
+    // install, and misses it silently.
+    //
+    // Measured after `now-sdk install` (§35): 24 artifacts changed, 24 update
+    // rows rewritten IN PLACE — `sys_updated_on` moved on 24/24 and
+    // `sys_created_on` moved on 0/24, because a row already existed for each
+    // one. A sweep asking only for `sys_created_on>=since` found 0 rows and
+    // would have reported "nothing captured" for the whole install.
+    //
+    // `sys_created_by` is deliberately NOT applied to the updated half: the row
+    // was created by whoever first changed that artifact, which for an install
+    // over an existing app is a previous session or a previous day.
+    const createdClause = [`sys_created_on>=${since}`, ...(actor ? [`sys_created_by=${actor}`] : [])].join('^');
     collect(await table.query('sys_update_xml', {
-      query: clauses.join('^') + '^ORDERBYsys_created_on',
+      query: `${createdClause}^ORDERBYsys_created_on`,
+      fields: FIELDS, limit: 500, display: 'false',
+    }));
+    collect(await table.query('sys_update_xml', {
+      query: `sys_updated_on>=${since}^ORDERBYsys_updated_on`,
       fields: FIELDS, limit: 500, display: 'false',
     }));
   }
@@ -376,14 +473,36 @@ export async function sweep({ sessionId, sessionTitle, since, targets = [], sysI
     sets: [],
     collapsed: [],
     failures: [],
+    /** Rows another open session might own. Never moved, always reported. */
+    unassigned: [],
     elapsedMs: 0,
   };
   if (!candidates.length) { result.elapsedMs = Date.now() - started; return result; }
 
+  // Arbitrate BEFORE grouping. A row inside another open session's window is
+  // never taken on timing — see resolveContention.
+  const mine = [];
+  for (const r of candidates) {
+    const verdict = resolveContention({
+      rowName: raw(r.name), sessionId, rowCreatedOn: raw(r.sys_created_on),
+    });
+    if (verdict.verdict === 'mine') { mine.push(r); continue; }
+    result.unassigned.push({
+      row: raw(r.sys_id), name: raw(r.name), target: raw(r.target_name),
+      verdict: verdict.verdict, contestedWith: verdict.contestedWith,
+      owner: verdict.owner || null,
+      reason: verdict.reason || `another open session (${verdict.owner}) reports touching this record`,
+    });
+  }
+  if (result.unassigned.length) {
+    log.warn('transport', `sweep${label ? ` (${label})` : ''}: ${result.unassigned.length} row(s) left unassigned — more than one capture window covers them`);
+  }
+  if (!mine.length) { result.elapsedMs = Date.now() - started; return result; }
+
   // Group by the ROW's application — never by the session's, and never by the
   // tool's. That is the only key the platform's move rule accepts (trap #72).
   const byScope = new Map();
-  for (const r of candidates) {
+  for (const r of mine) {
     const app = raw(r.application) || 'global';
     if (!byScope.has(app)) byScope.set(app, []);
     byScope.get(app).push(r);
@@ -426,8 +545,8 @@ export async function sweep({ sessionId, sessionTitle, since, targets = [], sysI
   }
 
   result.elapsedMs = Date.now() - started;
-  if (result.moved.length || result.failures.length) {
-    log.info('transport', `sweep${label ? ` (${label})` : ''}: ${result.moved.length} captured, ${result.failures.length} failed, ${result.collapsed.length} superseded`);
+  if (result.moved.length || result.failures.length || result.unassigned.length) {
+    log.info('transport', `sweep${label ? ` (${label})` : ''}: ${result.moved.length} captured, ${result.failures.length} failed, ${result.collapsed.length} superseded, ${result.unassigned.length} unassigned`);
   }
   return result;
 }

@@ -52,6 +52,15 @@ async function getAuthHeader() {
   return `Basic ${b64}`;
 }
 
+/** `/api/now/table/<table>/<sys_id>` → the two things a permissions error should name. */
+function recordContext(pathname) {
+  const m = /\/api\/now\/(?:table|stats)\/([^/?]+)(?:\/([^/?]+))?/.exec(pathname || '');
+  return {
+    tableName: m?.[1] ? decodeURIComponent(m[1]) : null,
+    sysId: m?.[2] ? decodeURIComponent(m[2]) : null,
+  };
+}
+
 /**
  * Turn a failed response into a message that names a cause you can act on.
  *
@@ -61,14 +70,19 @@ async function getAuthHeader() {
  *
  * "User is not authenticated" is true but useless: it names no instance and
  * suggests no next step. But the opposite failure is worse and is what this
- * replaced — every 403 was reported as bad credentials, including the two below
+ * replaced — every 403 was reported as bad credentials, including three below
  * where the credentials are perfect. That is trap #51 committed in our own
- * code, and the transport sweep hits it routinely. Three 403 shapes, measured
- * on dev442675 (§33):
+ * code, and the transport sweep hits two of them routinely. Measured on
+ * dev442675 (§33, §35):
  *
- *   "…aborted by Business Rule '<name>^<sys_id>'"  a rule refused the write
- *   "Failed API level ACL Validation"              the table is closed to REST
- *   anything else                                  genuinely the credentials
+ *   "…aborted by Business Rule '<name>^<sys_id>'"        a rule refused the write
+ *   "Failed API level ACL Validation"                    the TABLE is closed to REST
+ *   "ACL Exception <Op> Failed due to security…"         the ROW is protected
+ *   anything else                                        genuinely the credentials
+ *
+ * The table-level and row-level cases are separated because the remedy differs:
+ * one is "this table is not reachable over REST at all", the other is "you can
+ * read the table, you may not touch that record".
  */
 export function diagnoseFailure({ status, statusText, detail = '', message = null, host = 'the instance', username = '', method = 'GET', pathname = '' }) {
   const d = String(detail || '');
@@ -95,6 +109,36 @@ export function diagnoseFailure({ status, statusText, detail = '', message = nul
                + 'closed to the REST API even for admin.',
       };
     }
+    // ROW-level (or field-level) ACL. Distinct from the table-level case above:
+    // the table is readable, this particular record is not writable. Measured:
+    // deleting a `syslog` row answers
+    //   "ACL Exception Delete Failed due to security constraints"
+    // and this is the shape the SWEEP hits — collapseDuplicates deletes
+    // superseded `sys_update_xml` rows, and a protected one lands here.
+    const aclEx = /ACL Exception\s+(\w+)\s+Failed due to security constraints/i.exec(d);
+    if (aclEx) {
+      const { tableName, sysId } = recordContext(pathname);
+      const op = aclEx[1].toLowerCase();
+      return {
+        status, kind: 'row-acl', operation: op, table: tableName, sys_id: sysId,
+        message: `${op} was refused by a record-level ACL on ${host}`
+               + (tableName ? ` for ${tableName}${sysId ? ` ${sysId}` : ''}` : '')
+               + `. "${username || '(no username set)'}" can reach the table but not ${op} that row — `
+               + 'a permissions constraint on the record, not a credentials problem.',
+      };
+    }
+  }
+
+  // A 404 whose detail admits it might be an ACL. The instance will not say
+  // which, so neither do we — but "No Record found" alone sends the reader
+  // looking for a typo when the row may be there and unreadable.
+  if (status === 404 && /ACL restricts the record retrieval/i.test(d)) {
+    const { tableName, sysId } = recordContext(pathname);
+    return {
+      status, kind: 'missing-or-hidden', table: tableName, sys_id: sysId,
+      message: `${tableName || 'That record'}${sysId ? ` ${sysId}` : ''} is not readable on ${host}: it either does not exist `
+             + 'or an ACL hides it. The instance does not distinguish the two, so neither of those can be ruled out from here.',
+    };
   }
 
   if (status === 401 || status === 403) {
@@ -154,6 +198,56 @@ async function snowFetch(pathname, { method = 'GET', body, params } = {}) {
 }
 
 /**
+ * Which field carries SCOPE INTENT on a create, per table.
+ *
+ * `application` means "the owning scope" only on the update-set tables; on
+ * others it is an unrelated field name, so the map is explicit rather than a
+ * blanket check on the word.
+ */
+const SCOPE_INTENT_FIELD = {
+  sys_update_set: 'application',
+  sys_update_xml: 'application',
+};
+const DEFAULT_SCOPE_INTENT_FIELD = 'sys_scope';
+
+/**
+ * REST IS A GLOBAL-TIER WRITER — the standing invariant from §33 E4.
+ *
+ * `sys_scope` on an insert, and `application` on a new update set, are both
+ * ACCEPTED and silently demoted to `global`. The response is `201`, every other
+ * field lands, and a record created with an explicit scope is indistinguishable
+ * from the control that asked for nothing. Nothing about the call says it did
+ * not do what you asked.
+ *
+ * So any create that carries scope intent reads it back and fails LOUDLY on
+ * mismatch. This is cheap — the create already returns the record — and it is
+ * enforced at the one funnel every REST create goes through, rather than being
+ * remembered at each call site.
+ *
+ * Asking for `global` and getting `global` is not a mismatch. The only thing
+ * this refuses is a silent demotion.
+ */
+export function assertScopeIntentHeld(tableName, payload, created) {
+  if (!payload || !created) return created;
+  const field = SCOPE_INTENT_FIELD[tableName] || DEFAULT_SCOPE_INTENT_FIELD;
+  const asked = payload[field];
+  if (asked === undefined || asked === null || asked === '') return created;
+
+  const cell = created[field];
+  const got = cell && typeof cell === 'object' ? cell.value : cell;
+  if (got === asked) return created;
+
+  throw new SnowError(
+    `${tableName} was created with ${field}="${asked}" but the instance stored "${got}". `
+    + 'REST is a global-tier writer: it accepts a scope on an insert and silently ignores it '
+    + '(docs/fluent-research.md §33 E4). Scoped artifacts are born through the SDK tier, and a '
+    + 'scoped update set through the execution harness — not here.',
+    502,
+    JSON.stringify({ table: tableName, field, asked, got, sys_id: created.sys_id?.value ?? created.sys_id })
+  );
+}
+
+/**
  * Table API wrapper.
  * display: 'all' returns every field as { value, display_value } — this is how
  * reference fields stay usable end-to-end (sys_id for writes, label for humans).
@@ -189,6 +283,7 @@ export const table = {
       body: payload,
       params: { sysparm_display_value: display, sysparm_exclude_reference_link: 'true' },
     });
+    assertScopeIntentHeld(t, payload, data?.result);
     return data?.result;
   },
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { diagnoseFailure } from '../src/servicenow/client.js';
+import { diagnoseFailure, assertScopeIntentHeld } from '../src/servicenow/client.js';
 import {
   esc, derivedRemoteSysId, parseUpdateSetXml, verifyExportParity,
 } from '../src/servicenow/transport-export.js';
@@ -12,7 +12,10 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { _setDbForTests, migrate, getDb } from '../src/memory/db.js';
 import { createSession } from '../src/memory/sessions.js';
-import { isCaptureOn, setCapture, updateRowName, sweepMark } from '../src/servicenow/transport.js';
+import {
+  isCaptureOn, setCapture, updateRowName, sweepMark,
+  targetSysIdOf, resolveContention, openCaptureWindow, closeCaptureWindow, _openWindows, _resetWindows,
+} from '../src/servicenow/transport.js';
 
 /* ------------------------------------------------------------------ *
  * The 403 that is not an auth failure (§33)
@@ -266,4 +269,195 @@ test('the sweep mark is a UTC glide_date_time, backdated past one-second granula
   assert.ok(Date.parse(mark.replace(' ', 'T') + 'Z') < at, 'the mark is not backdated');
   // UTC, not local — trap #UTC. 05:27:24 UTC must not render as a local hour.
   assert.ok(mark.startsWith('2026-08-21 05:2'), `not UTC: ${mark}`);
+});
+
+/* ------------------------------------------------------------------ *
+ * AD-1 — the row-level ACL 403, the shape the sweep's delete actually hits
+ * ------------------------------------------------------------------ */
+
+test('a record-level ACL 403 names the operation, table and row — not the password', () => {
+  const d = diagnoseFailure({
+    status: 403,
+    detail: 'ACL Exception Delete Failed due to security constraints',
+    host: 'dev442675.service-now.com', username: 'admin',
+    method: 'DELETE', pathname: '/api/now/table/sys_update_xml/a24153138322031059c0cc65eeaad364',
+  });
+  assert.equal(d.kind, 'row-acl');
+  assert.equal(d.operation, 'delete');
+  assert.equal(d.table, 'sys_update_xml');
+  assert.equal(d.sys_id, 'a24153138322031059c0cc65eeaad364');
+  assert.match(d.message, /record-level ACL/);
+  assert.match(d.message, /sys_update_xml a24153138322031059c0cc65eeaad364/);
+  assert.doesNotMatch(d.message, /password/i);
+  assert.doesNotMatch(d.message, /hibernating/i);
+});
+
+test('a row-level ACL is not confused with a table-level one — different remedies', () => {
+  const row = diagnoseFailure({ status: 403, detail: 'ACL Exception Insert Failed due to security constraints', pathname: '/api/now/table/sys_script' });
+  const tbl = diagnoseFailure({ status: 403, detail: 'Failed API level ACL Validation', pathname: '/api/now/table/sys_script' });
+  assert.equal(row.kind, 'row-acl');
+  assert.equal(tbl.kind, 'table-acl');
+  assert.notEqual(row.message, tbl.message);
+});
+
+test('every ACL operation the platform names is carried through', () => {
+  for (const op of ['Read', 'Insert', 'Update', 'Delete']) {
+    const d = diagnoseFailure({ status: 403, detail: `ACL Exception ${op} Failed due to security constraints`, pathname: '/api/now/table/x/y' });
+    assert.equal(d.kind, 'row-acl', op);
+    assert.equal(d.operation, op.toLowerCase());
+  }
+});
+
+test('a 404 that admits it might be an ACL says so, and rules nothing out', () => {
+  const d = diagnoseFailure({
+    status: 404, detail: "Record doesn't exist or ACL restricts the record retrieval",
+    host: 'x.service-now.com', pathname: '/api/now/table/sys_user_preference/dead',
+  });
+  assert.equal(d.kind, 'missing-or-hidden');
+  assert.equal(d.table, 'sys_user_preference');
+  assert.match(d.message, /either does not exist or an ACL hides it/);
+});
+
+test('a business-rule abort still wins over an ACL phrase in the same detail', () => {
+  // Ordering matters: the rule name is the more specific, more actionable fact.
+  const d = diagnoseFailure({
+    status: 403,
+    detail: "Operation against file 'sys_update_xml' was aborted by Business Rule 'Handle updates moving between sets^abc'. ACL Exception Update Failed due to security constraints",
+  });
+  assert.equal(d.kind, 'business-rule');
+});
+
+/* ------------------------------------------------------------------ *
+ * AD-2 — REST is a global-tier writer, enforced rather than remembered
+ * ------------------------------------------------------------------ */
+
+test('a create that asked for a scope and got global fails loudly', () => {
+  assert.throws(
+    () => assertScopeIntentHeld('sys_script', { sys_scope: 'c44f3c6c37c24793be9f8b759c7818e4' }, { sys_scope: 'global', sys_id: 'abc' }),
+    (err) => {
+      assert.match(err.message, /sys_scope="c44f3c6c37c24793be9f8b759c7818e4" but the instance stored "global"/);
+      assert.match(err.message, /global-tier writer/);
+      assert.match(err.message, /SDK tier/);
+      return true;
+    }
+  );
+});
+
+test('the same rule covers sys_update_set.application, where the field is named differently', () => {
+  assert.throws(
+    () => assertScopeIntentHeld('sys_update_set', { application: 'c44f3c6c37c24793be9f8b759c7818e4' }, { application: 'global' }),
+    /application="c44f3c6c37c24793be9f8b759c7818e4" but the instance stored "global"/
+  );
+});
+
+test('asking for global and getting global is not a demotion', () => {
+  const created = { application: 'global', sys_id: 'x' };
+  assert.equal(assertScopeIntentHeld('sys_update_set', { application: 'global' }, created), created);
+});
+
+test('a create that expressed no scope intent is not second-guessed', () => {
+  const created = { sys_scope: 'global', sys_id: 'x' };
+  assert.equal(assertScopeIntentHeld('sys_script', { name: 'a rule' }, created), created);
+  assert.equal(assertScopeIntentHeld('sys_script', { sys_scope: '' }, created), created);
+});
+
+test('the check reads display="all" cells too, not just raw values', () => {
+  assert.throws(
+    () => assertScopeIntentHeld('sys_script', { sys_scope: 'x_2196302_nwforge' }, { sys_scope: { value: 'global', display_value: 'Global' } }),
+    /but the instance stored "global"/
+  );
+});
+
+test('"application" on a table where it means something else is left alone', () => {
+  // Only the update-set tables use `application` for scope. Elsewhere the
+  // default intent field is sys_scope, so an unrelated `application` value
+  // must not trip the guard.
+  const created = { application: 'something else', sys_id: 'x' };
+  assert.equal(assertScopeIntentHeld('some_other_table', { application: 'whatever' }, created), created);
+});
+
+/* ------------------------------------------------------------------ *
+ * AD-4 — two concurrent captured sessions must never claim each other's rows
+ * ------------------------------------------------------------------ */
+
+const ROW_A = 'sc_cat_item_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const ROW_B = 'sys_script_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const ID_A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const ID_B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+/** Two sessions whose windows overlap, with a stubbed audit trail. */
+function twoSessions(provenance) {
+  const windows = new Map([
+    ['S1', { since: '2026-08-21 06:00:00', sinceIso: '2026-08-21T06:00:00Z' }],
+    ['S2', { since: '2026-08-21 06:00:05', sinceIso: '2026-08-21T06:00:05Z' }],
+  ]);
+  const touched = (session) => new Set(provenance[session] || []);
+  return { windows, touched };
+}
+
+test('the target sys_id is recovered from the row name', () => {
+  assert.equal(targetSysIdOf(ROW_A), ID_A);
+  assert.equal(targetSysIdOf('item_option_new_' + ID_B), ID_B);
+  assert.equal(targetSysIdOf('not-a-row-name'), null);
+});
+
+test('with only one window open, a row is simply mine', () => {
+  const windows = new Map([['S1', { since: '2026-08-21 06:00:00', sinceIso: '2026-08-21T06:00:00Z' }]]);
+  const r = resolveContention({ rowName: ROW_A, sessionId: 'S1', rowCreatedOn: '2026-08-21 06:00:10', windows, touched: () => new Set() });
+  assert.equal(r.verdict, 'mine');
+  assert.deepEqual(r.contestedWith, []);
+});
+
+test('a contested row goes to the session whose audit trail reports touching it', () => {
+  const { windows, touched } = twoSessions({ S1: [ID_A], S2: [ID_B] });
+  const a = resolveContention({ rowName: ROW_A, sessionId: 'S1', rowCreatedOn: '2026-08-21 06:00:10', windows, touched });
+  const b = resolveContention({ rowName: ROW_B, sessionId: 'S2', rowCreatedOn: '2026-08-21 06:00:10', windows, touched });
+  assert.equal(a.verdict, 'mine', 'S1 did not get the row it created');
+  assert.equal(b.verdict, 'mine', 'S2 did not get the row it created');
+  assert.deepEqual(a.contestedWith, ['S2']);
+});
+
+test('a contested row the OTHER session created is theirs, and is never taken', () => {
+  const { windows, touched } = twoSessions({ S1: [ID_A], S2: [ID_B] });
+  const r = resolveContention({ rowName: ROW_B, sessionId: 'S1', rowCreatedOn: '2026-08-21 06:00:10', windows, touched });
+  assert.equal(r.verdict, 'theirs');
+  assert.equal(r.owner, 'S2');
+});
+
+test('a contested row nobody claims is UNASSIGNED, never split on timing', () => {
+  // The exact failure the guard exists to prevent: both windows cover the row,
+  // neither audit trail mentions it, and whoever sweeps first would take it.
+  const { windows, touched } = twoSessions({ S1: [], S2: [] });
+  const r1 = resolveContention({ rowName: ROW_A, sessionId: 'S1', rowCreatedOn: '2026-08-21 06:00:10', windows, touched });
+  const r2 = resolveContention({ rowName: ROW_A, sessionId: 'S2', rowCreatedOn: '2026-08-21 06:00:10', windows, touched });
+  assert.equal(r1.verdict, 'unassigned');
+  assert.equal(r2.verdict, 'unassigned');
+  assert.match(r1.reason, /no open session reports touching this record/);
+});
+
+test('a row BOTH sessions report touching is unassigned rather than duplicated', () => {
+  const { windows, touched } = twoSessions({ S1: [ID_A], S2: [ID_A] });
+  const r = resolveContention({ rowName: ROW_A, sessionId: 'S1', rowCreatedOn: '2026-08-21 06:00:10', windows, touched });
+  assert.equal(r.verdict, 'unassigned');
+  assert.match(r.reason, /more than one open session reports touching/);
+});
+
+test('a row created BEFORE the rival window opened is not contested', () => {
+  const { windows, touched } = twoSessions({ S1: [], S2: [] });
+  // 06:00:02 is inside S1's window but before S2's opened at 06:00:05.
+  const r = resolveContention({ rowName: ROW_A, sessionId: 'S1', rowCreatedOn: '2026-08-21 06:00:02', windows, touched });
+  assert.equal(r.verdict, 'mine');
+  assert.deepEqual(r.contestedWith, []);
+});
+
+test('a closed window stops contesting — a finished session must not block a live one', () => {
+  _resetWindows();
+  openCaptureWindow('S1', '2026-08-21 06:00:00');
+  openCaptureWindow('S2', '2026-08-21 06:00:00');
+  assert.equal(_openWindows().size, 2);
+  closeCaptureWindow('S2');
+  assert.equal(_openWindows().size, 1);
+  const r = resolveContention({ rowName: ROW_A, sessionId: 'S1', rowCreatedOn: '2026-08-21 06:00:10', touched: () => new Set() });
+  assert.equal(r.verdict, 'mine', 'a closed window still contested');
+  _resetWindows();
 });

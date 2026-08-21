@@ -98,9 +98,12 @@ export async function captureAfterTool({
       sets: swept.sets,
       collapsed: swept.collapsed.length,
       failures: swept.failures,
+      unassigned: swept.unassigned,
       scanned: swept.scanned,
       elapsedMs: swept.elapsedMs,
-      message: swept.moved.length
+      message: swept.unassigned.length
+        ? `captured ${swept.moved.length}; ${swept.unassigned.length} left unassigned — another capture session's window covers them`
+        : swept.moved.length
         ? `captured ${swept.moved.length} update${swept.moved.length === 1 ? '' : 's'} into ${swept.sets.map((s) => s.setName).join(', ')}`
         : classification?.configuration === null
           ? `nothing captured — ${hint || 'this table'} could not be classified, so whether that is correct is unknown`
@@ -142,7 +145,7 @@ export async function reconcileTurn({ sessionId, sessionTitle, since }) {
   if (!isCaptureOn(sessionId) || !since) return null;
   try {
     const swept = await sweep({ sessionId, sessionTitle, since, label: 'turn-reconcile' });
-    if (!swept.moved.length && !swept.failures.length) return null;
+    if (!swept.moved.length && !swept.failures.length && !swept.unassigned.length) return null;
     const event = {
       type: 'capture',
       phase: 'reconcile',
@@ -152,7 +155,9 @@ export async function reconcileTurn({ sessionId, sessionTitle, since }) {
       sets: swept.sets,
       collapsed: swept.collapsed.length,
       failures: swept.failures,
-      message: `end of turn: ${swept.moved.length} further update${swept.moved.length === 1 ? '' : 's'} captured`,
+      unassigned: swept.unassigned,
+      message: `end of turn: ${swept.moved.length} further update${swept.moved.length === 1 ? '' : 's'} captured`
+        + (swept.unassigned.length ? `, ${swept.unassigned.length} unassigned` : ''),
     };
     recordToolEvent(sessionId, {
       kind: 'capture', name: 'turn-reconcile', payload: { since },

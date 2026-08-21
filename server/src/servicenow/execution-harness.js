@@ -298,6 +298,26 @@ export async function runServerScript({
       }).catch(() => []);
       cleanup.sinkDeleted = left.length === 0;
       if (left.length) cleanup.leftovers.push(`sys_user_preference:${sinkName}`);
+
+      // The sink is written with `system = true`, which makes it CONFIGURATION
+      // — so creating it emits a `sys_update_xml` row, and deleting the record
+      // does not remove that row (trap #74: cleaning up configuration is
+      // itself configuration). Measured: 10 of these had accumulated in the
+      // global Default set, one per harness run.
+      //
+      // Left alone they are not merely untidy. A captured session that runs a
+      // subflow verification would SWEEP one into its update set, and the
+      // export would then carry a meaningless "User Preference" artifact into
+      // whatever instance it was imported on.
+      cleanup.updateRowsDeleted = 0;
+      const stale = await table.query('sys_update_xml', {
+        query: `name=sys_user_preference_${sinkId}^ORtarget_name=${sinkName}`,
+        fields: 'sys_id', limit: 10, display: 'false',
+      }).catch(() => []);
+      for (const row of stale) {
+        try { await table.remove('sys_update_xml', row.sys_id); cleanup.updateRowsDeleted += 1; }
+        catch { cleanup.leftovers.push(`sys_update_xml:${row.sys_id}`); }
+      }
     } else {
       cleanup.sinkDeleted = true; // nothing was ever written
     }
