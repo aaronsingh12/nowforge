@@ -209,6 +209,50 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_build_runs_started ON build_runs(started DESC);
   CREATE INDEX IF NOT EXISTS idx_tool_events_ts ON tool_events(ts DESC);
   `,
+
+  // 6 — session update-set capture (v0.5a transport)
+  //
+  // Two tables, because they answer different questions and have different
+  // lifetimes. \`capture_state\` is a preference; \`capture_sets\` is a record of
+  // something that exists on an instance and will outlive the session row.
+  //
+  // Capture is ON by default, so ABSENCE of a row means enabled. Only an
+  // explicit toggle writes here — which keeps the default in one place
+  // (\`isCaptureOn\`) rather than depending on every session-creation path
+  // remembering to seed a row.
+  `
+  CREATE TABLE IF NOT EXISTS capture_state (
+    session TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL,
+    updated TEXT NOT NULL,
+    FOREIGN KEY (session) REFERENCES sessions(id) ON DELETE CASCADE
+  );
+
+  -- One row per (session, instance, scope). The UNIQUE key is what makes the
+  -- set creation LAZY and idempotent: the first captured change in a scope
+  -- creates the set, every later one finds it.
+  --
+  -- \`scope_id\` is TEXT and is not validated as a GUID, because the global
+  -- scope's sys_id is the literal string 'global' (§33).
+  --
+  -- \`instance\` is part of the key because the bound connection can change
+  -- underneath a session, and a set sys_id from one PDI means nothing on
+  -- another — the same reason audit rows carry their own instance.
+  CREATE TABLE IF NOT EXISTS capture_sets (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session    TEXT NOT NULL,
+    instance   TEXT NOT NULL,
+    scope_id   TEXT NOT NULL,
+    scope_name TEXT NOT NULL,
+    set_sys_id TEXT NOT NULL,
+    set_name   TEXT NOT NULL,
+    parent_set TEXT,
+    created    TEXT NOT NULL,
+    UNIQUE (session, instance, scope_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_capture_sets_session ON capture_sets(session);
+  `,
 ];
 
 /**

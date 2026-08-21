@@ -8,6 +8,8 @@ import { listPoliciesForItem, itemVariables, createPolicy, CONDITION_OPERATORS }
 import { aclReport, aclDiff, explainAclReport } from '../servicenow/acl.js';
 import { search } from '../memory/recall.js';
 import { recordCalculatedFields, listFacts, recordFact } from '../memory/facts.js';
+import { listApplications } from '../servicenow/applications.js';
+import { listCapturedSets, setContents } from '../servicenow/transport.js';
 
 /**
  * Tool registry — the agent's hands.
@@ -693,6 +695,56 @@ export const TOOLS = [
       required: ['kind', 'key', 'value'],
     },
     execute: ({ kind, key, value, provenance }) => recordFact({ kind, key, value, provenance }),
+  },
+  {
+    name: 'list_applications',
+    description:
+      'List the application scopes on this instance: custom applications, store/plugin applications, and the global scope. '
+      + 'Each says whether NowHelpAssist manages it (an SDK workspace on disk claims that scope) and, if so, how many managed sources it holds. '
+      + 'Read-only. Use it to answer which scope an artifact belongs to, or which applications exist, instead of guessing a scope name. '
+      + 'Note that anything you create over the Table API is born in the GLOBAL scope — REST silently ignores sys_scope — so a scoped artifact has to go through the SDK flow tools.',
+    mutating: false,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        search: { type: 'string', description: 'Match on application name or scope name' },
+        kind: { type: 'string', description: 'custom | store | scope — omit for all' },
+        managed: { type: 'boolean', description: 'Only applications NowHelpAssist manages' },
+      },
+      required: [],
+    },
+    execute: async ({ search, kind, managed }) => {
+      const r = await listApplications({ search: search || '', kind: kind || '', managedOnly: managed === true, limit: 1000 });
+      // The full 743-row list would swamp the context and teach nothing. Store
+      // apps are summarised unless they were explicitly asked for.
+      const listed = kind === 'store' || search
+        ? r.applications.slice(0, 50)
+        : r.applications.filter((a) => a.kind !== 'store');
+      return {
+        counts: r.counts,
+        managedCount: r.managedCount,
+        visibility: r.visibility.note,
+        applications: listed.map((a) => ({
+          name: a.name, scope: a.scope, version: a.version, kind: a.kind,
+          managedByNowHelpAssist: a.managed, sources: a.workspace?.sourceCount ?? null,
+        })),
+        storeApplications: kind === 'store' || search ? undefined : `${r.counts.store || 0} store applications not listed — pass kind:"store" or a search term`,
+      };
+    },
+  },
+  {
+    name: 'list_captured_sets',
+    description:
+      'List the update sets NowHelpAssist has created on this instance to capture configuration changes, with how many updates each holds. '
+      + 'Pass a set sys_id to see exactly what is in one. Read-only. '
+      + 'Update sets carry CONFIGURATION only — never task data such as incidents or requests.',
+    mutating: false,
+    inputSchema: {
+      type: 'object',
+      properties: { set: { type: 'string', description: 'sys_id of one set, to list its contents' } },
+      required: [],
+    },
+    execute: async ({ set }) => (set ? setContents(set) : listCapturedSets({})),
   },
 ];
 

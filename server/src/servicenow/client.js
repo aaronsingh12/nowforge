@@ -52,6 +52,70 @@ async function getAuthHeader() {
   return `Basic ${b64}`;
 }
 
+/**
+ * Turn a failed response into a message that names a cause you can act on.
+ *
+ * Pure, and exported, so the offline suite can assert each branch — the whole
+ * point of this function is WHICH cause it names, and that is exactly what a
+ * live-only test cannot pin down.
+ *
+ * "User is not authenticated" is true but useless: it names no instance and
+ * suggests no next step. But the opposite failure is worse and is what this
+ * replaced — every 403 was reported as bad credentials, including the two below
+ * where the credentials are perfect. That is trap #51 committed in our own
+ * code, and the transport sweep hits it routinely. Three 403 shapes, measured
+ * on dev442675 (§33):
+ *
+ *   "…aborted by Business Rule '<name>^<sys_id>'"  a rule refused the write
+ *   "Failed API level ACL Validation"              the table is closed to REST
+ *   anything else                                  genuinely the credentials
+ */
+export function diagnoseFailure({ status, statusText, detail = '', message = null, host = 'the instance', username = '', method = 'GET', pathname = '' }) {
+  const d = String(detail || '');
+
+  if (status === 403) {
+    // The rule's own gs.addErrorMessage reason does NOT cross the REST
+    // boundary — only its name does. Name the rule and invent nothing.
+    const abortedBy = /aborted by Business Rule '([^'^]+)/i.exec(d);
+    if (abortedBy) {
+      return {
+        status, kind: 'business-rule',
+        rule: abortedBy[1],
+        message: `${method} ${pathname} was refused by the business rule "${abortedBy[1]}" on ${host}. `
+               + 'The credentials are fine — the instance rejected the change itself.',
+      };
+    }
+    if (/Failed API level ACL Validation/i.test(d)) {
+      const t = /\/api\/now\/(?:table|stats)\/([^/?]+)/.exec(pathname)?.[1];
+      return {
+        status, kind: 'table-acl',
+        table: t ? decodeURIComponent(t) : null,
+        message: `"${username || '(no username set)'}" may not read${t ? ` ${decodeURIComponent(t)}` : ' this table'} over REST on ${host} `
+               + '(API-level ACL). This is a table permission, not a bad password — some platform tables are '
+               + 'closed to the REST API even for admin.',
+      };
+    }
+  }
+
+  if (status === 401 || status === 403) {
+    const who = username || '(no username set)';
+    const causes = [
+      'the password is wrong, or has extra characters that came along with a paste',
+      'the PDI is hibernating — wake it at developer.servicenow.com, then retry',
+      `the user "${who}" lacks REST access on this instance`,
+    ];
+    return {
+      status, kind: 'credentials',
+      message: `${host} rejected the credentials for "${who}" (${status}). Most likely: ${causes.join('; ')}.`,
+    };
+  }
+
+  return {
+    status, kind: 'other',
+    message: message || `ServiceNow request failed (${status} ${statusText})`,
+  };
+}
+
 async function snowFetch(pathname, { method = 'GET', body, params } = {}) {
   const c = conn();
   const url = new URL(c.instanceUrl.replace(/\/$/, '') + pathname);
@@ -79,23 +143,12 @@ async function snowFetch(pathname, { method = 'GET', body, params } = {}) {
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { /* HTML error pages etc. */ }
   if (!res.ok) {
-    // "User is not authenticated" is true but useless — it names no instance and
-    // suggests no next step. Auth failures get a message you can act on.
-    if (res.status === 401 || res.status === 403) {
-      const who = c.username || '(no username set)';
-      const causes = [
-        'the password is wrong, or has extra characters that came along with a paste',
-        'the PDI is hibernating — wake it at developer.servicenow.com, then retry',
-        `the user "${who}" lacks REST access on this instance`,
-      ];
-      throw new SnowError(
-        `${url.host} rejected the credentials for "${who}" (${res.status}). Most likely: ${causes.join('; ')}.`,
-        res.status,
-        json?.error?.detail || text.slice(0, 500)
-      );
-    }
-    const msg = json?.error?.message || `ServiceNow request failed (${res.status} ${res.statusText})`;
-    throw new SnowError(msg, res.status, json?.error?.detail || text.slice(0, 500));
+    const detail = json?.error?.detail || text.slice(0, 500);
+    const diagnosed = diagnoseFailure({
+      status: res.status, statusText: res.statusText, detail,
+      message: json?.error?.message, host: url.host, username: c.username, method, pathname,
+    });
+    throw new SnowError(diagnosed.message, diagnosed.status, detail);
   }
   return json;
 }

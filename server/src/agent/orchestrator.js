@@ -16,6 +16,7 @@ import { computeBudget } from '../memory/budget.js';
 import { sanitizeHistory, isBlankText } from '../memory/sanitize.js';
 import { recordVerificationFailure } from '../memory/facts.js';
 import { indexMessage } from '../memory/recall.js';
+import { captureAfterTool, captureMark, reconcileTurn } from './capture.js';
 
 /**
  * The backbone, modeled on Claude Code / opencode:
@@ -221,6 +222,10 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
   const info = providerInfo();
   emit({ type: 'meta', ...info });
   const turnStart = Date.now();
+  // Taken before any tool runs, so end-of-turn reconciliation can see
+  // everything the turn produced — including rows no tool reported.
+  const turnCaptureMark = captureMark();
+  const sessionTitle = loadSessionRow(sessionId)?.title || null;
   log.info('agent', `turn ${retry ? 'RETRY' : 'start'}  session=${shortId(sessionId)} ${info.provider}/${info.model}`,
     { message: userText.slice(0, 200) });
 
@@ -379,6 +384,13 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
           });
           continue;
         }
+        // Reconcile before 'done': the per-call sweeps were keyed on ids the
+        // tools reported, and a composite builder or an SDK install produces
+        // rows nothing named.
+        if (mutatingCallCount > 0) {
+          const reconciled = await reconcileTurn({ sessionId, sessionTitle, since: turnCaptureMark });
+          if (reconciled) emit(reconciled);
+        }
         log.info('agent', `turn done  session=${shortId(sessionId)}  ${ms(turnStart)}`);
         emit({ type: 'done' });
         return;
@@ -421,6 +433,7 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
         }
         if (tool.mutating) mutatingCallCount += 1;
 
+        const callCaptureMark = tool.mutating ? captureMark() : null;
         try {
           const raw = await tool.execute(call.input || {});
           const output = truncate(JSON.stringify(raw ?? null, null, 1));
@@ -437,6 +450,17 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
           recordVerificationFailure(call.name, raw);
           log.info('tool', `${call.name} ok  ${ms(toolStart)}  ${output.length}ch`);
           emit({ type: 'tool_result', id: call.id, name: call.name, output, isError: false });
+
+          // Transport capture. AFTER the result is emitted, because the change
+          // has already landed and the user should see it succeed whether or
+          // not it could be captured. Never throws — see agent/capture.js.
+          if (tool.mutating) {
+            const captured = await captureAfterTool({
+              sessionId, sessionTitle, toolName: call.name,
+              input: call.input || {}, result: raw, since: callCaptureMark,
+            });
+            if (captured) emit({ ...captured, id: call.id });
+          }
         } catch (err) {
           const output = `Error: ${err.message}${err.detail ? ` — ${JSON.stringify(err.detail).slice(0, 300)}` : ''}`;
           log.error('tool', `${call.name} failed  ${ms(toolStart)} — ${err.message}`, err.detail || err);
@@ -453,6 +477,12 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
     const stopped = '(Stopped: maximum agent iterations reached for this turn.)';
     appendMessage(sessionId, { role: 'assistant', text: stopped });
     emit({ type: 'assistant_text', text: stopped });
+    // A turn that ran out of iterations still changed the instance, and its
+    // changes still have to be captured.
+    if (mutatingCallCount > 0) {
+      const reconciled = await reconcileTurn({ sessionId, sessionTitle, since: turnCaptureMark });
+      if (reconciled) emit(reconciled);
+    }
     emit({ type: 'done' });
   } catch (err) {
     log.error('agent', `turn failed  session=${shortId(sessionId)}  ${ms(turnStart)} — ${err.message}`, err);

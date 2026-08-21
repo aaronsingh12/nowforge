@@ -8,6 +8,8 @@ import { agentRouter } from './routes/agent.js';
 import { slaRouter } from './routes/sla.js';
 import { accessRouter } from './routes/access.js';
 import { auditRouter } from './routes/audit.js';
+import { applicationsRouter } from './routes/applications.js';
+import { transportRouter } from './routes/transport.js';
 import { logsRouter } from './routes/logs.js';
 import { log, requestLogger, banner } from './logging.js';
 import { SnowError } from './servicenow/client.js';
@@ -30,6 +32,8 @@ app.use('/api/agent', agentRouter);
 app.use('/api/sla', slaRouter);
 app.use('/api/access', accessRouter);
 app.use('/api/audit', auditRouter);
+app.use('/api/applications', applicationsRouter);
+app.use('/api/transport', transportRouter);
 app.use('/api/logs', logsRouter);
 
 // eslint-disable-next-line no-unused-vars
