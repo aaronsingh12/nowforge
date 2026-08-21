@@ -3802,3 +3802,240 @@ table without complaint, because neither column exists. Trap #4, still true.
 | 66 | **A catalog that lists shape but not purpose** | the agent holds exactly the subflow it needs, can see it takes `task` and `message`, and stops to ask a question that subflow's own description answers | Names and types identify an artifact; only the description says what it is FOR. Ship it wherever the catalog is rendered |
 | 67 | **A subflow CALL is not an action instance** | a flow that installs, activates and reads back as "1 trigger, 0 actions, 0 logic" — a flow that does nothing | Calls live in `sys_hub_sub_flow_instance_v2`, with the input mapping in `subflow_inputs` (same gzip+base64 as `trigger_inputs`). Any reader that enumerates "the steps of a flow" has to read four part tables, not three |
 | 68 | **A call references a SNAPSHOT, not the subflow** | `sys_hub_sub_flow_instance_v2.subflow` resolves to nothing on `sys_hub_flow`, so "who calls this?" looks unanswerable | It is a `sys_hub_flow_snapshot` id. Hop through `parent_flow` to reach the artifact. One hop gets you an id that is on no table you would think to look at |
+
+---
+
+## 33. Transport and scope — Step 0 mechanism experiments
+
+Everything below was run against dev442675 over the ordinary Table API, using the repo's own
+`client.js`, and every probe artifact was deleted and read back (see *Cleanup*, end of section).
+The instance finished at its starting state: 22 update sets, one `sys_update_set` preference
+row for `admin`, zero probe records.
+
+The phase brief carried three platform truths to verify rather than assume. Two survived, one
+needed correcting, and the correction is the most load-bearing result here.
+
+### The capability matrix
+
+| operation | Table API (REST) | server-side script (`execution-harness`) |
+|---|---|---|
+| create a **global** update set | ✅ | ✅ |
+| create a **scoped** update set | ❌ **silently global** | ✅ read back as `x_2196302_nwforge` |
+| create **scoped metadata** (`sys_script` with `sys_scope`) | ❌ **silently global** | not needed — the SDK is the sanctioned path |
+| re-parent an update row, **same scope** | ✅ | ✅ |
+| re-parent an update row, **cross scope** | ❌ 403, aborted by a named business rule | ❌ same rule, same abort |
+| delete a `sys_update_xml` row | ✅ (28/28, global) | — |
+| read `sys_store_app` | ❌ 403 for `admin` | not probed |
+
+The shape of that table is the phase's real finding: **the REST tier is global-tier**. It is not
+that scoped writes are awkward over REST — they are accepted, answered `201`, and silently
+demoted to `global`. Which is exactly why the SDK tier exists, and why only the REST tier needs
+update sets to become portable.
+
+### E1 — capture routing. VERDICT: the preference route works, and must not be used alone
+
+Creating `sys_update_set` "NHA capture test" over the Table API, pointing the API user's
+`sys_user_preference` (`name=sys_update_set`) at it, and writing one `sc_category`:
+
+```
+E1.3 created sc_category cb94ffca8372c750b939cc65eeaad371
+E1.4 update rows found: 1
+   name=sc_category_cb94ffca8372c750b939cc65eeaad371
+   update_set=3e94ffca8372c750b939cc65eeaad313  => THE NAMED SET
+```
+
+Clearing it routes to Default, three ways, all measured: value set back to the global Default
+(`GLOBAL_DEFAULT`), value blanked (`GLOBAL_DEFAULT`), row absent entirely (`GLOBAL_DEFAULT`).
+So the mechanism is real and it is immediate — no session, no login, no cache warm-up.
+
+Two things then broke it, and both are silent.
+
+**Blanking the value does not clear the preference — it replaces the row.** The row we blanked
+(`7b9f900a…`) was gone on the next read, and a *new* row (`5bb4f30e…`) holding the global
+Default had taken its place. A later `create` of a second preference row for the same user was
+therefore not "setting the preference", it was adding a rival:
+
+```
+B4 created pref row a6e47b0e… value= 3e94ffca…   (the named set)
+B4 (fresh pref row -> named set) -> landed [GLOBAL_DEFAULT]   WRONG
+```
+
+Two rows, disagreeing, no error; the platform read the other one. Patch the single existing row
+and it is correct every time (`C1`, `C2`, both pass).
+
+**The preference is per-USER, and every NowHelpAssist session shares one API user.** This is the
+finding that decides the phase. Two "sessions" interleaved across eight timing offsets, each
+patching the preference and then writing one category — the pattern any two concurrent chat
+turns produce:
+
+```
+round 0 A: want SET_A got [SET_A] ok        round 0 B: want SET_B got [SET_A] WRONG
+round 1 A: want SET_A got [SET_B] WRONG     round 1 B: want SET_B got [SET_B] ok
+…
+RACE_RESULT: 8/16 landed in the WRONG set
+```
+
+Exactly one of each pair is right, because the last writer of the shared preference wins for
+both. Not a flake at 8/16 — it is the structure. A per-session current-set cannot be built on a
+per-user preference, at any timing.
+
+**Verdict:** reliable *only* under a single serialized session with exactly one preference row,
+patched in place and read back. That is a real constraint, not a caveat, so the preference route
+is an optimisation at best and a silent corrupter at worst.
+
+### E2 — sweep validity. VERDICT: valid, and it is a supported operation
+
+Re-parenting one of E1's misrouted rows with a plain `PATCH` on `sys_update_xml.update_set`:
+
+```
+PATCH returned update_set = 7b25bf0e…
+re-read update_set        = 7b25bf0e…   MOVED
+payload_hash unchanged?   = true
+update_guid unchanged?    = true
+application unchanged?    = true (global)
+sys_mod_count 0 -> 1
+subject present in SET_B? true
+subject absent from SET_A? true
+```
+
+The payload, its hash and the update GUID are all preserved; only `sys_mod_count` moves, which
+makes a swept row honestly distinguishable from an untouched one. Both sets report the change
+from their own side, so this is not a dangling reference.
+
+It is also *sanctioned*. The business rule found in E3 does not merely permit a same-scope move,
+it maintains `sys_update_version.source` to follow it. The sweep is the platform's own path.
+
+### E3 — per-scope truth. VERDICT: the set is stamped with a scope; membership is enforced only on MOVES
+
+The brief said update sets are per-scope. The observation contradicts the strong reading of that:
+the global Default set on this instance holds rows from **~30 different applications**, ten of
+them `x_2196302_nwforge`.
+
+```
+=== applications present inside the GLOBAL Default set ===
+{ "global": 303, "c44f3c6c37c24793be9f8b759c7818e4": 10, "3c467b5f…": 18, … } (total 400+)
+```
+
+So `sys_update_set.application` is the set's **own** scope attribute, not a filter on what may
+sit inside it. Rows arrive cross-scope through ordinary platform activity and nothing objects.
+
+What *is* enforced — hard — is re-parenting. Every attempt to move a scoped row into a
+global set answered 403, and the detail named the mechanism instead of leaving it to inference:
+
+```
+Operation against file 'sys_update_xml' was aborted by Business Rule
+'Handle updates moving between sets^0e5b994583764f10b939cc65eeaad3c1'.
+```
+
+Reading that rule off the instance settles it exactly, with no sampling required:
+
+```js
+if (newUpdateSet.application.scope != current.application.scope) {
+    current.update_set = previous.update_set;
+    current.setAbortAction(true);
+    gs.addErrorMessage("Cannot move update to a set for a different scope");
+    return;
+}
+```
+
+**The rule the sweep must obey, verbatim from the platform:** a row may be re-parented only into
+a set whose `application.scope` equals the row's own `application.scope`. Confirmed in both
+directions — a scoped row into a global set is refused, and the same scoped row into a
+*same-scope* set is allowed over the plain Table API:
+
+```
+subject: "Auto triage incident" (application=nwforge)
+  -> SAME-SCOPE move: ALLOWED over plain Table API
+     application preserved: true
+  RESTORED to origin: yes
+```
+
+One set per scope is therefore not a design preference to be adopted for tidiness. It is the
+only shape the platform will accept, and the failure mode for getting it wrong is a 403 in the
+middle of a sweep.
+
+**The gap this opens, and how it closes.** A scoped sweep needs a scoped destination set, and
+E3.1 showed REST cannot mint one — `application` requested as the nwforge app came back
+`global`, same silent demotion as E4. The repo's existing `execution-harness` closes it, because
+a server-side `GlideRecord` insert is not on the REST tier:
+
+```
+{ "step": "A_plain_insert", "application": "c44f3c6c37c24793be9f8b759c7818e4",
+  "scopeOfApp": "x_2196302_nwforge", "matches": true }
+```
+
+The same probe confirmed `GlideUpdateSet` exists server-side, and that `.get()` returns whatever
+the preference points at — which is the independent confirmation of E1's mechanism, read from
+the platform's side rather than inferred from where rows landed.
+
+### E4 — `sys_scope` on insert. VERDICT: REST is global-tier only
+
+Three attempts to create a `sys_script`, each answered `201`:
+
+| request | returned `sys_scope` | read back |
+|---|---|---|
+| `sys_scope` = the app sys_id | `global` | `global` |
+| `sys_scope` = `x_2196302_nwforge` | `global` | `global` |
+| no `sys_scope` (control) | `global` | `global` |
+
+No error, no warning, no difference from the control. Asking for a scoped business rule over
+REST gets you a global one and a success code. Recorded verbatim in the capability matrix
+because either answer was going to be load-bearing, and this one draws the tier boundary:
+**scoped artifacts are born through the SDK, global artifacts are born through REST, and only
+the latter needs an update set to travel.**
+
+### The mechanism decision
+
+**The sweep is primary. The preference route is not adopted.**
+
+- E2 makes the sweep sufficient on its own: it moves rows, preserves payload and GUID, is
+  visible from both sets, and is maintained by the platform's own business rule.
+- E1's 8/16 makes the preference route unsafe as the mechanism of record. It is correct only
+  under a global serialization we do not otherwise need, and its failure is silent — a change
+  in a plausible-looking wrong set, with no error anywhere.
+- Adopting it "and keeping the sweep as reconciliation" was the brief's fallback, and it is
+  rejected on cost/benefit: it would buy nothing the sweep does not already do, while adding a
+  shared mutable per-user setting that a crashed turn leaves pointing somewhere wrong for
+  every other session and for a human logged in as the same user.
+
+The sweep therefore runs after every mutating tool success, and reconciles at turn end. It
+groups the rows it finds **by the row's own `application`**, and re-parents each group into the
+session's set for that scope, creating that set lazily — global sets over REST, scoped sets
+through the harness.
+
+### Two defects in our own code that these probes exposed
+
+1. **`client.js` diagnoses every 403 as bad credentials.** The cross-scope abort surfaces as
+   *"dev442675 rejected the credentials for admin (403) … the password is wrong … the PDI is
+   hibernating"*, for a request whose credentials were perfect. That is trap #51 committed by
+   us, in the one place a transport sweep will hit it routinely.
+2. **`gs.addErrorMessage` text does not survive the REST boundary.** The reason —
+   *"Cannot move update to a set for a different scope"* — is nowhere in the response. Only the
+   business rule's *name* comes through, so a caller that wants to explain the failure has to
+   recognise the rule by name.
+
+### Cleanup
+
+25 `sc_category` probes, 3 `sys_script` probes and 4 update sets deleted, then the 28 `DELETE`
+update rows the cleanup itself produced — because deleting configuration is configuration, and
+a sweep that ignores `DELETE` rows would miss half of what a session does. Read back: 0 probe
+records, 0 probe sets, 0 stray `NHA E*` update rows, 0 harness sinks, 0 one-shot jobs,
+`sys_update_set` back to 22.
+
+One thing did not return to its exact starting state, and it is stated rather than smoothed
+over: the admin preference **row** is now `5bb4f30e…` where it began as `7b9f900a…`, because
+blanking a preference makes the platform replace the row. Its value — the global Default — is
+restored and read back. The setting is identical; the row identity is not.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 69 | **`sys_scope` on a REST insert is silently demoted to `global`** | `201 Created`, every other field lands, and you have a global business rule where you asked for a scoped one — the control row is indistinguishable from the two that asked | REST is a global-tier writer. Read `sys_scope` back and compare; scoped artifacts are born through the SDK. The same demotion hits `sys_update_set.application` |
+| 70 | **Blanking a `sys_user_preference` value replaces the row** | you clear a preference, then create one with the right value, and the platform keeps reading the *other* row — with no error and no duplicate warning | Patch the existing row in place and read it back. Then assert there is exactly ONE row for that `user`+`name`; two disagreeing rows resolve to whichever the platform picks |
+| 71 | **The current update set is per-USER, not per-session** | two concurrent sessions each set "their" current set and 8/16 changes land in the other one's — every set looks plausible and nothing errors | A shared API user has one preference. Never build a per-session current-set on it; re-parent rows after the fact, where the row's own identity decides where it goes |
+| 72 | **An update row may only move between sets of the SAME scope** | a sweep that works all through development dies on a 403 the first time it touches a scoped artifact | Business rule `Handle updates moving between sets` compares `newUpdateSet.application.scope` to the row's. One set per scope, keyed on the ROW's `application` — not on the session's, and not on the tool's |
+| 73 | **A 403 from a business-rule abort is not an auth failure** | an error that tells you to check the password and wake the PDI, for a request whose credentials were fine | The `detail` names the rule: *"aborted by Business Rule '<name>'"*. Parse it before reaching for the credentials branch — and note that the rule's own `gs.addErrorMessage` reason never crosses the REST boundary |
+| 74 | **Cleaning up configuration writes more configuration** | "every probe record was deleted" is true, and the update set has 28 new `DELETE` rows recording it | A `DELETE` on a `sys_metadata` table is a tracked change like any other. Sweep and clean the `DELETE` rows too, or the tally of what a session did is wrong in both directions |
