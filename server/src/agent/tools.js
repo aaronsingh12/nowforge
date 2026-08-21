@@ -11,10 +11,58 @@ import { recordCalculatedFields, listFacts, recordFact } from '../memory/facts.j
 import { listApplications } from '../servicenow/applications.js';
 import { listCapturedSets, setContents } from '../servicenow/transport.js';
 
+const cellValue = (c) => (c && typeof c === 'object' && 'value' in c ? c.value : c);
+
+/**
+ * WI-5 — the application-creation capability boundary.
+ *
+ * Measured in the transcript: `create_record` on `sys_scope` produced a record
+ * with `sys_class_name: "sys_scope"`, `scope: ""` and no version — a HUSK. It
+ * never appears in Studio's application list and nothing can be developed in
+ * it. Worse, the model had correctly refused one turn earlier, then complied
+ * with invented field values, so guidance alone demonstrably does not hold.
+ *
+ * A real custom application is a `sys_app` record (which extends `sys_scope`)
+ * with a technical `scope` name of the form `x_<vendor>_<name>`, a version and
+ * a vendor prefix — created through Studio or the SDK, never by inserting the
+ * parent table over REST.
+ */
+const UNCREATABLE_TABLES = {
+  sys_scope: 'application scope',
+  sys_app: 'custom application',
+};
+
+export function assertCreatableTable(t) {
+  const label = UNCREATABLE_TABLES[String(t || '').trim()];
+  if (!label) return;
+  throw Object.assign(new Error(
+    `create_record cannot create ${label === 'custom application' ? 'a custom application' : 'an application scope'}. Inserting into ${t} over REST produces a non-functional husk, `
+    + 'not an application: sys_class_name stays "sys_scope" instead of becoming "sys_app", the technical '
+    + '`scope` name is empty (a real one looks like x_<vendor>_<name>), there is no version, and Studio will '
+    + 'not list it — nothing can be developed inside it. '
+    + 'A real custom application is created either in Studio (All → Studio → Create Application) or through '
+    + 'the ServiceNow SDK, which scaffolds the scope name, version and prefix. Tell the user that, and do not '
+    + 'submit an insert on this table.'
+  ), { status: 422, detail: { table: t, reason: 'application-husk-guard', tool: 'create_record' } });
+}
+
 /**
  * Tool registry — the agent's hands.
  * `mutating: true` tools are intercepted by the approval gate unless the user
  * has enabled auto-approve (same idea as Claude Code's permission prompts).
+ *
+ * `describeWrite(input, result)` — OPTIONAL, and only on mutators. It tells the
+ * mutation pipeline what a tool actually wrote, so post-write verification
+ * (WI-1) can diff the request against the record without guessing which part of
+ * a tool's arguments was the payload. Shape:
+ *
+ *   { table, sys_id, operation: 'insert' | 'update' | 'delete', requested }
+ *
+ * Returning `null` means "not verifiable by field diff", and that is a real
+ * answer rather than a gap: the SDK-backed tools (create_flow_live,
+ * create_ui_policy) and the verifiers already read their work back off the
+ * instance through their own paths, and forcing a second diff onto them would
+ * report a shape mismatch as a lost write. Those say so in `verifiedBy`.
  */
 export const TOOLS = [
   {
@@ -144,7 +192,13 @@ export const TOOLS = [
       },
       required: ['table', 'data'],
     },
-    execute: ({ table: t, data }) => table.create(t, data),
+    execute: ({ table: t, data }) => {
+      assertCreatableTable(t);
+      return table.create(t, data);
+    },
+    describeWrite: ({ table: t, data }, result) => ({
+      table: t, operation: 'insert', requested: data || {}, sys_id: cellValue(result?.sys_id),
+    }),
   },
   {
     name: 'update_record',
@@ -160,6 +214,9 @@ export const TOOLS = [
       required: ['table', 'sys_id', 'data'],
     },
     execute: ({ table: t, sys_id, data }) => table.update(t, sys_id, data),
+    describeWrite: ({ table: t, sys_id, data }) => ({
+      table: t, operation: 'update', requested: data || {}, sys_id,
+    }),
   },
   {
     name: 'delete_record',
@@ -171,6 +228,7 @@ export const TOOLS = [
       required: ['table', 'sys_id'],
     },
     execute: ({ table: t, sys_id }) => table.remove(t, sys_id),
+    describeWrite: ({ table: t, sys_id }) => ({ table: t, operation: 'delete', requested: {}, sys_id }),
   },
   {
     name: 'create_incident',
@@ -192,6 +250,9 @@ export const TOOLS = [
       required: ['short_description'],
     },
     execute: (input) => table.create('incident', input),
+    describeWrite: (input, result) => ({
+      table: 'incident', operation: 'insert', requested: input || {}, sys_id: cellValue(result?.sys_id),
+    }),
   },
   {
     name: 'create_catalog_item',
@@ -227,6 +288,16 @@ export const TOOLS = [
       required: ['name', 'short_description'],
     },
     execute: (input) => catalog.createCatalogItemComposite(input),
+    describeWrite: (input, result) => ({
+      table: 'sc_cat_item', operation: 'insert', sys_id: result?.item?.sys_id,
+      // Only the item's own fields — `variables` is a child collection, and
+      // diffing it against the item record would report every one as dropped.
+      requested: {
+        name: input?.name, short_description: input?.short_description,
+        ...(input?.description ? { description: input.description } : {}),
+        ...(input?.category ? { category: input.category } : {}),
+      },
+    }),
   },
   {
     name: 'create_record_producer',
@@ -243,6 +314,14 @@ export const TOOLS = [
       required: ['name', 'table_name'],
     },
     execute: (input) => catalog.createRecordProducer(input),
+    describeWrite: (input, result) => ({
+      table: 'sc_cat_item_producer', operation: 'insert', sys_id: cellValue(result?.sys_id),
+      requested: {
+        name: input?.name, table_name: input?.table_name,
+        ...(input?.short_description ? { short_description: input.short_description } : {}),
+        ...(input?.script ? { script: input.script } : {}),
+      },
+    }),
   },
   {
     name: 'list_flows',
@@ -425,6 +504,11 @@ export const TOOLS = [
       required: ['cat_item', 'name', 'type'],
     },
     execute: ({ cat_item, ...v }) => catalog.createVariable({ cat_item }, v),
+    describeWrite: ({ cat_item, ...v }, result) => ({
+      table: 'item_option_new', operation: 'insert',
+      // `cat_item` is the parent, not a field of the variable record.
+      requested: v || {}, sys_id: cellValue(result?.variable?.sys_id),
+    }),
   },
   {
     name: 'update_catalog_variable',

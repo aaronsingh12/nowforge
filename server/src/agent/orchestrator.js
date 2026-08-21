@@ -18,6 +18,7 @@ import { recordVerificationFailure } from '../memory/facts.js';
 import { indexMessage } from '../memory/recall.js';
 import { captureAfterTool, captureMark, reconcileTurn } from './capture.js';
 import { openCaptureWindow, closeCaptureWindow } from '../servicenow/transport.js';
+import { snapshotBefore, verifyMutation, attachVerification, isFailedWrite } from './mutation-pipeline.js';
 
 /**
  * The backbone, modeled on Claude Code / opencode:
@@ -438,22 +439,81 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
         if (tool.mutating) mutatingCallCount += 1;
 
         const callCaptureMark = tool.mutating ? captureMark() : null;
+
+        /*
+         * WI-1 — what is this tool about to write, and what did the record hold
+         * before it?
+         *
+         * `describeWrite` is called twice: once here with no result, to learn
+         * the table and sys_id so the pre-write snapshot can be taken, and
+         * again after execution to pick up the sys_id of anything created. A
+         * tool without the hook skips both and is reported as self-verifying.
+         */
+        let preDescriptor = null;
+        let beforeRecord = null;
+        if (tool.mutating && typeof tool.describeWrite === 'function') {
+          try { preDescriptor = tool.describeWrite(call.input || {}, null); }
+          catch (err) { log.debug?.('verify', `describeWrite failed for ${call.name}: ${err.message}`); }
+          beforeRecord = await snapshotBefore(preDescriptor);
+        }
+
         try {
           const raw = await tool.execute(call.input || {});
-          const output = truncate(JSON.stringify(raw ?? null, null, 1));
-          results.push({ id: call.id, name: call.name, output, isError: false });
+
+          // The write landed on the instance. Whether it landed as REQUESTED is
+          // a different question, and until this the answer was never asked.
+          let verification = null;
+          if (tool.mutating) {
+            try {
+              const descriptor = typeof tool.describeWrite === 'function'
+                ? tool.describeWrite(call.input || {}, raw)
+                : null;
+              verification = await verifyMutation({ descriptor, result: raw, before: beforeRecord, toolName: call.name });
+            } catch (err) {
+              log.error('verify', `verification threw after ${call.name}: ${err.message}`, err);
+              verification = {
+                verified: false, status: 'unverified',
+                summary: `the write could not be verified: ${err.message}`,
+                applied: [], dropped: [], transformed: [],
+                unverifiable: [{ field: '(all)', reason: err.message }], noOpSignal: null,
+              };
+            }
+          }
+
+          // A dropped field is not an exception — the call reached the instance
+          // — but it must not read as plain success, or the model narrates a
+          // write that did not happen. That is the defect, exactly.
+          const failedWrite = isFailedWrite(verification);
+          const output = attachVerification(truncate(JSON.stringify(raw ?? null, null, 1)), verification);
+          results.push({ id: call.id, name: call.name, output, isError: failedWrite });
           // The result is the audit trail's payload, not a nicety: the sys_id
           // of whatever was just created exists here and nowhere else.
           recordToolEvent(sessionId, {
             kind: 'tool_call', name: call.name, payload: call.input, result: output,
-            resultStatus: 'ok', mutating: tool.mutating, approval,
+            resultStatus: verification && verification.status !== 'applied' && verification.status !== 'self-verified'
+              ? verification.status
+              : 'ok',
+            mutating: tool.mutating, approval,
           });
           // A-4 write path: a verification that FAILED is the most valuable
           // thing this agent ever learns about an instance, and it used to be
           // thrown away with the session.
           recordVerificationFailure(call.name, raw);
-          log.info('tool', `${call.name} ok  ${ms(toolStart)}  ${output.length}ch`);
-          emit({ type: 'tool_result', id: call.id, name: call.name, output, isError: false });
+          if (failedWrite) {
+            log.warn('tool', `${call.name} ${verification.status.toUpperCase()}  ${ms(toolStart)} — ${verification.summary}`);
+          } else {
+            log.info('tool', `${call.name} ok  ${ms(toolStart)}  ${output.length}ch`);
+          }
+          // The renderer derives its glyph from `verification`, never from the
+          // absence of an exception (WI-6).
+          emit({
+            type: 'tool_result', id: call.id, name: call.name, output, isError: failedWrite,
+            verification: verification && {
+              status: verification.status, summary: verification.summary,
+              dropped: verification.dropped, transformed: verification.transformed,
+              unverifiable: verification.unverifiable, verifiedBy: verification.verifiedBy || null,
+            },
+          });
 
           // Transport capture. AFTER the result is emitted, because the change
           // has already landed and the user should see it succeed whether or

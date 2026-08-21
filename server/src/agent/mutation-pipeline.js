@@ -1,0 +1,150 @@
+import { table } from '../servicenow/client.js';
+import { getSchema } from '../servicenow/schema.js';
+import { diffWrite, verificationForModel } from '../servicenow/write-verify.js';
+import { log } from '../logging.js';
+
+/**
+ * The I/O half of WI-1: fetch what the pure verifier needs, then run it.
+ *
+ * Kept out of `write-verify.js` on purpose — that module stays pure so every
+ * classification rule can be asserted offline against recorded fixtures. This
+ * one does the two round trips those rules depend on, and both are optional:
+ * a verification that cannot be performed reports `unverified` with a reason,
+ * and NEVER reports success. "We could not check" and "we checked and it was
+ * fine" must not render the same way, which is the whole lesson of the defect
+ * this exists for.
+ */
+
+/**
+ * Snapshot before an update.
+ *
+ * This is what makes `dropped` provable rather than inferred: a discarded write
+ * leaves the record's previous value in place, so without the previous value
+ * the diff can only say "different", not "unchanged". It also supplies the
+ * cheap decisive signal — `sys_mod_count` and `sys_updated_on` frozen.
+ *
+ * One GET, only for updates, only when the tool declared what it was touching.
+ */
+export async function snapshotBefore(descriptor) {
+  if (!descriptor || descriptor.operation !== 'update') return null;
+  if (!descriptor.table || !descriptor.sys_id) return null;
+  try {
+    return await table.get(descriptor.table, descriptor.sys_id, 'all');
+  } catch (err) {
+    log.debug?.('verify', `no pre-write snapshot for ${descriptor.table}/${descriptor.sys_id}: ${err.message}`);
+    return null;
+  }
+}
+
+/** Field name → internal_type, for the journal exclusion. Best effort. */
+async function fieldTypesFor(tableName) {
+  if (!tableName) return { types: {}, hierarchy: [] };
+  try {
+    const schema = await getSchema(tableName);
+    const types = {};
+    for (const f of schema.fields || []) types[f.name] = f.type || f.internal_type;
+    return { types, hierarchy: schema.hierarchy || [] };
+  } catch {
+    // Losing the schema costs precision on journal fields only; it must not
+    // cost the whole verification.
+    return { types: {}, hierarchy: [] };
+  }
+}
+
+/**
+ * A delete is verified by absence, not by a field diff.
+ *
+ * Cheap, and it closes the same class of lie: the Table API answers 204 to a
+ * DELETE it did not perform just as readily as to one it did.
+ */
+async function verifyDelete(descriptor) {
+  try {
+    const rows = await table.query(descriptor.table, {
+      query: `sys_id=${descriptor.sys_id}`, fields: 'sys_id', limit: 1, display: 'false',
+    });
+    const gone = rows.length === 0;
+    return {
+      verified: gone,
+      status: gone ? 'applied' : 'no-op',
+      summary: gone
+        ? `the record is gone from ${descriptor.table}`
+        : `no-op: ${descriptor.table}/${descriptor.sys_id} is still on the instance after the delete returned success`,
+      applied: gone ? [{ field: 'sys_id', value: descriptor.sys_id }] : [],
+      dropped: gone ? [] : [{ field: 'sys_id', requested: 'deleted', actual: 'still present', reason: 'the record survived the delete' }],
+      transformed: [], unverifiable: [], noOpSignal: null,
+    };
+  } catch (err) {
+    return unverified(`the delete could not be confirmed: ${err.message}`);
+  }
+}
+
+function unverified(reason) {
+  return {
+    verified: false, status: 'unverified', summary: reason,
+    applied: [], dropped: [], transformed: [],
+    unverifiable: [{ field: '(all)', reason }], noOpSignal: null,
+  };
+}
+
+/**
+ * Verify one completed mutation.
+ *
+ * `descriptor` comes from the tool's own `describeWrite`. A tool that returns
+ * null is not a hole in the coverage — the SDK-backed tools and the verifiers
+ * read their work back through their own paths, and are labelled as such
+ * rather than being diffed against a shape they never promised.
+ */
+export async function verifyMutation({ descriptor, result, before, toolName }) {
+  if (!descriptor) {
+    return {
+      verified: null, status: 'self-verified', summary: `${toolName} reports its own read-back`,
+      applied: [], dropped: [], transformed: [], unverifiable: [], noOpSignal: null,
+      verifiedBy: toolName,
+    };
+  }
+  if (descriptor.operation === 'delete') return verifyDelete(descriptor);
+
+  // The record as the platform returned it. `create`/`update` hand back the
+  // written record; anything else means we have nothing to diff against.
+  const returned = result && typeof result === 'object' ? result : null;
+  if (!returned) return unverified('the tool returned no record to compare against');
+
+  const { types, hierarchy } = await fieldTypesFor(descriptor.table);
+  return diffWrite({
+    table: descriptor.table,
+    operation: descriptor.operation || 'update',
+    requested: descriptor.requested || {},
+    returned,
+    before,
+    fieldTypes: types,
+    hierarchy,
+  });
+}
+
+/**
+ * Attach the verdict to the payload the MODEL reads.
+ *
+ * Appended after truncation rather than before it. The result body is cut at a
+ * character limit, and a verification spliced in beforehand is exactly the kind
+ * of tail that gets silently removed — which would leave the model reading a
+ * plausible success with the disproof cut off. That is the shape of the
+ * original defect, so the block is placed where the cut cannot reach it.
+ */
+export function attachVerification(truncatedOutput, verification) {
+  const block = verificationForModel(verification);
+  if (!block) return truncatedOutput;
+  return `${truncatedOutput}\n${JSON.stringify({ verification: block }, null, 1)}`;
+}
+
+/**
+ * How a verified mutation should be reported: as an error the model must react
+ * to, or as an ordinary success.
+ *
+ * A dropped field is NOT an exception — the call reached the instance and part
+ * of it may have landed — but it must not read as plain success either, or the
+ * model narrates a write that did not happen. `isError` drives the model's own
+ * framing, and the status drives the renderer (WI-6).
+ */
+export function isFailedWrite(verification) {
+  return Boolean(verification) && (verification.status === 'no-op' || verification.status === 'partial');
+}
