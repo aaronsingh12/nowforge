@@ -10,6 +10,7 @@ import {
   appendMessage,
   loadHistory,
   recordToolEvent,
+  latestUserSeq,
 } from '../memory/sessions.js';
 import { compactIfNeeded, buildDigestNote, estimateTokens } from '../memory/compaction.js';
 import { computeBudget } from '../memory/budget.js';
@@ -19,6 +20,7 @@ import { indexMessage } from '../memory/recall.js';
 import { captureAfterTool, captureMark, reconcileTurn } from './capture.js';
 import { openCaptureWindow, closeCaptureWindow } from '../servicenow/transport.js';
 import { snapshotBefore, verifyMutation, attachVerification, isFailedWrite } from './mutation-pipeline.js';
+import { appendMutation, annotateLatestCapture, mutationsForTurn, renderMutationReport, ledgerDigestForModel } from '../memory/ledger.js';
 
 /**
  * The backbone, modeled on Claude Code / opencode:
@@ -74,6 +76,36 @@ const RESULT_CHAR_LIMIT = 8000;
 
 function truncate(str) {
   return str.length > RESULT_CHAR_LIMIT ? str.slice(0, RESULT_CHAR_LIMIT) + '\n…[truncated]' : str;
+}
+
+/**
+ * WI-2's invariant, made mechanical.
+ *
+ * The turn's mutations are rendered by the HARNESS and appended to the turn's
+ * output. The model narrates around a block it did not author and cannot omit,
+ * so "an executed mutation is absent from the report" stops being possible
+ * rather than becoming less likely. Emitted as its own event so the renderer
+ * can style it from the same verification statuses (WI-6).
+ */
+function emitMutationReport({ sessionId, turnSeq, emit }) {
+  let entries = [];
+  try { entries = mutationsForTurn(sessionId, turnSeq); }
+  catch (err) { log.error('ledger', `could not read the mutation ledger: ${err.message}`); return; }
+  if (!entries.length) return;
+  const markdown = renderMutationReport(entries);
+  if (!markdown) return;
+  emit({
+    type: 'mutation_report',
+    markdown,
+    mutations: entries.map((e) => ({
+      tool: e.tool, table: e.table, sys_id: e.sys_id, displayId: e.displayId,
+      status: e.status, approval: e.approval,
+      dropped: e.verification?.dropped || [],
+      capture: e.capture?.message || null,
+    })),
+  });
+  const bad = entries.filter((e) => e.status === 'no-op' || e.status === 'partial').length;
+  log.info('ledger', `turn report: ${entries.length} mutation(s)${bad ? `, ${bad} not fully applied` : ''}`);
 }
 
 function awaitApproval(state, approvalId) {
@@ -217,9 +249,16 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
   let stallNudged = false;
   let compactedThisTurn = false;
   let mutatingCallCount = 0;
+  // The seq of the user message that opened this turn — the key every ledger
+  // row hangs off. On a retry the message is already stored, so the newest one
+  // is this turn's.
+  let turnSeq = 0;
   if (!retry) {
     const userSeq = appendMessage(sessionId, { role: 'user', text: userText });
     indexMessage(sessionId, userSeq, 'user', userText);
+    turnSeq = userSeq;
+  } else {
+    turnSeq = latestUserSeq(sessionId);
   }
   const info = providerInfo();
   emit({ type: 'meta', ...info });
@@ -253,7 +292,21 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
        * weight, and those are the ones compaction is not allowed to touch. The
        * honest outcome is to proceed and let the size warning say so.
        */
-      const provisionalSystem = buildSystemPrompt({ sessionId, digestNote: buildDigestNote(sessionId) });
+      /*
+       * WI-2 — the ledger reaches the model SYSTEM-side.
+       *
+       * Not as a message: compaction rewrites `messages`, so a reminder posted
+       * there could be folded away by the exact mechanism this defends against.
+       * The system prompt is rebuilt every iteration, so by the final
+       * completion it carries every mutation the turn has executed — including
+       * ones the model can no longer see in its own history.
+       */
+      const ledgerSoFar = mutatingCallCount > 0 ? mutationsForTurn(sessionId, turnSeq) : [];
+      const provisionalSystem = buildSystemPrompt({
+        sessionId,
+        digestNote: buildDigestNote(sessionId),
+        mutationDigest: ledgerDigestForModel(ledgerSoFar),
+      });
       const budgets = await computeBudget({ system: provisionalSystem, tools: TOOLS, maxTokens: MAX_OUTPUT_TOKENS });
       if (i === 0) {
         // The three numbers, at meta time, every turn. Previously the budget
@@ -291,7 +344,13 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
       }
 
       // Rebuilt after compaction, so a digest written just now is in the prompt.
-      const system = buildSystemPrompt({ sessionId, digestNote: buildDigestNote(sessionId) });
+      // Same ledger digest as the budget probe above, so the prompt that is
+      // MEASURED and the prompt that is SENT are the same string.
+      const system = buildSystemPrompt({
+        sessionId,
+        digestNote: buildDigestNote(sessionId),
+        mutationDigest: ledgerDigestForModel(ledgerSoFar),
+      });
       const requestTokens = budgets.fixed + estimateTokens(history);
       log.debug('llm', `request ~${requestTokens} tokens (fixed ${budgets.fixed}, history budget ${budgets.budget})`);
       if (requestTokens > budgets.ceiling) {
@@ -396,6 +455,9 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
           const reconciled = await reconcileTurn({ sessionId, sessionTitle, since: turnCaptureMark });
           if (reconciled) emit(reconciled);
         }
+        // AFTER reconciliation, so the capture verdict is in the ledger before
+        // the report renders it.
+        emitMutationReport({ sessionId, turnSeq, emit });
         log.info('agent', `turn done  session=${shortId(sessionId)}  ${ms(turnStart)}`);
         emit({ type: 'done' });
         return;
@@ -495,6 +557,18 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
               : 'ok',
             mutating: tool.mutating, approval,
           });
+          // WI-2 — the ledger. Written here, on the executed path only, so it
+          // records what HAPPENED rather than what was attempted. Compaction
+          // cannot reach this table, so the closing report can be rendered from
+          // it even if the turn folds three times before it gets there.
+          if (tool.mutating) {
+            appendMutation({
+              sessionId, turnSeq, tool: call.name,
+              descriptor: typeof tool.describeWrite === 'function' ? tool.describeWrite(call.input || {}, raw) : null,
+              result: raw, verification, approval,
+            });
+          }
+
           // A-4 write path: a verification that FAILED is the most valuable
           // thing this agent ever learns about an instance, and it used to be
           // thrown away with the session.
@@ -523,7 +597,10 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
               sessionId, sessionTitle, toolName: call.name,
               input: call.input || {}, result: raw, since: callCaptureMark,
             });
-            if (captured) emit({ ...captured, id: call.id });
+            if (captured) {
+              annotateLatestCapture(sessionId, turnSeq, captured);
+              emit({ ...captured, id: call.id });
+            }
           }
         } catch (err) {
           const output = `Error: ${err.message}${err.detail ? ` — ${JSON.stringify(err.detail).slice(0, 300)}` : ''}`;
@@ -547,6 +624,9 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
       const reconciled = await reconcileTurn({ sessionId, sessionTitle, since: turnCaptureMark });
       if (reconciled) emit(reconciled);
     }
+    // A turn that ran out of iterations still changed the instance, and its
+    // changes still have to be reported.
+    emitMutationReport({ sessionId, turnSeq, emit });
     emit({ type: 'done' });
   } catch (err) {
     log.error('agent', `turn failed  session=${shortId(sessionId)}  ${ms(turnStart)} — ${err.message}`, err);
@@ -554,6 +634,9 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
     // it is safe. The UI turns that into a Retry button; without the flag it
     // shows the error alone, because retrying a malformed request or a
     // rejected mutation just fails again more slowly.
+    // The turn failed AFTER writing to the instance in some cases. A report
+    // that only renders on the happy path would hide exactly those.
+    try { emitMutationReport({ sessionId, turnSeq, emit }); } catch { /* already failing */ }
     emit({ type: 'error', message: err.message, retryable: Boolean(err.retryable) });
   } finally {
     // ALWAYS — a window left open by a crashed turn would make every later

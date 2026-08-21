@@ -253,6 +253,41 @@ const MIGRATIONS = [
 
   CREATE INDEX IF NOT EXISTS idx_capture_sets_session ON capture_sets(session);
   `,
+
+  // 7 — the mutation ledger (WI-2)
+  //
+  // Its own table, and that is the whole design. Compaction deletes from
+  // `messages` and `chunks` and touches nothing else, so a ledger row cannot be
+  // folded, summarised or dropped by it — the same structural property that
+  // makes `tool_events` outlive compaction, rather than a rule someone has to
+  // keep remembering.
+  //
+  // It exists because a compaction fired mid-turn (13,348 -> 3,062 tokens)
+  // immediately before a closing summary, and that summary omitted an approved,
+  // executed record creation entirely. A user-approved mutation got zero
+  // end-of-turn reporting. The report is now rendered FROM this table rather
+  // than from what the model can still remember.
+  `
+  CREATE TABLE IF NOT EXISTS mutation_ledger (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session       TEXT NOT NULL,
+    turn_seq      INTEGER NOT NULL,   -- seq of the user message that opened the turn
+    ts            TEXT NOT NULL,
+    tool          TEXT NOT NULL,
+    table_name    TEXT,
+    sys_id        TEXT,
+    display_id    TEXT,               -- the number or name a human would search for
+    requested     TEXT,               -- JSON: the fields that were sent
+    verification  TEXT,               -- JSON: the WI-1 verdict
+    status        TEXT NOT NULL,      -- applied | partial | no-op | transformed | unverified | self-verified
+    approval      TEXT,               -- approved | auto | rejected
+    capture       TEXT,               -- JSON: the transport capture annotation
+    instance      TEXT,
+    actor         TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_mutation_ledger_session ON mutation_ledger(session, turn_seq);
+  `,
 ];
 
 /**

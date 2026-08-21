@@ -6,7 +6,7 @@ import { factBlock } from '../memory/facts.js';
  * carries what this project has measured about the instance (A-4). Both are
  * system-side: established context, not forged conversational turns.
  */
-export function buildSystemPrompt({ digestNote = '' } = {}) {
+export function buildSystemPrompt({ digestNote = '', mutationDigest = '' } = {}) {
   const { connection } = getSettings();
   const base = `You are the NowHelpAssist Agent — an autonomous ServiceNow development copilot connected to ${connection.instanceUrl || '(no instance configured yet)'}.
 
@@ -44,5 +44,9 @@ Operating rules:
   const facts = factBlock();
   if (facts) parts.push(facts);
   if (digestNote) parts.push(digestNote);
+  // LAST, so it is the nearest thing to the completion: what this turn has
+  // already done to the instance, recorded by the harness rather than
+  // remembered by the model. A compaction cannot remove it (WI-2).
+  if (mutationDigest) parts.push(mutationDigest);
   return parts.join('\n\n---\n\n');
 }

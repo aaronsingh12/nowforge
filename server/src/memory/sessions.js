@@ -114,6 +114,14 @@ export function appendMessage(sessionId, entry) {
 }
 
 /** The neutral history, in order — exactly what the orchestrator loop wants. */
+/** The seq of the newest user message — the key a retried turn's ledger hangs off. */
+export function latestUserSeq(sessionId) {
+  const row = getDb()
+    .prepare("SELECT MAX(seq) AS s FROM messages WHERE session = ? AND role = 'user'")
+    .get(sessionId);
+  return row?.s ?? 0;
+}
+
 export function loadHistory(sessionId) {
   const rows = getDb()
     .prepare('SELECT json FROM messages WHERE session = ? ORDER BY seq ASC')
