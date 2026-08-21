@@ -6,6 +6,13 @@ import {
   esc, derivedRemoteSysId, parseUpdateSetXml, verifyExportParity,
 } from '../src/servicenow/transport-export.js';
 import { listWorkspaces, workspaceForScope, managedScopeNames, refreshWorkspaces } from '../src/servicenow/workspaces.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { _setDbForTests, migrate, getDb } from '../src/memory/db.js';
+import { createSession } from '../src/memory/sessions.js';
+import { isCaptureOn, setCapture, updateRowName, sweepMark } from '../src/servicenow/transport.js';
 
 /* ------------------------------------------------------------------ *
  * The 403 that is not an auth failure (§33)
@@ -205,4 +212,58 @@ test('the managed scope list is what the Applications page flags against', async
   const names = await managedScopeNames();
   assert.ok(names.includes('x_2196302_nwforge'));
   assert.ok(!names.includes('global'));
+});
+
+/* ------------------------------------------------------------------ *
+ * Capture state — the ON-by-default contract the chat toggle depends on
+ * ------------------------------------------------------------------ */
+
+// A scratch database through the REAL migrations, same pattern as memory.test.js.
+const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nowhelpassist-transport-'));
+_setDbForTests(migrate(new DatabaseSync(path.join(scratchDir, 'test.db'))));
+
+test('migration 6 creates the capture tables', () => {
+  const names = getDb()
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('capture_state','capture_sets')")
+    .all().map((r) => r.name).sort();
+  assert.deepEqual(names, ['capture_sets', 'capture_state']);
+});
+
+test('capture is ON for a session nobody has touched — absence means the default', () => {
+  assert.equal(isCaptureOn('never-seen-session'), true);
+});
+
+test('capture off, then on, survives as an explicit row', () => {
+  const id = 'sess-toggle';
+  createSession({ id, title: 'toggle' });
+  setCapture(id, false);
+  assert.equal(isCaptureOn(id), false, 'turning it off did not take');
+  setCapture(id, true);
+  assert.equal(isCaptureOn(id), true, 'turning it back on did not take');
+  // One row per session, not one per toggle — the UPSERT is load-bearing.
+  const n = getDb().prepare('SELECT COUNT(*) c FROM capture_state WHERE session = ?').get(id).c;
+  assert.equal(n, 1, `expected one capture_state row, found ${n}`);
+});
+
+test('no session id is not "capture on" — a sweep with nowhere to put rows must not run', () => {
+  assert.equal(isCaptureOn(null), false);
+  assert.equal(isCaptureOn(''), false);
+});
+
+test('the update row locator is <table>_<sys_id>, exactly as the platform writes it', () => {
+  assert.equal(
+    updateRowName('sc_cat_item', 'de8ab70a83b2c750b939cc65eeaad30a'),
+    'sc_cat_item_de8ab70a83b2c750b939cc65eeaad30a'
+  );
+});
+
+test('the sweep mark is a UTC glide_date_time, backdated past one-second granularity', () => {
+  const at = Date.parse('2026-08-21T05:27:24.000Z');
+  const mark = sweepMark(at);
+  assert.match(mark, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/, `not a glide_date_time: ${mark}`);
+  // Backdated, because a row written in the same second the clock ticked over
+  // would otherwise fall outside the window.
+  assert.ok(Date.parse(mark.replace(' ', 'T') + 'Z') < at, 'the mark is not backdated');
+  // UTC, not local — trap #UTC. 05:27:24 UTC must not render as a local hour.
+  assert.ok(mark.startsWith('2026-08-21 05:2'), `not UTC: ${mark}`);
 });
