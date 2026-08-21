@@ -4606,3 +4606,78 @@ exactly right.
 | 87 | **Incidents, and every non-`sys_metadata` table, are data** | a user believes their incident was created "inside" an update set or an application scope | Update sets capture configuration only. Say it in prose when the question implies otherwise; the tool result already knows |
 | 88 | **A choice LABEL that the platform resolved looks exactly like a dropped write** | `state: "On Hold"` comes back as `"3"`, and a naive diff calls it lost | The returned `display_value` equal to what was REQUESTED is the proof it was resolved. Without that check, every label-addressed write reports as dropped |
 | 89 | **A fabricated sys_id reads exactly like a researched one** | the agent names the business rule blocking a write, with an id that exists on no table | Enrich the tool result with the real lookup instead of asking the model to report one. And when a rule name matches five rows — one per task table — match on name AND table, or the wrong copy is reported with total confidence |
+
+---
+
+## 37. `finish reason: load` on a well-formed request — the compaction that folded the question away
+
+A session against dev442675 died twice in a row on
+`ollama returned an empty completion (finish reason: load) (after 3 attempts)` — six identical
+failures, on large prompts, and only ever after a compaction had run. §29 had already established
+that `load` is Ollama's own value for "the model was loaded and nothing was generated", and §31 had
+already ruled out the context window. Both were right, and neither was the cause.
+
+### What the stored session showed
+
+The session's last message row is a `create_record` tool result at `11:23:23.102`. Its second digest
+was written at `11:23:28.329`. Nothing was persisted after that — which is the error path behaving
+exactly as designed, and also the whole clue: **the fold ran mid-turn**, about thirty-nine seconds
+into a turn that opened at `11:22:49.818`, after roughly thirteen assistant/tool rows.
+
+`KEEP_LAST_TURNS` is 8. Thirteen rows is more than eight. So `cutIndex = rows.length - 8` landed
+*after* the turn's user message, and the fold deleted it. What went to the model was:
+
+```
+system > assistant(tool_calls) > tool > assistant(tool_calls) > tool > ...
+```
+
+A conversation with nothing in it asking for anything. It is perfectly well-formed — every guard in
+the D-7 degenerate-request family passed it, because every one of those guards checks that a bad
+shape is *absent* and none checks that a necessary row is *present*.
+
+Three properties then made one bad request into six:
+
+- the request body was serialised **once**, above `withRetry`, so all three attempts POSTed
+  byte-identical bytes;
+- the error path writes nothing, so the UI's Retry re-ran the turn against unchanged history — and
+  the fold had already happened, so the shape was frozen;
+- the error card asserted a cause it could not know (*"usually a transient load on Ollama's side"*),
+  sending the reader to Settings while the defect was in `compaction.js`.
+
+### What it was not
+
+Worth recording, because both were plausible and both are now excluded by arithmetic rather than by
+opinion. The failing request carried roughly 15,700 tokens of fixed overhead and ~2,800 of history —
+about **18.5k estimated, 13.5k real**. §31's own table has 35/35 successes at up to 51,429 real
+prompt tokens on this same path. It was not size, and it was not the window. Nor was it throttling:
+`openaiCompat.js` checks `res.ok` before treating a body as a success, so a 429 or a 5xx surfaces as
+`API error (<status>)` and could never print `finish reason: load`.
+
+### A separate defect the same screenshot exposed
+
+The "empty bubble" in the transcript was not a blank assistant turn — there are none in the stored
+session. `AgentChat.jsx` rendered the harness's mutation report as
+`<Markdown>{m.markdown}</Markdown>`, and `Markdown` destructures a `text` prop. WI-2's central
+guarantee — that an executed mutation cannot be absent from the turn's report — had been rendering
+to an empty `<div>` on every turn that mutated.
+
+### Fixed
+
+The cut is role-aware and never crosses the newest `user` row; where that leaves nothing worth
+folding the fold is skipped with a reason. The serialiser reports whether a user turn survived and
+the adapter refuses the send if not — refuses, rather than injecting a synthetic one, because a
+repaired request would carry a turn built on corrupt state into the approval gate. The
+empty-completion dump now persists to `tool_events` with a `roleSequence` field, which is the one
+value that would have shown this in a minute rather than a morning.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 90 | **Mid-turn compaction can orphan the active user turn** | a long tool loop, a fold that fires on iteration seven, and a request that no longer contains the question it is answering | Cut placement must be role-aware. A row count is not a turn boundary: `keepLast` is four tool round-trips and a real turn routinely runs longer, so clamp the cut to the newest `user` row rather than trusting arithmetic |
+| 91 | **Serializers need presence invariants, not just absence checks** | every degenerate-shape guard passes, and the request is still meaningless | Absence checks ("no blank assistant turn, no orphaned tool result") cannot see a row that was removed. Assert what must BE there. And refuse rather than repair — injecting a synthetic user message makes the send succeed on a conversation nobody had, and the turn carries on into the approval gate |
+| 92 | **`finish_reason: "load"` arrives on a 200 with a non-empty `messages` array** | §29's conclusion — "a cold start" — applied to a request that had been warmed up three times | `load` means the request produced no generation; it does not prove the model was loading. Treat it as "the upstream had nothing to say about this request" and check the request first. A user-less conversation reproduces it on a warm model |
+| 93 | **A diagnostic that only reaches stderr does not exist** | the one block that answers "degenerate request or unlucky upstream?" is gone by the time anyone asks | Persist guard dumps where compaction cannot reach them — `tool_events`, not `messages`. Bound the raw body; a failure path is the worst place for an unbounded write |
+| 94 | **A payload serialised outside the retry closure makes every retry a replay** | three "attempts" that are one attempt sent three times, and a flaky-upstream reading of a deterministic bug | Decide inside the retried function what is being sent. Identical bytes may well be correct — but it should be a choice the function makes, not a property of where a `const` happened to sit |

@@ -42,6 +42,28 @@ import { estimateTextTokens } from './tokens.js';
  * 32,000 ESTIMATED tokens measured as 22,911 real ones, about 40% high. Every
  * number in this file is in estimated tokens, so the real request is smaller
  * than it says — which is the safe direction to be wrong in.
+ *
+ * ---
+ *
+ * WHICH OF THESE NUMBERS YOU MAY BUILD ON.
+ *
+ * The 35/35 latency table above is a MEASUREMENT of the upstream and stands
+ * until someone re-measures it. Everything describing this application's own
+ * size — the fixed overhead, the tool count, the resulting history budget — is
+ * a SNAPSHOT, and snapshots of a growing system go stale by being correct on
+ * the day they were written. The D-7 write-up's closing figures were
+ * "13,160 fixed / 37 tool schemas / 12,696 history budget"; two tracks later
+ * the same probe reported roughly 15,700 fixed against 41 tools, and a history
+ * budget near 10,100. Nothing regressed — the prompt and the toolset grew, and
+ * the allowance is what is left over.
+ *
+ * So do not quote a figure from this comment, and do not tune against one.
+ * `computeBudget()` measures the fixed cost of the ACTUAL system prompt and
+ * the ACTUAL tool schemas on every turn, `probeContextWindow()` reads the
+ * window off the daemon, and the orchestrator logs all four numbers at meta
+ * time and streams them to the UI badge. That runtime output is the source of
+ * truth; this comment is the reasoning behind it. Trap #59 in the ledger is
+ * about exactly this, and it applies to its own write-up.
  */
 
 /**
