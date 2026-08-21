@@ -4461,3 +4461,148 @@ table should revert in a `finally`, the same rule the verification runner has ha
 | 81 | **`ACL Exception <Op> Failed due to security constraints` is a ROW-level denial, not a login problem** | a delete that the table plainly permits fails, and the error sends you to check a password that is fine | Distinct from `Failed API level ACL Validation`, which is the whole table. The remedies differ, so the diagnosis has to. Both are 403 |
 | 82 | **A harness return channel written as a `system` preference is CONFIGURATION** | "every test record was cleaned up" is true, and the update set has one new row per run — 10 of them here | `system = true` on `sys_user_preference` makes it tracked. Anything a harness creates has to be checked for an update row too, or a captured session exports it |
 | 83 | **Two sweeps racing for an unclaimed row is a different bug from two sweeps racing for a claimed one** | the "already in one of our sets" exclusion looks like it solves concurrency, and it only solves the sequential half | A row still sitting in Default is unclaimed by construction. Arbitrate on provenance from the audit trail, and leave a genuinely ambiguous row where it is |
+
+---
+
+## 36. Hardening sprint — the seven defect classes from the 2026-08-20/21 transcript
+
+A live session against dev442675 produced seven defect classes, the worst of which had the agent
+reporting success on writes the platform silently discarded. Every fix below is harness-level and
+model-agnostic: none of it is a prompt asking the model to be more careful, because in the
+transcript the model *was* careful — it correctly refused to create an application one turn before
+creating one anyway, and it printed the payload disproving its own success claim.
+
+All three headline defects were reproduced live before anything was written, on the same records.
+
+### E1 / E2 — the platform accepts a write and discards it
+
+Re-run on the transcript's own record (`29b5648983be0f10b939cc65eeaad36b`, "AGAMYA_Scope"):
+
+```
+subject 29b5648983be0f10b939cc65eeaad36b application=global mod=0 updated=2026-08-17 11:23:38
+PATCH returned:            application=global mod=0 updated=2026-08-17 11:23:38
+requested c44f3c6c37c24793be9f8b759c7818e4
+=> SILENTLY DROPPED; sys_mod_count 0 -> 0 (UNCHANGED — no-op signal)
+```
+
+HTTP 2xx, the record untouched, and `sys_mod_count` / `sys_updated_on` both frozen at creation.
+`sys_update_set.application` is forced to the session's current application scope on **both** insert
+and update — the same demotion §33 E4 measured for `sys_scope` on an insert, which is why the AD-2
+guard from the previous sprint fired on this sprint's own fixture recorder.
+
+The frozen pair is the cheap decisive signal, and it is checked before the field diff.
+
+### The rules the diff had to encode, each measured rather than assumed
+
+| behaviour | measured |
+|---|---|
+| journal fields | `comments` writes fine and reads back `value: ""` — the text lives only in `display_value`, wrapped in a timestamp and an author. Never verifiable by echo |
+| booleans | `active: true` (a real boolean) returns the string `"true"` |
+| choice labels | `state: "On Hold"` IS resolved to `"3"`, and `display_value` comes back as "On Hold" |
+| computed fields | `priority` is derived from impact+urgency; writing it is ignored (trap #5) |
+| unknown fields | a field that is not a column is **absent from the response entirely** |
+| encoded-query `=` | case-insensitive on strings and on sys_id — `user_name=ADMIN` returns the `admin` row |
+
+The choice-label case gave the discriminator that separates a lost write from a resolved one: a
+returned `display_value` equal to what was *asked for* proves the platform resolved a label. Without
+it, every label-addressed write would report as dropped.
+
+### E3 — the lookup could not find the record it was named after
+
+```
+lookup("admin", sys_user):
+   dd9b3742c37030009b5efcfc5bba8fb6  Certification Admin
+   8ff5b254b33213005e3de13516a8dcf7  CMDB Admin
+   860a4d35eb32010045e1a5115206fe54  Credential Admin
+```
+
+One line of cause: `${displayField}LIKE${q}^ORDERBY${displayField}`. A contains-match on `name`,
+alphabetical — and `user_name` was never searched at all, so the user whose `user_name` **is**
+`admin` could not win a search for its own key. Two incidents were created with caller ≠ opener.
+
+`lookup("global", sys_scope)` returned "Enhanced Global Search UI" for the same reason, over a
+record whose sys_id is the literal string `global`.
+
+### E5 — the husk, and the route that works
+
+`create_record` on `sys_scope` produced `sys_class_name: "sys_scope"`, `scope: ""`, no version.
+Investigated as the brief required: `now-sdk init` takes `--appName --packageName --scopeName` and
+the build emits `dist/app/scope/sys_app_<id>.xml` — a **sys_app**, which is the whole difference.
+So the boundary is enforced in `create_record` and `create_application` offers the real path.
+
+Scope naming is validated first, against the vendor prefix read live from
+`glide.appcreator.company.code` (`2196302` here → `x_2196302_`, leaving 8 of 18 characters). A wrong
+prefix is only a *warning* at install time and the application then "may not install correctly"
+(§3), so a second of validation replaces a broken application.
+
+### E7 — a fabricated sys_id, found while fixing the playbook
+
+The transcript reported the blocking business rule as
+`bfdd88168376c750b939cc65eeaad39f`. Checked:
+
+```
+sys_script       -> not found
+sys_metadata     -> not found
+sys_update_xml   -> not found
+sys_update_set   -> not found
+```
+
+It exists nowhere on the instance. Which is the argument for enrichment over guidance: the playbook
+now looks the rule up and returns real rows, or says it found none.
+
+Reading the rule also changed the recommendation. "Abort changes on group" exists **five times** on
+this instance, one per task table, and the `incident` copy
+(`6a2e9d1453e80010833addeeff7b124f`) fires on
+`assigned_toISNOTEMPTY^assignment_groupVALCHANGES^assignment_groupISNOTEMPTY` — aborting only when
+the assigned user is **not a member of** the assignment group. That is correct business logic. The
+transcript's response — silently dropping those fields from every later write, forever — was the
+worst of the four available options, and "pick a user who is in the group" was never offered.
+
+Matching on name alone would have returned the `change_task` copy for an `incident` write, so the
+lookup is keyed on name **and** table.
+
+### What each work item ships
+
+| | |
+|---|---|
+| **WI-1** | `write-verify.js` — pure, no I/O. Diffs the requested payload against the returned record and classifies each field `applied` / `dropped` / `transformed` / `unverifiable`. The verification block is appended AFTER truncation, because spliced in before it is exactly the tail an 8,000-character cut removes — leaving the model reading a plausible success with the disproof deleted |
+| **WI-2** | `mutation_ledger` + a report rendered by the HARNESS. Pinned structurally: compaction deletes from `messages` and `chunks` and touches nothing else, so no code path can drop a ledger row even by mistake |
+| **WI-3** | `write-guard.js` — a drop registry (session-scoped, because platform behaviour persists) and a rejection registry (turn-scoped, because a user who asks again means it), both checked BEFORE the approval gate |
+| **WI-4** | Per-table key fields, four-rank ordering, a literal/sys_id probe, `matchType` and `ambiguous` on every result |
+| **WI-5** | The husk guard, plus `create_application` and `check_scope_name` |
+| **WI-6** | `executeTool()` refuses a mutation without a resolved approval; emission reordered; `writeOutcome.js` derives glyph and words from one object |
+| **WI-7** | The capture annotation in the tool result body, and the business-rule playbook |
+| **WI-8** | Shipped, default on: a completion carrying both a question and mutating calls holds the calls |
+
+### Two claims in the brief that were not in the tree
+
+The brief listed both as already shipped and asked that they not be regressed. Neither existed:
+
+- **"turn-scoped canonical-input-hash rejection denial"** — the only rejection handling was the
+  prose string *"The user rejected this operation. Do not retry it"* in the tool result. No
+  registry, no hash, no enforcement. Built in WI-3.
+- **"relevance-ordered tool-result truncation with omission markers"** — true for *schemas*
+  (`toCompactSchema`, §D-7), not for tool results, where `truncate()` is
+  `str.slice(0, 8000) + '…[truncated]'`. Left alone rather than rewritten, and WI-1's verification
+  block is placed beyond the cut instead.
+
+### Two defects introduced and caught during the sprint
+
+Worth recording because both were caught by the tests rather than by review: a `Object.defineProperty`
+with `enumerable: false` immediately followed by `Object.assign` on the same key (throws in ESM's
+strict mode), and an ambiguity rule that flagged `sys_user_group` exact matches as ambiguous because
+the table's key **is** its display field — which would have made the agent confirm something it got
+exactly right.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 84 | **ServiceNow REST can silently drop field writes and return 200 with the unchanged record** | the agent announces "is now linked" with the disproving payload in its own tool result, three times | Diff every requested field against the response, and check `sys_mod_count`/`sys_updated_on` — frozen means nothing was stored. Known instance: `sys_update_set.application` is forced to the session's current application scope on both insert and update |
+| 85 | **Bare `sys_scope` inserts create husks, not applications** | `201 Created`, and an "application" with `sys_class_name: "sys_scope"`, no technical `scope` name and no version, that Studio will not list | Real custom apps are `sys_app` records with an `x_<vendor>_<name>` scope, created via Studio or `now-sdk init`. The build output names it: `dist/app/scope/sys_app_<id>.xml` |
+| 86 | **`lookup_reference` contains-matching shadows exact key matches** | "admin" resolves to "Certification Admin", and two incidents get a caller who is not the opener | Rank exact key-field matches first, search the KEY field and not only the display field, and treat a non-exact top hit as ambiguous. Some sys_ids are literals — `sys_scope`'s Global row has `sys_id = "global"` |
+| 87 | **Incidents, and every non-`sys_metadata` table, are data** | a user believes their incident was created "inside" an update set or an application scope | Update sets capture configuration only. Say it in prose when the question implies otherwise; the tool result already knows |
+| 88 | **A choice LABEL that the platform resolved looks exactly like a dropped write** | `state: "On Hold"` comes back as `"3"`, and a naive diff calls it lost | The returned `display_value` equal to what was REQUESTED is the proof it was resolved. Without that check, every label-addressed write reports as dropped |
+| 89 | **A fabricated sys_id reads exactly like a researched one** | the agent names the business rule blocking a write, with an id that exists on no table | Enrich the tool result with the real lookup instead of asking the model to report one. And when a rule name matches five rows — one per task table — match on name AND table, or the wrong copy is reported with total confidence |

@@ -214,6 +214,20 @@ Three tiers. **LIVE (verified)** means it was exercised end-to-end against a rea
 
 There is still **no supported REST API for writing `sys_hub_*` directly**, and NowHelpAssist never attempts it. Live authoring works because it drives ServiceNow's own toolchain.
 
+#### Write-integrity floor (harness-enforced, model-agnostic)
+
+Five guarantees that hold whatever model is behind the agent — they were built and measured on the free
+`gpt-oss:120b-cloud` and transfer unchanged to stronger models, because none of them depends on the model
+being right. See `CHANGELOG.md` and `docs/fluent-research.md` §36.
+
+| Guarantee | How it is enforced |
+|---|---|
+| **A write that did not land is never reported as success** | every mutation is diffed field-by-field against the record the platform returns, and `sys_mod_count`/`sys_updated_on` frozen is treated as decisive. A 2xx that stored nothing reads `no-op`, in the tool result the model sees |
+| **A disproved write never costs a second approval** | a verified drop is registered for the session and blocked *before* the gate, with the diagnosis and workaround paths named |
+| **An executed mutation cannot vanish from the turn's report** | mutations go to a ledger in a table compaction structurally cannot reach, and the report is rendered by the harness, not by the model |
+| **A mutation cannot run without a resolved approval** | the executor takes the approval as an argument and refuses otherwise — reordering the code cannot change the safety property |
+| **A success glyph cannot appear on a failed write** | the glyph and the words are derived from one verification object |
+
 #### Model-proofing floor (A1–A5)
 
 Every guard answers a failure **measured** against `gpt-oss:120b-cloud`, not a hypothetical one. They do not make a weak model competent; they make it presentable — when it is wrong, the pipeline says so instead of deploying it.

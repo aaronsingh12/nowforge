@@ -204,6 +204,24 @@ const SEED = [
   { scope: 'instance', kind: 'mapping', key: 'hardware-group-has-no-manager',
     value: 'The Hardware group (sys_user_group 8a5055c9c61122780043563ef53438e3) has an EMPTY manager field. Any effect of the form "assign to the group\'s manager" produces nothing observable here. Never invent a placeholder name for it.',
     provenance: 'fluent-research §14 and §20, read off the instance', confidence: 0.95 },
+
+  // --- The 2026-08-20/21 transcript hardening sprint (§36) ---
+  { scope: UNIVERSAL, kind: 'trap', key: 'rest-silently-drops-field-writes',
+    value: 'ServiceNow REST can accept a field write, return 200, and store nothing — the response carries the UNCHANGED record. Detect it by diffing every requested field against the response and by checking sys_mod_count and sys_updated_on: both frozen means nothing was stored. Known instance: sys_update_set.application is forced to the session current application scope on BOTH insert and update, so it cannot be set over REST at all.',
+    provenance: 'fluent-research §36; reproduced live on 29b5648983be0f10b939cc65eeaad36b', confidence: 0.99 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'sys-scope-insert-is-a-husk',
+    value: 'Inserting into sys_scope over REST creates a HUSK, not an application: sys_class_name stays sys_scope instead of becoming sys_app, the technical scope name is empty, there is no version, and Studio will not list it. A real custom application is a sys_app record with an x_<vendor>_<name> scope, created through Studio or the SDK (now-sdk init). Use create_application.',
+    provenance: 'fluent-research §36 E5; the husk 73cd84168376c750b939cc65eeaad3ff is still on this instance', confidence: 0.99 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'lookup-contains-shadows-exact',
+    value: 'A reference lookup that contains-matches the display field can shadow the exact key match — searching sys_user for "admin" returned "Certification Admin" while the user whose user_name IS admin never surfaced, and two incidents were created with the wrong caller. Rank exact key-field matches first and treat a non-exact top hit as ambiguous. Some sys_ids are literal words: the Global scope has sys_id "global".',
+    provenance: 'fluent-research §36 E3', confidence: 0.99 },
+
+  { scope: UNIVERSAL, kind: 'trap', key: 'incidents-are-data-not-config',
+    value: 'Incidents, requests, tasks and every other table that does not extend sys_metadata are DATA. They are never captured by an update set and do not belong to an application scope. Update sets carry configuration only — catalog items, business rules, flows, UI policies, SLA definitions. Say so when a request implies otherwise.',
+    provenance: 'fluent-research §36 E7', confidence: 0.99 },
+
 ];
 
 /**
