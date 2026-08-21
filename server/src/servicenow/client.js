@@ -237,13 +237,21 @@ export function assertScopeIntentHeld(tableName, payload, created) {
   const got = cell && typeof cell === 'object' ? cell.value : cell;
   if (got === asked) return created;
 
+  // The record already EXISTS by the time this runs — REST wrote it, returned
+  // 201, and the demotion is only visible in the response. This guard reports;
+  // it cannot un-write. Deleting automatically would be worse: a global copy of
+  // the artifact may be exactly what the caller wants to keep, and a rollback
+  // nobody asked for is a destructive default. So the sys_id is named in the
+  // message, not just the detail, and the decision stays with the caller.
+  const sysId = created.sys_id?.value ?? created.sys_id ?? '(unknown)';
   throw new SnowError(
     `${tableName} was created with ${field}="${asked}" but the instance stored "${got}". `
     + 'REST is a global-tier writer: it accepts a scope on an insert and silently ignores it '
     + '(docs/fluent-research.md §33 E4). Scoped artifacts are born through the SDK tier, and a '
-    + 'scoped update set through the execution harness — not here.',
+    + `scoped update set through the execution harness — not here. The record was still created, `
+    + `as ${sysId} in "${got}"; delete it if a global one is not wanted.`,
     502,
-    JSON.stringify({ table: tableName, field, asked, got, sys_id: created.sys_id?.value ?? created.sys_id })
+    JSON.stringify({ table: tableName, field, asked, got, sys_id: sysId })
   );
 }
 

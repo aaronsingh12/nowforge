@@ -343,6 +343,21 @@ test('a create that asked for a scope and got global fails loudly', () => {
   );
 });
 
+test('the error says the record EXISTS and names it — the guard reports, it cannot un-write', () => {
+  // REST created the row and returned 201 before this ran. Auto-deleting would
+  // be a destructive default; naming the sys_id leaves the decision with the
+  // caller, and hiding it would strand an artifact nobody can find.
+  assert.throws(
+    () => assertScopeIntentHeld('sys_script', { sys_scope: 'x_2196302_nwforge' }, { sys_scope: 'global', sys_id: '55b9401e8336c750b939cc65eeaad393' }),
+    (err) => {
+      assert.match(err.message, /The record was still created, as 55b9401e8336c750b939cc65eeaad393 in "global"/);
+      assert.match(err.message, /delete it if a global one is not wanted/);
+      assert.equal(JSON.parse(err.detail).sys_id, '55b9401e8336c750b939cc65eeaad393');
+      return true;
+    }
+  );
+});
+
 test('the same rule covers sys_update_set.application, where the field is named differently', () => {
   assert.throws(
     () => assertScopeIntentHeld('sys_update_set', { application: 'c44f3c6c37c24793be9f8b759c7818e4' }, { application: 'global' }),
