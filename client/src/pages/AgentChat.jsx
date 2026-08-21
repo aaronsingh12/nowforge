@@ -551,7 +551,7 @@ export default function AgentChat() {
               return (
                 <div key={m.id} className="msg">
                   <div className="bubble">
-                    <Markdown>{m.markdown}</Markdown>
+                    <Markdown text={m.markdown} />
                   </div>
                 </div>
               );
