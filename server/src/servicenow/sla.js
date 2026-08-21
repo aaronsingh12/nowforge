@@ -144,6 +144,9 @@ const DEF_FIELDS = [
   'schedule', 'schedule_source', 'timezone', 'timezone_source', 'retroactive', 'retroactive_pause',
   'start_condition', 'stop_condition', 'pause_condition', 'reset_condition', 'cancel_condition',
   'when_to_cancel', 'when_to_resume', 'flow', 'sys_updated_on', 'sys_updated_by',
+  // Which application owns the definition — shown as a badge, and it decides
+  // which update set a change to it could ever travel in (§33).
+  'sys_scope',
 ].join(',');
 
 /** Shape one contract_sla row for the API, with the duration already decoded. */
@@ -180,6 +183,10 @@ function shapeDefinition(r) {
     when_to_resume: raw(r.when_to_resume) || null,
     flow: raw(r.flow) ? { sys_id: raw(r.flow), name: shown(r.flow) } : null,
     updated: { on: raw(r.sys_updated_on), by: raw(r.sys_updated_by) },
+    // The owning application, for the scope badge. display='all' gives the
+    // scope NAME in display_value and the sys_id in value; the name is the
+    // address a reader can act on.
+    scope: raw(r.sys_scope) ? { sys_id: raw(r.sys_scope), name: shown(r.sys_scope) } : null,
   };
 }
 

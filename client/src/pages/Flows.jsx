@@ -3,6 +3,8 @@ import { api, sse, val, disp } from '../api.js';
 import { confirmDestructive, confirmAction, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
 import { SkeletonRows, SkeletonLines, LoadingRegion, EmptyState } from '../components/states.jsx';
+import ScopeBadge from '../components/ScopeBadge.jsx';
+import { useScopeLabels } from '../hooks/useScopeLabels.js';
 
 /** Green when live authoring is ready; otherwise the exact commands to fix it. */
 function CapabilityBanner({ cap }) {
@@ -663,6 +665,8 @@ function Blueprint({ bp, capOk, onDeploy }) {
 
 export default function Flows() {
   const [rows, setRows] = useState([]);
+  // One batched resolve for the whole list, not one per row.
+  const scopeLabels = useScopeLabels(rows.map((r) => val(r, 'sys_scope')));
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [detail, setDetail] = useState(null);
@@ -793,13 +797,14 @@ export default function Flows() {
             </select>
           </div>
           <table className="table">
-            <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Active</th></tr></thead>
-            {loading && <SkeletonRows rows={6} cols={4} />}
+            <thead><tr><th>Name</th><th>Type</th><th>Scope</th><th>Status</th><th>Active</th></tr></thead>
+            {loading && <SkeletonRows rows={6} cols={5} />}
             {!loading && <tbody>
               {rows.map((r) => (
                 <tr key={val(r, 'sys_id')} className={`click ${detail && val(detail.flow, 'sys_id') === val(r, 'sys_id') ? 'selected' : ''}`} onClick={() => open(r)}>
                   <td>{disp(r, 'name')}</td>
                   <td><span className={`badge ${val(r, 'type') === 'subflow' ? 'blue' : ''}`}>{val(r, 'type') || 'flow'}</span></td>
+                  <td><ScopeBadge scope={scopeLabels[val(r, 'sys_scope')] || val(r, 'sys_scope')} name={disp(r, 'sys_scope')} /></td>
                   <td><span className="badge">{disp(r, 'status') || '—'}</span></td>
                   <td><span className={`badge ${val(r, 'active') === 'true' ? 'green' : ''}`}>{val(r, 'active') === 'true' ? 'on' : 'off'}</span></td>
                 </tr>

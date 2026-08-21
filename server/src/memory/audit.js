@@ -134,7 +134,10 @@ export function auditRows({ session = null, mutatingOnly = false, limit = 500 } 
   const toolArgs = [];
   if (session && session !== 'ui') { toolWhere.push('t.session = ?'); toolArgs.push(session); }
   if (session === 'ui') toolWhere.push('1 = 0');   // UI builds only: no agent rows at all
-  if (mutatingOnly) toolWhere.push('t.mutating = 1');
+  // A capture row is not itself a mutation, but it is the record of what
+  // happened to one — filtering it out of "mutations only" would hide the
+  // answer to "and where did that change go?" from the only view that asks.
+  if (mutatingOnly) toolWhere.push("(t.mutating = 1 OR t.kind = 'capture')");
   const toolSql =
     `SELECT t.*, s.title AS session_title
        FROM tool_events t

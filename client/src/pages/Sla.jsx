@@ -4,6 +4,8 @@ import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
 import { TableField } from '../components/ReferenceField.jsx';
 import { SkeletonRows, LoadingRegion, EmptyState } from '../components/states.jsx';
+import ScopeBadge from '../components/ScopeBadge.jsx';
+import { useScopeLabels } from '../hooks/useScopeLabels.js';
 
 /**
  * SLA definitions.
@@ -37,6 +39,7 @@ const EMPTY = {
 export default function Sla() {
   const [meta, setMeta] = useState(null);
   const [rows, setRows] = useState([]);
+  const slaScopes = useScopeLabels(rows.map((r) => r.scope?.sys_id));
   const [filters, setFilters] = useState({ search: '', collection: '' });
   const [form, setForm] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -158,8 +161,8 @@ export default function Sla() {
           </div>
           {error && <p className="error-text">{error}</p>}
           <table className="table">
-            <thead><tr><th>Name</th><th>Table</th><th>Duration</th><th>Clock</th></tr></thead>
-            {loading && <SkeletonRows rows={5} cols={4} />}
+            <thead><tr><th>Name</th><th>Table</th><th>Scope</th><th>Duration</th><th>Clock</th></tr></thead>
+            {loading && <SkeletonRows rows={5} cols={5} />}
             {!loading && <tbody>
               {rows.map((r) => (
                 <tr key={r.sys_id} className={`click ${editingId === r.sys_id ? 'selected' : ''}`} onClick={() => openEdit(r)}>
@@ -168,6 +171,7 @@ export default function Sla() {
                     {!r.active && <span className="badge" style={{ marginLeft: 6 }}>inactive</span>}
                   </td>
                   <td className="mono">{r.collection}</td>
+                  <td><ScopeBadge scope={slaScopes[r.scope?.sys_id] || r.scope?.sys_id} name={r.scope?.name} /></td>
                   <td className="mono">{r.duration.human || (r.duration_type ? 'relative' : '—')}</td>
                   <td>
                     {r.schedule_effective

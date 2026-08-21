@@ -6,6 +6,8 @@ import PolicyBuilder from '../components/PolicyBuilder.jsx';
 import { confirmDestructive, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
 import { SkeletonRows, LoadingRegion, EmptyState } from '../components/states.jsx';
+import ScopeBadge from '../components/ScopeBadge.jsx';
+import { useScopeLabels } from '../hooks/useScopeLabels.js';
 
 const CHOICE_TYPES = [3, 5, 18, 22];
 const REF_TYPES = [8, 21];
@@ -103,6 +105,7 @@ function VariableTable({ variables, typeLabel, onDelete }) {
 /* ── Items tab ── */
 function ItemsTab({ meta, categories, catalogs, typeLabel, openItemId, onOpened, onCategoriesChanged }) {
   const [items, setItems] = useState([]);
+  const itemScopes = useScopeLabels(items.map((r) => val(r, 'sys_scope')));
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(null); // deep view
   const [creating, setCreating] = useState(false);
@@ -267,14 +270,15 @@ function ItemsTab({ meta, categories, catalogs, typeLabel, openItemId, onOpened,
             onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && load()} />
         </div>
         <table className="table">
-          <thead><tr><th>Name</th><th>Class</th><th>Active</th></tr></thead>
-          {loading && <SkeletonRows rows={6} cols={3} />}
+          <thead><tr><th>Name</th><th>Class</th><th>Scope</th><th>Active</th></tr></thead>
+          {loading && <SkeletonRows rows={6} cols={4} />}
           {!loading && <tbody>
             {items.map((r) => (
               <tr key={val(r, 'sys_id')} className={`click ${selected && val(selected.item, 'sys_id') === val(r, 'sys_id') ? 'selected' : ''}`}
                 onClick={() => openItem(val(r, 'sys_id'))}>
                 <td>{disp(r, 'name')}</td>
                 <td className="mono" style={{ fontSize: 11 }}>{val(r, 'sys_class_name')}</td>
+                <td><ScopeBadge scope={itemScopes[val(r, 'sys_scope')] || val(r, 'sys_scope')} name={disp(r, 'sys_scope')} /></td>
                 <td><span className={`badge ${val(r, 'active') === 'true' ? 'green' : ''}`}>{val(r, 'active') === 'true' ? 'active' : 'off'}</span></td>
               </tr>
             ))}

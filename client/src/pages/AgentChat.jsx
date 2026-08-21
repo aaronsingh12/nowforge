@@ -6,6 +6,7 @@ import Markdown from '../components/Markdown.jsx';
 import { confirmDestructive, promptFor, CONSEQUENCE } from '../components/confirm.js';
 import { toast } from '../components/toast.js';
 import { SkeletonLines, LoadingRegion, EmptyState, DisconnectedBanner } from '../components/states.jsx';
+import ScopeBadge from '../components/ScopeBadge.jsx';
 
 const SAMPLES = [
   'Create a "Laptop Request" catalog item with 6 sensible variables including a reference to sys_user and a model select box',
@@ -66,6 +67,8 @@ export default function AgentChat() {
   const [running, setRunning] = useState(false);
   const [meta, setMeta] = useState(null);
   const [autoApprove, setAutoApprove] = useState(false);
+  // ON by default, matching the server; re-read on every session switch.
+  const [capture, setCapture] = useState(true);
 
   const [sessions, setSessions] = useState(null);   // null = not loaded yet
   const [sessionId, setSessionId] = useState(
@@ -112,6 +115,9 @@ export default function AgentChat() {
       })
       .catch(() => { if (alive) { setMessages([]); setDigestCount(0); } })
       .finally(() => { if (alive) setLoadingSession(false); });
+    api.get(`/transport/capture/${sessionId}`)
+      .then((c) => { if (alive) setCapture(c.enabled); })
+      .catch(() => { /* the server's default is ON, and so is ours */ });
     return () => { alive = false; };
   }, [sessionId]);
 
@@ -148,6 +154,14 @@ export default function AgentChat() {
    * the same history is sent a second time. Anything else would quietly change
    * the conversation the model sees while claiming to repeat it.
    */
+  // Capture is ON by default; the server owns the default so the toggle cannot
+  // disagree with what the sweep actually does.
+  const toggleCapture = async (on) => {
+    setCapture(on);
+    try { await api.post(`/transport/capture/${sessionId}`, { enabled: on }); }
+    catch (e) { setCapture(!on); toast.error(e.message); }
+  };
+
   const send = async (text, { retry = false } = {}) => {
     const message = (text ?? input).trim();
     if (!message || running) return;
@@ -185,6 +199,9 @@ export default function AgentChat() {
           case 'tool_result':
             patchMsg((m) => m.kind === 'tool' && m.toolId === evt.id, { status: evt.isError ? 'error' : 'done', output: evt.output });
             break;
+          // Capture is reported whether or not anything was captured. A change
+          // that is DATA says so — silence would read as a capture failure.
+          case 'capture': push({ kind: 'capture', ...evt }); break;
           case 'error': push({ kind: 'error', text: evt.message, retryable: evt.retryable, retryOf: message }); break;
           default: break;
         }
@@ -372,10 +389,19 @@ export default function AgentChat() {
               <span className="badge amber" title={meta.decoding.reality}>non-reproducible</span>
             )}
           </div>
-          <label className="check" title="When off, every create/update/delete pauses for your approval — like Claude Code permissions.">
-            <input type="checkbox" checked={autoApprove} onChange={(e) => toggleAuto(e.target.checked)} />
-            Auto-approve mutations
-          </label>
+          <div className="row">
+            <label
+              className="check"
+              title="Configuration this session changes is moved into an update set named after it, one per scope. Task data — incidents, requests — is never captured, because update sets do not carry data."
+            >
+              <input type="checkbox" checked={capture} onChange={(e) => toggleCapture(e.target.checked)} />
+              Capture changes
+            </label>
+            <label className="check" title="When off, every create/update/delete pauses for your approval — like Claude Code permissions.">
+              <input type="checkbox" checked={autoApprove} onChange={(e) => toggleAuto(e.target.checked)} />
+              Auto-approve mutations
+            </label>
+          </div>
         </div>
 
         {/* The agent itself runs disconnected — it just cannot do anything
@@ -443,6 +469,43 @@ export default function AgentChat() {
                           The model returned nothing — this is usually a transient load on Ollama&apos;s side.
                           Nothing was written to the instance, and retrying re-sends the same conversation.
                         </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            }
+            if (m.kind === 'capture') {
+              // Deliberately quiet: one line, the same shape whether something
+              // was captured or not, because "nothing to capture" is an answer
+              // and not an absence.
+              const bad = m.failures?.length > 0;
+              return (
+                <div key={m.id} className="msg">
+                  <div className="tool-card">
+                    <div className="tool-head">
+                      <span className={`badge ${bad ? 'red' : m.captured ? 'green' : ''}`}>
+                        {bad ? 'capture failed' : m.captured ? 'captured' : 'not captured'}
+                      </span>
+                      <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{m.message}</span>
+                    </div>
+                    {(m.updates?.length > 0 || bad) && (
+                      <div className="tool-body" style={{ fontSize: 12.5 }}>
+                        {m.updates?.map((u) => (
+                          <div key={u.name} className="row" style={{ gap: 6 }}>
+                            <span className="badge">{u.type}</span>
+                            <span>{u.target}</span>
+                            <ScopeBadge scope={u.scope} />
+                          </div>
+                        ))}
+                        {m.failures?.map((f, i) => (
+                          <div key={i} className="error-text">{f.name || f.scope || f.stage}: {f.message}</div>
+                        ))}
+                        {m.sets?.length > 0 && (
+                          <div className="mono" style={{ color: 'var(--muted)', fontSize: 11, marginTop: 6 }}>
+                            {m.sets.map((x) => x.setName).join(' · ')} — <Link to="/transport">Transport</Link>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

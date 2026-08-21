@@ -25,6 +25,34 @@ import { SkeletonRows, LoadingRegion, EmptyState } from '../components/states.js
  * page is worse than no export.
  */
 
+/**
+ * What a capture row says, in one line.
+ *
+ * The "data" case is the one that has to be legible without expanding: a
+ * mutation that produced no update is a normal, correct outcome for an
+ * incident, and a row that just read "not captured" would look like a fault.
+ */
+function captureSummary(row) {
+  let r = null;
+  try { r = typeof row.result === 'string' ? JSON.parse(row.result) : row.result; } catch { /* shown raw below */ }
+  return r?.message || 'capture';
+}
+
+function CaptureBadge({ row }) {
+  let r = null;
+  try { r = typeof row.result === 'string' ? JSON.parse(row.result) : row.result; } catch { /* fall through */ }
+  if (row.status === 'skipped' || r?.reason === 'data') {
+    return (
+      <span className="badge" title="Update sets carry configuration only. Task data has no update row to capture.">
+        not captured · data
+      </span>
+    );
+  }
+  if (row.status === 'error') return <span className="badge red" title={r?.message}>capture failed</span>;
+  if (r?.moved > 0) return <span className="badge green" title={r?.message}>captured {r.moved}</span>;
+  return <span className="badge" title={r?.message}>nothing to capture</span>;
+}
+
 const KIND_LABEL = {
   flow_build: 'flow build + install',
   flow_verify: 'flow verification',
@@ -140,9 +168,16 @@ function Row({ row, expanded, onToggle }) {
           {row.source === 'build' && KIND_LABEL[row.kind] && (
             <div className="audit-sub">{KIND_LABEL[row.kind]}</div>
           )}
+          {row.kind === 'capture' && <div className="audit-sub">{captureSummary(row)}</div>}
           {row.sessionTitle && <div className="audit-sub">{row.sessionTitle}</div>}
         </td>
-        <td>{row.mutating ? <span className="badge amber">mutation</span> : <span className="badge">read</span>}</td>
+        <td>
+          {row.kind === 'capture'
+            ? <CaptureBadge row={row} />
+            : row.mutating
+              ? <span className="badge amber">mutation</span>
+              : <span className="badge">read</span>}
+        </td>
         <td><ApprovalBadge row={row} /></td>
         <td><StatusBadge status={row.status} /></td>
         <td className="mono audit-ids">

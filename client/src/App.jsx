@@ -9,6 +9,8 @@ import Catalog from './pages/Catalog.jsx';
 import Flows from './pages/Flows.jsx';
 import Sla from './pages/Sla.jsx';
 import Access from './pages/Access.jsx';
+import Applications from './pages/Applications.jsx';
+import Transport from './pages/Transport.jsx';
 import Audit from './pages/Audit.jsx';
 import Settings from './pages/Settings.jsx';
 import Toasts from './components/Toasts.jsx';
@@ -24,6 +26,8 @@ const TITLES = {
   '/flows': 'Flow Designer',
   '/sla': 'SLA Definitions',
   '/access': 'Access Control',
+  '/applications': 'Applications',
+  '/transport': 'Transport',
   '/audit': 'Audit',
   '/settings': 'Settings',
 };
@@ -85,6 +89,8 @@ function Shell() {
         <NavLink to="/flows" className="navlink">Flows</NavLink>
         <NavLink to="/sla" className="navlink">SLA</NavLink>
         <NavLink to="/access" className="navlink">Access</NavLink>
+        <NavLink to="/applications" className="navlink">Applications</NavLink>
+        <NavLink to="/transport" className="navlink">Transport</NavLink>
         <NavLink to="/audit" className="navlink">Audit</NavLink>
         <NavLink to="/settings" className="navlink">Settings</NavLink>
         <div className="sidebar-foot">v0.1 · phase 1</div>
@@ -114,6 +120,8 @@ function Shell() {
               <Route path="/flows" element={<RequiresInstance what="Flow Designer"><Flows /></RequiresInstance>} />
               <Route path="/sla" element={<RequiresInstance what="SLA definitions"><Sla /></RequiresInstance>} />
               <Route path="/access" element={<RequiresInstance what="Access control"><Access /></RequiresInstance>} />
+              <Route path="/applications" element={<RequiresInstance what="Applications"><Applications /></RequiresInstance>} />
+              <Route path="/transport" element={<RequiresInstance what="Transport"><Transport /></RequiresInstance>} />
               <Route path="/audit" element={<Audit />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>

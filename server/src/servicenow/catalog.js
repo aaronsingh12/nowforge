@@ -101,7 +101,7 @@ export const catalog = {
     if (search) q += `${q ? '^' : ''}nameLIKE${search}`;
     return table.query('sc_cat_item', {
       query: q,
-      fields: 'sys_id,name,short_description,active,category,sys_class_name,price,sys_updated_on',
+      fields: 'sys_id,name,short_description,active,category,sys_class_name,price,sys_updated_on,sys_scope',
       orderByDesc: 'sys_updated_on',
       limit: 100,
     });
@@ -284,7 +284,7 @@ export const catalog = {
   // ---- Order guides ----
   listOrderGuides: () =>
     table.query('sc_cat_item_guide', {
-      fields: 'sys_id,name,short_description,active,two_step,sys_updated_on',
+      fields: 'sys_id,name,short_description,active,two_step,sys_updated_on,sys_scope',
       orderByDesc: 'sys_updated_on',
       limit: 100,
     }),
@@ -313,7 +313,7 @@ export const catalog = {
   // ---- Record producers ----
   listRecordProducers: () =>
     table.query('sc_cat_item_producer', {
-      fields: 'sys_id,name,short_description,table_name,active,sys_updated_on',
+      fields: 'sys_id,name,short_description,table_name,active,sys_updated_on,sys_scope',
       orderByDesc: 'sys_updated_on',
       limit: 100,
     }),

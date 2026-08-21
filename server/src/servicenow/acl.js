@@ -46,7 +46,7 @@ const ACL_ROLE_TABLE = 'sys_security_acl_role';
 const WANTED_FIELDS = [
   'sys_id', 'name', 'operation', 'type', 'active', 'admin_overrides', 'advanced',
   'condition', 'script', 'description', 'decision_type', 'security_attribute',
-  'sys_created_by', 'sys_updated_on', 'sys_policy',
+  'sys_created_by', 'sys_updated_on', 'sys_policy', 'sys_scope',
 ];
 
 const raw = (cell) => (cell && typeof cell === 'object' ? cell.value : cell);
@@ -253,6 +253,10 @@ export async function aclReport(tableName, {
       definedOn,
       inherited: definedOn !== tableName,
       scope: parts.scope,
+      // NOT `scope` — that one is the ACL name's own part (record / field).
+      // This is the APPLICATION the rule belongs to, which is a different fact
+      // and the one the badge shows.
+      applicationScope: raw(row.sys_scope) || null,
       field: parts.field,
       operation: op.name,
       operationResolved: op.resolved,

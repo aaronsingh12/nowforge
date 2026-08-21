@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { api } from '../api.js';
 import { TableField } from '../components/ReferenceField.jsx';
 import { SkeletonLines, EmptyState } from '../components/states.jsx';
+import ScopeBadge from '../components/ScopeBadge.jsx';
+import { useScopeLabels } from '../hooks/useScopeLabels.js';
 
 /**
  * Access — read and explain ACLs. There is deliberately no authoring here.
@@ -173,6 +175,12 @@ function VisibilityBanner({ report }) {
 
 function ReportView({ report }) {
   const c = report.counts;
+  const all = [...report.recordAcls, ...report.fieldAcls];
+  const scopeLabels = useScopeLabels(all.map((a) => a.applicationScope));
+  // Which applications own the rules governing this table. Usually one, but an
+  // inherited rule can come from another, and that is worth seeing before you
+  // conclude a table is governed only by what you can edit.
+  const scopes = [...new Set(all.map((a) => a.applicationScope).filter(Boolean))];
   return (
     <div className="stack">
       <div className="grid3">
@@ -183,6 +191,13 @@ function ReportView({ report }) {
         <Stat n={c.inactive} label="inactive" />
         <Stat n={c.conditionsOnUnknownFields} label="conditions on absent fields" tone={c.conditionsOnUnknownFields ? 'red' : ''} />
       </div>
+
+      {scopes.length > 0 && (
+        <div className="row" style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+          <span>governed by rules in</span>
+          {scopes.map((sc) => <ScopeBadge key={sc} scope={scopeLabels[sc] || sc} />)}
+        </div>
+      )}
 
       <div className="card">
         <div className="card-title">Operation × role · record ACLs</div>
@@ -256,12 +271,13 @@ function ReportView({ report }) {
       <div className="card">
         <div className="card-title">Record ACLs · {report.recordAcls.length}</div>
         <table className="table">
-          <thead><tr><th>Op</th><th>Defined on</th><th>Roles</th><th>Condition</th><th>Flags</th></tr></thead>
+          <thead><tr><th>Op</th><th>Defined on</th><th>Scope</th><th>Roles</th><th>Condition</th><th>Flags</th></tr></thead>
           <tbody>
             {report.recordAcls.map((a) => (
               <tr key={a.sys_id}>
                 <td className="mono">{a.operation}</td>
                 <td className="mono">{a.definedOn}</td>
+                <td><ScopeBadge scope={scopeLabels[a.applicationScope] || a.applicationScope} /></td>
                 <td>
                   {a.rolesUnknown
                     ? <span className="badge red">roles unknown</span>
