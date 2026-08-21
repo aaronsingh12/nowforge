@@ -189,6 +189,12 @@ export const TOOLS = [
       properties: {
         table: { type: 'string' },
         data: { type: 'object', description: 'Field/value pairs' },
+        force: {
+          type: 'boolean',
+          description:
+            'Only set this after a write was reported as silently dropped AND you have stated a CHANGED strategy. '
+            + 'It re-submits a write the harness has proof does not land. Retrying identically without a change wastes an approval.',
+        },
       },
       required: ['table', 'data'],
     },
@@ -210,6 +216,12 @@ export const TOOLS = [
         table: { type: 'string' },
         sys_id: { type: 'string' },
         data: { type: 'object' },
+        force: {
+          type: 'boolean',
+          description:
+            'Only set this after a write was reported as silently dropped AND you have stated a CHANGED strategy. '
+            + 'It re-submits a write the harness has proof does not land. Retrying identically without a change wastes an approval.',
+        },
       },
       required: ['table', 'sys_id', 'data'],
     },

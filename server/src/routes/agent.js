@@ -13,6 +13,7 @@ import {
 } from '../memory/sessions.js';
 import { search, searchSessions, embeddingsAvailable, pullCommand, embedModelName } from '../memory/recall.js';
 import { listFacts, recordFact, deleteFact, rememberFromChat, seedLedger } from '../memory/facts.js';
+import { clearSession as clearWriteGuard } from '../agent/write-guard.js';
 import { estimateTokens, buildDigestNote } from '../memory/compaction.js';
 import { computeBudget } from '../memory/budget.js';
 import { buildSystemPrompt } from '../agent/prompts.js';
@@ -72,7 +73,13 @@ agentRouter.patch('/sessions/:id', (req, res, next) => {
   catch (err) { next(Object.assign(err, { status: 400 })); }
 });
 
-agentRouter.delete('/sessions/:id', (req, res) => res.json(deleteSession(req.params.id)));
+agentRouter.delete('/sessions/:id', (req, res) => {
+  // The write guard's registries are in-memory and keyed on the session; a
+  // deleted session must not leave its drop history behind for the id to be
+  // reused against.
+  clearWriteGuard(req.params.id);
+  res.json(deleteSession(req.params.id));
+});
 
 /* ------------------------------------------------------------------ *
  * Recall (A-5)

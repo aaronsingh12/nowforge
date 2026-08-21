@@ -21,6 +21,7 @@ import { captureAfterTool, captureMark, reconcileTurn } from './capture.js';
 import { openCaptureWindow, closeCaptureWindow } from '../servicenow/transport.js';
 import { snapshotBefore, verifyMutation, attachVerification, isFailedWrite } from './mutation-pipeline.js';
 import { appendMutation, annotateLatestCapture, mutationsForTurn, renderMutationReport, ledgerDigestForModel } from '../memory/ledger.js';
+import { checkBeforeGate, recordDrops, recordRejection } from './write-guard.js';
 
 /**
  * The backbone, modeled on Claude Code / opencode:
@@ -474,6 +475,41 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
         const toolStart = Date.now();
         log.info('tool', `${call.name}${tool.mutating ? ' (mutating)' : ''}`, call.input);
 
+        /*
+         * WI-3 — block a write the harness can already prove is a no-op,
+         * BEFORE spending a human's approval on it.
+         *
+         * A gate is a request for someone's attention. Asking for it to
+         * authorise something with proof against it is what made the transcript
+         * painful: three approvals, three identical silent drops, zero effect.
+         */
+        let guardDescriptor = null;
+        if (tool.mutating && typeof tool.describeWrite === 'function') {
+          try { guardDescriptor = tool.describeWrite(call.input || {}, null); } catch { /* unverifiable */ }
+        }
+        if (tool.mutating && guardDescriptor) {
+          const verdict = checkBeforeGate({
+            sessionId, turnSeq, tool: call.name, descriptor: guardDescriptor,
+            force: call.input?.force === true,
+          });
+          if (!verdict.allowed) {
+            log.warn('gate', `${call.name} BLOCKED before approval — ${verdict.reason}`);
+            results.push({ id: call.id, name: call.name, output: verdict.message, isError: true });
+            recordToolEvent(sessionId, {
+              kind: 'tool_call', name: call.name, payload: call.input, result: verdict.message,
+              resultStatus: `blocked:${verdict.reason}`, mutating: true, approval: null,
+            });
+            emit({
+              type: 'tool_blocked', id: call.id, name: call.name, input: call.input,
+              reason: verdict.reason, message: verdict.message,
+            });
+            continue;   // never reaches the gate
+          }
+          if (verdict.forced) {
+            emit({ type: 'guard_forced', id: call.id, name: call.name, drops: verdict.drops });
+          }
+        }
+
         // Permission gate — the heart of the platform's safety model.
         let approval = null;
         if (tool.mutating && !agent.autoApprove) {
@@ -486,6 +522,15 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
           emit({ type: 'approval_resolved', approvalId, approved });
           if (!approved) {
             const output = 'The user rejected this operation. Do not retry it; ask what they would like to change.';
+            // Remembered for THIS turn, so a resubmission is blocked rather
+            // than merely discouraged. Turn-scoped on purpose: a user who asks
+            // again next turn means it.
+            if (guardDescriptor) {
+              recordRejection({
+                sessionId, turnSeq, tool: call.name,
+                table: guardDescriptor.table, sys_id: guardDescriptor.sys_id, requested: guardDescriptor.requested,
+              });
+            }
             results.push({ id: call.id, name: call.name, output, isError: true });
             recordToolEvent(sessionId, {
               kind: 'tool_call', name: call.name, payload: call.input, result: output,
@@ -511,13 +556,7 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
          * again after execution to pick up the sys_id of anything created. A
          * tool without the hook skips both and is reported as self-verifying.
          */
-        let preDescriptor = null;
-        let beforeRecord = null;
-        if (tool.mutating && typeof tool.describeWrite === 'function') {
-          try { preDescriptor = tool.describeWrite(call.input || {}, null); }
-          catch (err) { log.debug?.('verify', `describeWrite failed for ${call.name}: ${err.message}`); }
-          beforeRecord = await snapshotBefore(preDescriptor);
-        }
+        const beforeRecord = await snapshotBefore(guardDescriptor);
 
         try {
           const raw = await tool.execute(call.input || {});
@@ -561,6 +600,14 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
           // records what HAPPENED rather than what was attempted. Compaction
           // cannot reach this table, so the closing report can be rendered from
           // it even if the turn folds three times before it gets there.
+          if (tool.mutating && guardDescriptor && verification?.dropped?.length) {
+            // Proven, not suspected: this exact tuple returned success and did
+            // not land. The next identical attempt never reaches the gate.
+            recordDrops({
+              sessionId, turnSeq, table: guardDescriptor.table, sys_id: guardDescriptor.sys_id,
+              operation: guardDescriptor.operation, verification,
+            });
+          }
           if (tool.mutating) {
             appendMutation({
               sessionId, turnSeq, tool: call.name,
