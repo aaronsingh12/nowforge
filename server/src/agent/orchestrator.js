@@ -76,6 +76,28 @@ const MAX_ITERATIONS = 15;
  * is how they stop agreeing.
  */
 const MAX_OUTPUT_TOKENS = 4096;
+
+/**
+ * F9 — the agent loop asks for a temperature instead of inheriting one.
+ *
+ * Every other generation path in this repo pins its decoding (see
+ * agent/decoding.js); the agent turn was the one that sent nothing and took
+ * whatever the backend's default sampling happened to be. Evidence that it
+ * matters is in the session this branch came from: one assistant turn opened
+ * as valid JSON and then collapsed into a run of repeated U+00A0 and stray
+ * punctuation before stopping — a repetition collapse, which is what
+ * unpinned sampling looks like when it goes wrong.
+ *
+ * 0.2 rather than 0: this loop chooses tools and writes prose to a person, so
+ * it is not the pure structured-generation case that CODEGEN_TEMPERATURE is
+ * for, and a hard 0 makes a model that has picked the wrong tool pick it again
+ * on the retry.
+ *
+ * No seed. It is measured to be ignored by this backend (decoding.js), and
+ * requesting one here would only invite someone downstream to assume a
+ * reproducibility that does not exist.
+ */
+const AGENT_TEMPERATURE = 0.2;
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 const RESULT_CHAR_LIMIT = 8000;
 
@@ -439,6 +461,10 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
           history,
           tools: TOOLS,
           maxTokens: MAX_OUTPUT_TOKENS,
+          // F9 — asked for, never assumed. Both adapters pass this through;
+          // whether the backend honours it is a separate question with a
+          // measured answer in agent/decoding.js.
+          decoding: { temperature: AGENT_TEMPERATURE },
         });
       } catch (err) {
         // The message shape is the usual cause of a provider 400, and it is
