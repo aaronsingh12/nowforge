@@ -7,6 +7,7 @@ import { confirmDestructive, promptFor, CONSEQUENCE } from '../components/confir
 import { toast } from '../components/toast.js';
 import { SkeletonLines, LoadingRegion, EmptyState, DisconnectedBanner } from '../components/states.jsx';
 import ScopeBadge from '../components/ScopeBadge.jsx';
+import { writeOutcome, captureReason } from '../components/writeOutcome.js';
 
 const SAMPLES = [
   'Create a "Laptop Request" catalog item with 6 sensible variables including a reference to sys_user and a model select box',
@@ -197,7 +198,20 @@ export default function AgentChat() {
             patchMsg((m) => m.kind === 'approval' && m.approvalId === evt.approvalId, { decided: evt.approved });
             break;
           case 'tool_result':
-            patchMsg((m) => m.kind === 'tool' && m.toolId === evt.id, { status: evt.isError ? 'error' : 'done', output: evt.output });
+            // `verification` rides along so the card's glyph and words come
+            // from the same object (WI-6).
+            patchMsg((m) => m.kind === 'tool' && m.toolId === evt.id, {
+              status: evt.isError ? 'error' : 'done', output: evt.output, verification: evt.verification || null,
+            });
+            break;
+          // WI-3 — a write the harness proved is a no-op never reached the gate.
+          case 'tool_blocked':
+            push({ kind: 'blocked', name: evt.name, input: evt.input, reason: evt.reason, text: evt.message });
+            break;
+          // WI-2 — the harness's own account of what changed, which the model
+          // did not write and cannot omit.
+          case 'mutation_report':
+            push({ kind: 'mutation_report', markdown: evt.markdown, mutations: evt.mutations });
             break;
           // Capture is reported whether or not anything was captured. A change
           // that is DATA says so — silence would read as a capture failure.
@@ -487,7 +501,12 @@ export default function AgentChat() {
                       <span className={`badge ${bad ? 'red' : m.captured ? 'green' : ''}`}>
                         {bad ? 'capture failed' : m.captured ? 'captured' : 'not captured'}
                       </span>
-                      <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{m.message}</span>
+                      {/* E6 — the badge and the message both began "not
+                          captured", so the line read "not captured / not
+                          captured — data, not configuration". One source: the
+                          badge states the verdict, the message states only the
+                          REASON. */}
+                      <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{captureReason(m)}</span>
                     </div>
                     {(m.updates?.length > 0 || bad) && (
                       <div className="tool-body" style={{ fontSize: 12.5 }}>
@@ -512,15 +531,55 @@ export default function AgentChat() {
                 </div>
               );
             }
+            if (m.kind === 'blocked') {
+              return (
+                <div key={m.id} className="msg">
+                  <div className="tool-card">
+                    <div className="tool-head">
+                      <span className="dot" style={{ background: 'var(--amber)' }} />
+                      <span className="name">{m.name}</span>
+                      <span className="badge amber" style={{ marginLeft: 'auto' }}>blocked before approval</span>
+                    </div>
+                    <div className="tool-body">
+                      <div style={{ fontSize: 12.5, color: 'var(--amber)', whiteSpace: 'pre-wrap' }}>{m.text}</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            if (m.kind === 'mutation_report') {
+              return (
+                <div key={m.id} className="msg">
+                  <div className="bubble">
+                    <Markdown>{m.markdown}</Markdown>
+                  </div>
+                </div>
+              );
+            }
             if (m.kind === 'tool') {
+              // WI-6 — the glyph and the words come from ONE object.
+              //
+              // The transcript rendered "✅ Update set … was not updated": a
+              // success mark hardcoded onto a failure sentence. It cannot
+              // happen here any more, because both halves are derived from the
+              // same verification status rather than from "no exception was
+              // thrown".
+              const v = writeOutcome(m);
               return (
                 <div key={m.id} className="tool-card">
                   <div className="tool-head">
-                    <span className={`dot ${m.status === 'done' ? 'on' : ''}`} style={m.status === 'error' ? { background: 'var(--red)' } : {}} />
+                    <span className={`dot ${v.tone === 'ok' ? 'on' : ''}`} style={v.dotStyle} />
                     <span className="name">{m.name}</span>
                     {m.mutating && <span className="badge amber">mutation</span>}
-                    <span className="badge" style={{ marginLeft: 'auto' }}>{m.status}</span>
+                    <span className={`badge ${v.badgeClass}`} style={{ marginLeft: 'auto' }} title={v.title}>{v.label}</span>
                   </div>
+                  {v.detail && (
+                    <div className="tool-body" style={{ paddingBottom: 0 }}>
+                      <div className={v.tone === 'bad' ? 'error-text' : ''} style={v.tone === 'warn' ? { color: 'var(--amber)', fontSize: 12.5 } : { fontSize: 12.5 }}>
+                        {v.detail}
+                      </div>
+                    </div>
+                  )}
                   <div className="tool-body">
                     <pre>{JSON.stringify(m.input, null, 1)}</pre>
                     {m.output && (

@@ -109,6 +109,34 @@ function emitMutationReport({ sessionId, turnSeq, emit }) {
   log.info('ledger', `turn report: ${entries.length} mutation(s)${bad ? `, ${bad} not fully applied` : ''}`);
 }
 
+/**
+ * WI-6 — mutation execution requires a RESOLVED approval, structurally.
+ *
+ * Auditing the path showed the ordering was already correct: the gate `await`s
+ * before `tool.execute` is reached, so nothing could run early. But "correct
+ * because the statements are in this order" is a property that a later edit can
+ * silently remove, and this is the one place in the codebase where that would
+ * be a severity-1 bug rather than a regression.
+ *
+ * So the executor now takes the approval as an ARGUMENT and refuses to run a
+ * mutation without a resolved one. Reordering the code no longer changes the
+ * safety property; deleting this check does, and the test asserts it directly.
+ */
+export const APPROVAL_RESOLVED = new Set(['approved', 'auto']);
+
+export async function executeTool(tool, input, approval) {
+  if (tool.mutating && !APPROVAL_RESOLVED.has(approval)) {
+    throw Object.assign(
+      new Error(
+        `Refusing to execute the mutating tool "${tool.name}" with approval="${approval ?? 'none'}". `
+        + 'A mutation may only run after the gate resolves to approved, or under explicit auto-approve.',
+      ),
+      { status: 500, detail: { tool: tool.name, approval: approval ?? null, reason: 'unapproved-mutation' } },
+    );
+  }
+  return tool.execute(input || {});
+}
+
 function awaitApproval(state, approvalId) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -471,7 +499,23 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
           results.push({ id: call.id, name: call.name, output: `Unknown tool: ${call.name}`, isError: true });
           continue;
         }
-        emit({ type: 'tool_use', id: call.id, name: call.name, input: call.input, mutating: tool.mutating });
+        /*
+         * WI-6 — emission ORDER.
+         *
+         * A read-only call announces itself first, as it always did. A MUTATION
+         * does not: emitting `tool_use` before the gate pushed the tool card
+         * above the approval card, and the tool card is then patched in place
+         * with its result — so the transcript read
+         * [tool … done] [approval requested], and the gate looked post-hoc.
+         *
+         * The gate was never actually late. The story the transcript told about
+         * it was. For mutations the announcement now happens after approval, so
+         * the visible sequence is: approval requested → approved → executed →
+         * result.
+         */
+        if (!tool.mutating) {
+          emit({ type: 'tool_use', id: call.id, name: call.name, input: call.input, mutating: false });
+        }
         const toolStart = Date.now();
         log.info('tool', `${call.name}${tool.mutating ? ' (mutating)' : ''}`, call.input);
 
@@ -543,6 +587,10 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
           approval = 'auto';
           log.warn('gate', `${call.name} ran UNGATED — auto-approve is on, nobody saw it`);
         }
+        // Now, and only now: approved (or explicitly ungated) and about to run.
+        if (tool.mutating) {
+          emit({ type: 'tool_use', id: call.id, name: call.name, input: call.input, mutating: true, approval });
+        }
         if (tool.mutating) mutatingCallCount += 1;
 
         const callCaptureMark = tool.mutating ? captureMark() : null;
@@ -559,7 +607,7 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
         const beforeRecord = await snapshotBefore(guardDescriptor);
 
         try {
-          const raw = await tool.execute(call.input || {});
+          const raw = await executeTool(tool, call.input || {}, approval);
 
           // The write landed on the instance. Whether it landed as REQUESTED is
           // a different question, and until this the answer was never asked.
