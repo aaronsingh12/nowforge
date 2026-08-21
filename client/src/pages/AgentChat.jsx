@@ -477,11 +477,17 @@ export default function AgentChat() {
                         <button className="btn" disabled={running} onClick={() => send(m.retryOf, { retry: true })}>
                           Retry
                         </button>
-                        {/* Says whose fault it probably is. The old card named a
-                            finish reason and left the reader to guess. */}
+                        {/* F8 — what happened and what to check, not a guess at
+                            a cause. This card used to blame "a transient load
+                            on Ollama's side" for every failure, including ones
+                            where the request was built wrong, and to promise
+                            nothing had been written — which is true of the
+                            failed CALL and not of the turn, whose earlier tool
+                            actions may already have applied. */}
                         <span className="muted" style={{ fontSize: 12 }}>
-                          The model returned nothing — this is usually a transient load on Ollama&apos;s side.
-                          Nothing was written to the instance, and retrying re-sends the same conversation.
+                          The request and the provider&apos;s reply were captured to this session&apos;s log.
+                          Earlier tool actions in this turn may already have applied — check the mutation report
+                          above. Retry re-runs the turn from the session&apos;s current state.
                         </span>
                       </div>
                     )}

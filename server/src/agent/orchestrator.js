@@ -1,5 +1,8 @@
 import crypto from 'node:crypto';
 import { chatTurn, providerInfo } from './providers/index.js';
+// The attempt count belongs to the retry policy, so the message quotes it
+// rather than restating "three times in a row" and drifting from it.
+import { RETRY_ATTEMPTS } from './providers/retry.js';
 import { log, ms, shortId } from '../logging.js';
 import { TOOLS, toolMap } from './tools.js';
 import { buildSystemPrompt } from './prompts.js';
@@ -498,14 +501,28 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
        * appended, nothing is rendered, and the turn fails loudly.
        */
       if (isBlankText(res.text) && !res.toolCalls?.length) {
-        // The adapter already retried this three times, warming the model up
-        // between attempts when the finish reason said it was still loading.
-        // Reaching here means it kept happening, so the message says so rather
-        // than suggesting one more go at something already attempted.
+        /*
+         * F8 — report what happened, and stop guessing why.
+         *
+         * This used to end "this is usually a transient load on Ollama's side
+         * rather than a problem with your request". It said that for every
+         * finish reason, including the one that turned out to be a request
+         * this code had built wrong — so it sent people to look at their model
+         * choice while the defect was in compaction. That is trap #51 in the
+         * ledger, arriving in the message written to close trap #51.
+         *
+         * The other claim was worse. "Nothing was written to the instance" is
+         * true of THIS call and not of the turn: the failing turn in the
+         * incident had already executed an approved create_record six seconds
+         * earlier. The harness knows exactly what ran and renders it — so the
+         * message points at that rather than asserting an absence it cannot
+         * see.
+         */
         const err = new Error(
           `The model returned nothing — no text and no tool call (finish reason: ${res.stopReason || 'unknown'}), ` +
-          'three times in a row. Nothing was written to the instance. This is usually a transient load on ' +
-          "Ollama's side rather than a problem with your request."
+          `on ${RETRY_ATTEMPTS} attempts in a row. The full request and the provider's reply were captured to ` +
+          'this session\'s log. Earlier tool actions in this turn may already have applied — check the mutation ' +
+          'report above. Retry re-runs the turn from the session\'s current state.'
         );
         // Tells the UI to offer Retry: the history is intact and unmodified, so
         // re-issuing this turn against it is a safe, meaningful thing to do.
