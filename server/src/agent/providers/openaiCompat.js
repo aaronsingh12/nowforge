@@ -200,10 +200,21 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
-  const payload = JSON.stringify(body);
   const data = await withRetry(
     `${provider} chat`,
     async () => {
+      /*
+       * F5 — serialised per attempt, on purpose.
+       *
+       * This was hoisted above `withRetry`, so every attempt POSTed the same
+       * bytes. That is correct behaviour and it stays correct behaviour — but
+       * it was a property of where a `const` happened to sit, not a decision,
+       * and it is why the live incident produced six byte-identical failures.
+       * Inside the closure, "each attempt re-sends exactly the same request"
+       * is something this function chooses, and anything that ever needs to
+       * vary between attempts has somewhere to go.
+       */
+      const payload = JSON.stringify(body);
       let res;
       try {
         res = await fetch(url, { method: 'POST', headers, body: payload });
