@@ -22,6 +22,7 @@ import { openCaptureWindow, closeCaptureWindow } from '../servicenow/transport.j
 import { snapshotBefore, verifyMutation, attachVerification, isFailedWrite } from './mutation-pipeline.js';
 import { appendMutation, annotateLatestCapture, mutationsForTurn, renderMutationReport, ledgerDigestForModel } from '../memory/ledger.js';
 import { checkBeforeGate, recordDrops, recordRejection } from './write-guard.js';
+import { businessRuleAbortPlaybook, dataVsConfigNote } from './playbooks.js';
 
 /**
  * The backbone, modeled on Claude Code / opencode:
@@ -235,6 +236,47 @@ const DIRECTIVE_VERBS = [
 // acceptance run that designed a flow and built nothing. "log" is deliberately
 // absent — it is a noun far more often than a verb here.
 const IS_DIRECTIVE = new RegExp(`\\b(?:${DIRECTIVE_VERBS.join('|')})(?:s|d|es|ed|ing)?\\b`, 'i');
+
+/**
+ * WI-8 — a completion that both ASKS and ACTS.
+ *
+ * In the transcript the model emitted a clarifying question and the mutation
+ * tool calls in what appears to be one completion, and the harness executed the
+ * calls. The user was then asked to decide something that had already been
+ * decided for them.
+ *
+ * This is the mirror image of the A6 stall guard above. A6 catches a turn that
+ * asks and does NOTHING; this catches one that asks and does everything anyway.
+ * Both exist because the model is free and wobbly today — and both are harness
+ * guards precisely so the behaviour does not change when the model does.
+ *
+ * Deliberately narrow: only a question aimed at the USER counts, and only
+ * mutating calls are held. Reads proceed, because a turn that asks a question
+ * and gathers context while waiting is doing the right thing.
+ */
+const ASKS_THE_USER = new RegExp([
+  String.raw`\bwould you like me to\b`,
+  String.raw`\bshall I\b`,
+  String.raw`\bdo you want me to\b`,
+  String.raw`\bshould I\b`,
+  String.raw`\bwhich (?:one|of these)\b`,
+  // The VERB, aimed at the reader - so "a confirmation email" does not hold
+  // a write, while "please confirm the group" does.
+  String.raw`\bplease confirm\b`,
+  String.raw`\bcan you confirm\b`,
+  String.raw`\bconfirm (?:that|whether|if|the|which)\b`,
+  String.raw`\blet me know (?:if|which|whether|what)\b`,
+].join('|'), 'i');
+
+export function detectQuestionWithMutation({ assistantText, toolCalls = [], isMutating = () => false, enabled = true }) {
+  if (!enabled) return null;
+  const text = String(assistantText || '');
+  if (!text.trim()) return null;
+  if (!ASKS_THE_USER.test(text)) return null;
+  const held = (toolCalls || []).filter((c) => isMutating(c.name)).map((c) => c.name);
+  if (!held.length) return null;
+  return { asked: text.match(ASKS_THE_USER)[0], held };
+}
 
 export function detectStalledTurn({ assistantText, userText, mutatingCallCount = 0 }) {
   // The test is whether the turn CHANGED anything, not whether it called
@@ -492,6 +534,32 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
         return;
       }
 
+      /*
+       * WI-8 — hold mutations that arrived alongside a question.
+       *
+       * The question is surfaced and the turn ends; nothing is written. The
+       * user answers, and the next turn acts on the answer instead of on an
+       * assumption the model made while asking.
+       */
+      const asking = detectQuestionWithMutation({
+        assistantText,
+        toolCalls: res.toolCalls,
+        isMutating: (n) => Boolean(toolMap.get(n)?.mutating),
+        enabled: agent.holdMutationsOnQuestion !== false,
+      });
+      if (asking) {
+        log.warn('gate', `held ${asking.held.length} mutation(s) — the same completion asked the user a question`);
+        recordToolEvent(sessionId, {
+          kind: 'guard', name: 'wi8_question_with_mutation',
+          payload: { asked: asking.asked, held: asking.held },
+          resultStatus: 'held', mutating: false, approval: null,
+        });
+        emit({ type: 'mutations_held', asked: asking.asked, held: asking.held });
+        emitMutationReport({ sessionId, turnSeq, emit });
+        emit({ type: 'done' });
+        return;
+      }
+
       const results = [];
       for (const call of res.toolCalls) {
         const tool = toolMap.get(call.name);
@@ -694,11 +762,36 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
             });
             if (captured) {
               annotateLatestCapture(sessionId, turnSeq, captured);
+              // The pipeline already knew "incident does not extend
+              // sys_metadata" and the prose never said it, so the user came
+              // away believing an incident was created inside an update set.
+              // Put it where the model actually reads (results was pushed
+              // above; this object is serialised after the loop).
+              const pushed = results.find((r) => r.id === call.id);
+              const note = dataVsConfigNote(captured, guardDescriptor?.table);
+              if (pushed) {
+                pushed.output += `
+${JSON.stringify({ capture: note || { captured: captured.captured, message: captured.message } }, null, 1)}`;
+              }
               emit({ ...captured, id: call.id });
             }
           }
         } catch (err) {
-          const output = `Error: ${err.message}${err.detail ? ` — ${JSON.stringify(err.detail).slice(0, 300)}` : ''}`;
+          /*
+           * WI-7 — a business-rule abort is a decision point, not a dead end.
+           *
+           * The transcript's agent adapted by dropping the blocked fields from
+           * every later write, forever, without telling anyone — and reported a
+           * rule sys_id that exists on no table. The rule is LOOKED UP here so
+           * the model relays real rows or says it found none.
+           */
+          let playbook = null;
+          try { playbook = await businessRuleAbortPlaybook({ detail: err.detail, table: guardDescriptor?.table }); }
+          catch (e) { log.debug?.('playbook', `abort playbook failed: ${e.message}`); }
+
+          const output = `Error: ${err.message}${err.detail ? ` — ${JSON.stringify(err.detail).slice(0, 300)}` : ''}`
+            + (playbook ? `
+${JSON.stringify({ businessRuleAbort: playbook }, null, 1)}` : '');
           log.error('tool', `${call.name} failed  ${ms(toolStart)} — ${err.message}`, err.detail || err);
           results.push({ id: call.id, name: call.name, output, isError: true });
           recordToolEvent(sessionId, {

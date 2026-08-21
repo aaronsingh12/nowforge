@@ -27,6 +27,11 @@ const DEFAULTS = {
   },
   agent: {
     autoApprove: false,               // when false, every mutating tool call requires user approval
+    // WI-8. When a completion contains BOTH a question for the user and
+    // mutation-flagged tool calls, hold the calls and surface the question.
+    // Default on: the model asking and acting in the same breath means the
+    // user is answering a question that was already decided for them.
+    holdMutationsOnQuestion: true,
   },
 };
 
@@ -133,6 +138,6 @@ export function publicSettings() {
       model: s.llm.model,
       embedModel: s.llm.embedModel,
     },
-    agent: { autoApprove: s.agent.autoApprove },
+    agent: { autoApprove: s.agent.autoApprove, holdMutationsOnQuestion: s.agent.holdMutationsOnQuestion !== false },
   };
 }
