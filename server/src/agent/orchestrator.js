@@ -447,6 +447,35 @@ export async function runTurn(sessionId, userText, emit, { retry = false } = {})
             ? `assistant(text=${m.text ? 'str' : 'EMPTY'},calls=${m.toolCalls?.length || 0})`
             : m.role === 'tool' ? `tool(${(m.results || []).length})` : m.role)),
         });
+        /*
+         * F4 — and the same evidence, kept.
+         *
+         * The adapter's empty-completion dump is the only record of what
+         * produced the failure, and it went to stderr alone: in the session
+         * this fix came from it was gone before anyone read it, so the
+         * question it exists to answer had to be re-asked of SQLite by hand.
+         * `tool_events` is the right home — compaction rewrites `messages` and
+         * touches nothing else, so this row cannot be folded away by the very
+         * mechanism it is usually recording the consequences of.
+         *
+         * ONE row per failed call, and never load-bearing: a diagnostic that
+         * can sink the turn it is diagnosing is worse than no diagnostic.
+         */
+        if (err.guardDump) {
+          try {
+            recordToolEvent(sessionId, {
+              kind: 'guard',
+              name: 'f4_empty_completion',
+              payload: { iteration: i + 1, ...err.guardDump },
+              result: err.message,
+              resultStatus: 'empty-completion',
+              mutating: false,
+              approval: null,
+            });
+          } catch (logErr) {
+            log.warn('agent', `could not persist the empty-completion dump: ${logErr.message}`);
+          }
+        }
         throw err;
       }
       log.debug('llm', `iteration ${i + 1}  ${ms(callStart)}  stop=${res.stopReason || '—'}  ` +

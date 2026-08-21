@@ -263,6 +263,37 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
 
       const finish = choice?.finish_reason;
 
+      /*
+       * F4 — the same dump, attached to the error so it can be PERSISTED.
+       *
+       * The block above is the only record of what produced an empty
+       * completion, and it goes to stderr. In the session that produced this
+       * branch it was gone by the time anyone looked, so answering "was the
+       * request degenerate or was the upstream unlucky?" meant reading SQLite
+       * by hand — which is the exact cost this diagnostic was written to
+       * remove. The orchestrator writes it to `tool_events`, the table
+       * compaction structurally cannot reach.
+       *
+       * `roleSequence` is the field the live incident actually needed and the
+       * log did not have: it says at a glance whether a user turn was in the
+       * request.
+       */
+      const err = (e) => Object.assign(e, {
+        guardDump: {
+          finishReason: finish ?? null,
+          roleSequence: messages.map((m) => m.role).join('>'),
+          shapes: outbound.shapes,
+          outboundMessages: outbound.count,
+          blankMessages: outbound.blanks,
+          estRequestTokens: outbound.estTokens + estimateTextTokens(JSON.stringify(body.tools || [])),
+          model: resolvedModel,
+          maxTokens,
+          // Bounded: a raw body is unbounded and this row is written on a
+          // failure path, where a runaway write would be a second incident.
+          rawResponse: JSON.stringify(parsed ?? null).slice(0, 16_384),
+        },
+      });
+
       // `length` is deterministic: reasoning models (gpt-oss, o-series,
       // deepseek-r1) spend the budget on hidden reasoning before emitting any
       // content, and the API still answers 200 with an empty string. Retrying
@@ -270,20 +301,20 @@ export async function chat({ provider, apiKey, baseUrl, model, system, history, 
       // and carries the remedy.
       if (finish === 'length') {
         const reasoned = typeof msg.reasoning === 'string' && msg.reasoning.length > 0;
-        throw new Error(
+        throw err(new Error(
           `${provider} returned no content: the max_tokens budget (${maxTokens}) was exhausted before any output was produced` +
           (reasoned ? ' — the model spent it on reasoning tokens.' : '.') +
           ' Raise max_tokens, or pick a non-reasoning model in Settings.'
-        );
+        ));
       }
 
       // Everything else is transient. `load` is Ollama's own: the request loaded
       // the model and generated nothing — a cold start, reported to the user as
       // a hard failure that blamed their model choice. An empty `stop` is the
       // model simply hiccupping. Both are worth another attempt.
-      throw retryable(new Error(
+      throw retryable(err(new Error(
         `${provider} returned an empty completion (finish reason: ${finish || 'none'})`
-      ));
+      )));
     },
     {
       // Only a cold start gets a warm-up; a 5xx blip does not need one and an
