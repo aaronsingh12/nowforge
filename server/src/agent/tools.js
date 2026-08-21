@@ -125,7 +125,12 @@ export const TOOLS = [
   {
     name: 'lookup_reference',
     description:
-      'Resolve a reference field value: search a table by its display field and get back sys_id + display value pairs. Use this to turn names like "Service Desk" or "Abel Tuter" into sys_ids BEFORE writing them into reference fields. Never invent sys_ids.',
+      'Resolve a reference field value: search a table and get back ranked sys_id + display pairs. '
+      + 'Use this to turn names like "Service Desk" or "Abel Tuter" into sys_ids BEFORE writing them into reference fields. Never invent sys_ids. '
+      + 'Results are ranked exact-key > exact-display > starts-with > contains, and each carries a matchType: searching sys_user for "admin" '
+      + 'matches the user whose user_name IS admin, not every display name containing the word. '
+      + 'If the response says ambiguous:true, no single exact match was found and the top hit is a guess — CONFIRM it with the user before '
+      + 'putting it in a mutation payload. Read-only use may proceed.',
     mutating: false,
     inputSchema: {
       type: 'object',
@@ -136,7 +141,17 @@ export const TOOLS = [
       },
       required: ['table'],
     },
-    execute: ({ table: t, search, limit }) => referenceLookup(t, search || '', limit || 10),
+    execute: async ({ table: t, search, limit }) => {
+      const rows = await referenceLookup(t, search || '', limit || 10);
+      // The array's own properties do not survive JSON.stringify, and the
+      // ambiguity verdict is the whole point of WI-4 — so it is lifted into an
+      // object the model actually receives.
+      return {
+        table: t, search: search || '', ambiguous: rows.ambiguous, resolved: rows.resolved,
+        ...(rows.confirmBefore ? { confirmBefore: rows.confirmBefore } : {}),
+        results: [...rows],
+      };
+    },
   },
   {
     name: 'lookup_table',

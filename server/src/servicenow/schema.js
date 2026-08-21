@@ -131,11 +131,141 @@ export async function getDisplayField(t) {
 }
 
 /** Typeahead lookup for any reference field: returns [{ sys_id, display }]. */
-export async function referenceLookup(t, q = '', limit = 15) {
+/**
+ * WI-4 — key fields worth an EXACT match, per table.
+ *
+ * The display field is what a human reads; the key field is what they typed.
+ * For `sys_user` those are different columns and the difference is the whole
+ * defect: the display field is `name`, so "admin" contains-matched
+ * "Certification Admin", "CMDB Admin", "Credential Admin"… and the real admin —
+ * `user_name = admin`, displayed as "System Administrator" — never surfaced,
+ * because `user_name` was not searched at all.
+ *
+ * Extendable by design: an entry here is a table whose key differs from its
+ * display, not an exhaustive list. Anything absent falls back to the display
+ * field plus `name`, which is the old behaviour with ranking added.
+ */
+const KEY_FIELDS = {
+  sys_user: ['user_name', 'name', 'email'],
+  sys_scope: ['scope', 'name'],
+  sys_app: ['scope', 'name'],
+  sys_user_group: ['name'],
+  sys_db_object: ['name', 'label'],
+  cmdb_ci: ['name'],
+  sc_category: ['title'],
+  sys_choice: ['value', 'label'],
+};
+
+/**
+ * Tables where a sys_id can be a literal word rather than 32 hex.
+ *
+ * `sys_scope`'s Global row has `sys_id = "global"` — measured, and it is why
+ * `lookup_reference("global", "sys_scope")` returned "Enhanced Global Search UI"
+ * while the record actually wanted was sitting at a sys_id equal to the search
+ * term itself.
+ */
+const LITERAL_ID_TABLES = new Set(['sys_scope', 'sys_app', 'sys_package']);
+
+const isSysId = (v) => /^[0-9a-f]{32}$/i.test(String(v || ''));
+
+/** exact key > exact display > starts-with > contains. Lower sorts first. */
+const RANK = { id: 0, exact: 1, 'exact-display': 2, 'starts-with': 3, contains: 4 };
+
+async function keyFieldsFor(t) {
   const df = await getDisplayField(t);
-  const query = q ? `${df}LIKE${q}^ORDERBY${df}` : `ORDERBY${df}`;
-  const rows = await table.query(t, { query, fields: `sys_id,${df}`, display: 'false', limit });
-  return rows.map((r) => ({ sys_id: r.sys_id, display: r[df] || r.sys_id }));
+  const configured = KEY_FIELDS[t];
+  if (configured) return { df, keys: [...new Set([...configured, df])] };
+  return { df, keys: [...new Set([df, 'name'].filter(Boolean))] };
+}
+
+/**
+ * Resolve a reference by search term, ranked so an exact key match wins.
+ *
+ * Every result carries `matchType`, and the set carries `ambiguous` when the
+ * top hit is not exact — which the agent is required to confirm before using in
+ * a mutation payload. Read-only use may proceed: the cost of a wrong lookup in
+ * a report is a wrong sentence; in a write it is the wrong record, silently.
+ */
+export async function referenceLookup(t, q = '', limit = 15) {
+  const { df, keys } = await keyFieldsFor(t);
+  const term = String(q || '').trim();
+
+  if (!term) {
+    const rows = await table.query(t, { query: `ORDERBY${df}`, fields: `sys_id,${[...new Set([df, ...keys])].join(',')}`, display: 'false', limit });
+    return decorate(rows.map((r) => ({ sys_id: r.sys_id, display: r[df] || r.sys_id, matchType: 'browse', row: r })), df, keys, term);
+  }
+
+  const fields = `sys_id,${[...new Set([df, ...keys])].join(',')}`;
+  const seen = new Map();
+  const add = (rows, why) => {
+    for (const r of rows || []) if (!seen.has(r.sys_id)) seen.set(r.sys_id, { sys_id: r.sys_id, display: r[df] || r.sys_id, matchType: why, row: r });
+  };
+
+  /*
+   * A direct get FIRST, when the term could be an id.
+   *
+   * Covers both the 32-hex case and the literal one — `sys_scope`'s Global row
+   * has `sys_id = "global"`, so the search term IS the id.
+   */
+  if (isSysId(term) || LITERAL_ID_TABLES.has(t)) {
+    try {
+      const direct = await table.query(t, { query: `sys_id=${term}`, fields, display: 'false', limit: 1 });
+      add(direct, 'id');
+    } catch { /* not an id on this table; the ranked search still runs */ }
+  }
+
+  // Exact on every key field, in configured order, then the loose search.
+  for (const k of keys) {
+    try { add(await table.query(t, { query: `${k}=${term}`, fields, display: 'false', limit: 5 }), k === df ? 'exact-display' : 'exact'); }
+    catch { /* a key field that does not exist on this table is skipped */ }
+  }
+  try { add(await table.query(t, { query: `${df}STARTSWITH${term}^ORDERBY${df}`, fields, display: 'false', limit }), 'starts-with'); } catch { /* noop */ }
+  try { add(await table.query(t, { query: `${df}LIKE${term}^ORDERBY${df}`, fields, display: 'false', limit }), 'contains'); } catch { /* noop */ }
+
+  const ranked = [...seen.values()].sort((a, b) => {
+    const d = (RANK[a.matchType] ?? 9) - (RANK[b.matchType] ?? 9);
+    return d !== 0 ? d : String(a.display).localeCompare(String(b.display));   // stable secondary sort
+  }).slice(0, limit);
+
+  return decorate(ranked, df, keys, term);
+}
+
+/**
+ * Attach the key value that matched and the ambiguity flag.
+ *
+ * `ambiguous` is about the TOP result only: if the best thing found was a
+ * contains-match, the caller resolved a name, not a record.
+ */
+function decorate(results, df, keys, term) {
+  const out = results.map(({ row, ...r }) => {
+    const keyField = keys.find((k) => row?.[k] !== undefined && row[k] !== '' && row[k] !== null);
+    return {
+      ...r,
+      ...(keyField && keyField !== df ? { key: keyField, keyValue: row[keyField] } : {}),
+    };
+  });
+  const top = out[0];
+  /*
+   * Ambiguity is about whether a RECORD was resolved, not about which column
+   * matched. An exact hit on the display field is still exact when that field
+   * is the table's key — `sys_user_group.name` is both, and calling "Network"
+   * ambiguous would make the agent confirm something it got exactly right.
+   *
+   * What IS ambiguous: no exact hit at all, or two records tying at the same
+   * exact rank — where the term matched, but matched more than one thing.
+   */
+  const EXACTISH = new Set(['id', 'exact', 'exact-display']);
+  const exactHits = out.filter((r) => EXACTISH.has(r.matchType));
+  const ambiguous = Boolean(term) && (exactHits.length !== 1 || !EXACTISH.has(top?.matchType));
+  // Carried as properties on the array so existing callers that iterate it are
+  // untouched, while a caller that cares can read the verdict.
+  return Object.assign(out, {
+    ambiguous,
+    resolved: top ? { sys_id: top.sys_id, display: top.display, matchType: top.matchType } : null,
+    ...(ambiguous && out.length
+      ? { confirmBefore: 'Do not use this in a mutation payload without confirming it with the user — no single exact match was found.' }
+      : {}),
+  });
 }
 
 /** Table picker (for record producers, list collectors, flow triggers): searches sys_db_object by label or name. */

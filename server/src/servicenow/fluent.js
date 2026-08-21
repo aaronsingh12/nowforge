@@ -816,10 +816,12 @@ async function buildLiveContext(intent) {
       const attempt = await resolveReference(l.table, l.name);
       const found = attempt.hits;
       const searched = attempt.used;
-      // referenceLookup orders by display field, so a LIKE search for "Network"
-      // returns "ATF_TestGroup_Network" ahead of the exact "Network". Put exact
-      // matches first: the model reads the list top-down, and enrichment below
-      // describes the best candidate.
+      // referenceLookup now ranks exact-key > exact-display > starts-with >
+      // contains centrally (WI-4), which is where this belongs — this local
+      // sort predated it and was the same defect worked around at one call
+      // site. Kept because it is stable and idempotent on already-ranked
+      // input, and because the model reads this list top-down; if the central
+      // ranking ever regresses, this still holds the exact match at the top.
       const wanted = String(searched).trim().toLowerCase();
       const hits = [...found].sort((a, b) => {
         const rank = (h) => (String(h.display).trim().toLowerCase() === wanted ? 0 : 1);
