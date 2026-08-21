@@ -29,6 +29,22 @@ import { listWorkspaces, workspaceForScope } from './workspaces.js';
 const raw = (cell) => (cell && typeof cell === 'object' ? cell.value : cell);
 
 /**
+ * Store-app descriptions arrive HTML-encoded — `table&#39;s fields` — and React
+ * escapes text, so the entity renders literally on the page. Decoding the five
+ * XML entities plus numeric references covers what this field actually carries;
+ * it is NOT a general HTML sanitiser and the result is still rendered as text,
+ * never as markup.
+ */
+function decodeEntities(s) {
+  return String(s ?? '')
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/**
  * Fields to request. `sysparm_fields` DROPS an unknown name without complaint
  * (trap #4), so what came back is compared with what was asked for and the
  * difference is REPORTED — measured here: `trial_allowed` does not exist on
@@ -96,7 +112,7 @@ export async function listApplications({ search = '', kind = '', managedOnly = f
       vendor: raw(r.vendor) || '',
       active: raw(r.active) === 'true',
       private: raw(r.private) === 'true',
-      shortDescription: raw(r.short_description) || '',
+      shortDescription: decodeEntities(raw(r.short_description)),
       kind: classify(r),
       canEditInStudio: raw(r.can_edit_in_studio) === 'true',
       createdBy: raw(r.sys_created_by) || '',

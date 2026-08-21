@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { toast } from '../components/toast.js';
-import { SkeletonRows, EmptyState, LoadingRegion } from '../components/states.jsx';
+import { SkeletonLines, EmptyState, LoadingRegion } from '../components/states.jsx';
 import ScopeBadge from '../components/ScopeBadge.jsx';
 
 /**
@@ -71,7 +71,7 @@ export default function Transport() {
             <span>Captured sets</span>
             <button className="btn sm ghost" onClick={load}>Refresh</button>
           </div>
-          {loading ? <SkeletonRows rows={4} cols={2} /> : sets.length === 0 ? (
+          {loading ? <><SkeletonLines lines={4} /><LoadingRegion label="Loading captured sets" /></> : sets.length === 0 ? (
             <EmptyState
               title="Nothing captured yet"
               hint="Turn on Capture changes in an agent session, then make a configuration change. A set is created the first time there is something to put in it."

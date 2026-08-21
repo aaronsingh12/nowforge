@@ -4039,3 +4039,233 @@ restored and read back. The setting is identical; the row identity is not.
 | 72 | **An update row may only move between sets of the SAME scope** | a sweep that works all through development dies on a 403 the first time it touches a scoped artifact | Business rule `Handle updates moving between sets` compares `newUpdateSet.application.scope` to the row's. One set per scope, keyed on the ROW's `application` — not on the session's, and not on the tool's |
 | 73 | **A 403 from a business-rule abort is not an auth failure** | an error that tells you to check the password and wake the PDI, for a request whose credentials were fine | The `detail` names the rule: *"aborted by Business Rule '<name>'"*. Parse it before reaching for the credentials branch — and note that the rule's own `gs.addErrorMessage` reason never crosses the REST boundary |
 | 74 | **Cleaning up configuration writes more configuration** | "every probe record was deleted" is true, and the update set has 28 new `DELETE` rows recording it | A `DELETE` on a `sys_metadata` table is a tracked change like any other. Sweep and clean the `DELETE` rows too, or the tally of what a session did is wrong in both directions |
+
+---
+
+## 34. Transport and scope — what shipped, and the Session 1 acceptance
+
+§33 measured the mechanism; this is what was built on it and how it was proven.
+Every acceptance run below is EXECUTED tier — a real agent turn against dev442675,
+approved at the real gate, read back afterwards — and every artifact it created was
+deleted and the deletion read back.
+
+### The shape
+
+```
+agent turn
+  └─ mutating tool succeeds
+       └─ captureAfterTool()            agent/capture.js
+            ├─ table is DATA?  ────────► audit row: "not captured — data, not configuration"
+            └─ otherwise
+                 └─ sweep()             servicenow/transport.js
+                      ├─ find rows      window + <table>_<sys_id> + nameENDSWITH<sys_id>
+                      ├─ group by the ROW's application        (trap #72)
+                      ├─ ensure a set per scope, lazily
+                      │     global → Table API
+                      │     scoped → execution-harness          (trap #69)
+                      ├─ re-parent, read back each move
+                      └─ collapse same-name rows in the set
+  └─ turn ends
+       └─ reconcileTurn()               time-only, catches what no tool named
+```
+
+`sys_update_xml.name` is `<table>_<sys_id>`, so a tool that reports what it touched can be
+swept exactly. But an id alone is enough: `nameENDSWITH<sys_id>` matches the same row without
+knowing the table, which is why the hook has no per-tool table map to go stale (trap #28). The
+time window stays because it is the only thing that catches COLLATERAL rows — a catalog item's
+variables, a flow's snapshots, the twelve cross-scope privileges an install writes beside the
+artifact you asked for.
+
+### Four behaviours the sweep had to be built around
+
+**One row per record, per SET — not globally.** Editing a record twice rewrites one row
+(`sys_mod_count` 0 → 2). But sweep that row into a session set, edit the record again, and a
+SECOND row with the same name appears in Default. Move that one in too and the set holds two
+rows sharing a name; the platform does not dedupe:
+
+```
+rows named sc_category_1139bb46… now: 2
+   d539bf46… set=OURS mod=3 hash=1106473295
+   4869378683b2c750b939cc65eeaad340 set=OURS mod=1 hash=801901976
+DUPLICATES IN ONE SET: 2 rows share the name -> platform did NOT dedupe
+```
+
+Both would apply on import and the count would read higher than the number of artifacts, so
+the sweep collapses to the newest. That is lossless because a payload is a complete
+`<record_update>` snapshot rather than a diff — checked by reading two versions of the same
+row side by side, where only `<description>` differed.
+
+**Sets may be parented across scopes even though rows may not.** The constraint in trap #72 is
+on `sys_update_xml.update_set`, and it does not extend to `sys_update_set.parent`: a scoped
+child minted through the harness took a global parent over plain REST and kept its own
+application. So the batch parent the brief made conditional is implemented — a second scope in
+one session creates `NHA · <session>` and adopts the first set into it.
+
+**`sys_recorded_at` is not a watermark.** It is typed `counter`, it sorts stably, and it looks
+exactly like the high-water mark a sweep wants. Its order has nothing to do with creation time:
+sorted descending, the top row was created 2026-08-19 and the seventh 2026-08-20. It is also
+not a number — `1a01f54d4620000001`. Trusting it would have skipped rows silently, so the sweep
+uses `sys_created_on` plus the exclusion of rows already in a NowHelpAssist set, which is what
+makes re-sweeping idempotent (measured: second sweep scans 0, moves 0).
+
+**Cleanup writes configuration.** Deleting the probe records produced 28 `DELETE` update rows
+recording the deletions (trap #74). The sweep therefore treats `DELETE` rows like any other,
+and the Transport page renders that action in red rather than hiding it.
+
+### Export: why it never uses CDATA
+
+The platform's own exporter, `export_update_set.do`, answers **401 to basic auth** — it wants a
+UI session. The record serializer `sys_update_xml_list.do?XML` does authenticate, and reading
+one export off it produced the detail that matters:
+
+| row in the same set | how the platform wrote its payload |
+|---|---|
+| a catalog item | `<payload><![CDATA[ … ]]></payload>` |
+| a business rule | entity-escaped, no CDATA |
+
+The business rule's payload carries `<script><![CDATA[…]]></script>`, and CDATA cannot nest —
+so the platform falls back to escaping whenever the content already contains `]]>`. An exporter
+that always wrapped would emit **invalid XML for every script-bearing artifact**: business
+rules, script includes, UI actions. This one always escapes, which is unconditionally valid and
+round-trips to the identical string. Both rows in the acceptance set contained `]]>`, so the
+hazard was live for 2/2 of them.
+
+Exports are deterministic — the remote set's sys_id is derived from the local one rather than
+generated — which is what lets the offline suite assert the format without an instance.
+
+### SESSION 1 ACCEPTANCE (live, dev442675)
+
+**S1-A — capture.** One agent session, capture ON by default, told to create a catalog item and
+a business rule. Both approved at the real gate:
+
+```
+[tool] create_catalog_item (mutating)
+[gate] create_catalog_item -> approving
+transport capture set "NHA · Transport acceptance S1-A · global" (69bfbf82…) for scope global
+transport sweep (create_catalog_item): 1 captured, 0 failed, 0 superseded
+[tool] create_record (mutating)
+transport sweep (create_record): 1 captured, 0 failed, 0 superseded
+turn done  15.5s
+```
+
+Read back:
+
+| check | result |
+|---|---|
+| exactly one set for the session | PASS |
+| it holds exactly 2 updates | PASS |
+| no duplicate names inside it | PASS |
+| every update the AUDIT claims is in the set, and nothing else | PASS |
+| the global Default gained nothing | PASS — 412 rows before, 412 after |
+| no artifact of this session sitting in Default | PASS |
+| exactly one set added to the instance | PASS — 22 → 23 |
+| both artifacts really exist | PASS — both `sys_scope=global`, as §33's E4 predicts |
+
+The names were matched against the audit rather than against what the run expected to happen —
+the audit's capture rows and the set's contents were compared as sets, in both directions.
+
+**S1-B — export.** Downloaded through the real HTTP route:
+
+```
+Content-Disposition: attachment; filename="NHA_Transport_acceptance_S1-A_global.xml"
+X-NHA-Parity: verified
+Content-Length: 10606
+```
+
+Round-parsed with **Python's ElementTree** rather than our own reader, so the check is not
+circular:
+
+```
+PASS  parses as well-formed XML (ElementTree)
+PASS  root element is <unload>
+PASS  1 header, 2 sys_update_xml elements
+PASS  header summary matches the number of update elements
+      Catalog Item   NHA Transport Item  hash=-446080273  payload 3853ch  ok <record_update table=sc_cat_item>
+      Business Rule  NHA Transport Rule  hash=-296922400  payload 1669ch  ok <record_update table=sys_script>
+```
+
+Each payload is itself well-formed XML after unescaping, and both are byte-identical to the
+live rows with matching `payload_hash`. The set name contains `·`; the UTF-8 bytes `c2 b7` are
+present in the file and the name round-trips exactly — only the Windows console mangles it.
+
+**S1-C — scope visibility.** Driven in headless Chrome over CDP, the scratchpad driver §23
+established:
+
+```
+stats: 3 custom applications | 739 store applications | 1 managed by NowHelpAssist
+   NowForge Flows   scope=x_2196302_nwforge  v0.0.1  managed=NowHelpAssist fluent-workspace · 25 sources
+   SNADA Authored   scope=x_2196302_snada    v0.0.1  managed=—
+   TechSnitch DMS   scope=x_tepv_ts_dms      v0.0.1  managed=—
+
+Flows:   headers [NAME, TYPE, SCOPE, STATUS, ACTIVE]     100 scope badges
+Catalog: headers [NAME, CLASS, SCOPE, ACTIVE]            100 scope badges
+SLA:     headers [NAME, TABLE, SCOPE, DURATION, CLOCK]    45 scope badges
+Access:  … OP, DEFINED ON, SCOPE, ROLES …                 28 scope badges
+console errors across every page visited: 0
+```
+
+The Store tab renders all 739 read-only, which is the point of reading them through
+`sys_scope`: the table they live on is closed to this user.
+
+**Beyond the brief's three, because the requirement was explicit.** A data-only session:
+
+```
+[tool] create_record (mutating)
+[capture] captured=false reason=data :: not captured — data, not configuration (incident does not extend sys_metadata)
+```
+
+| check | result |
+|---|---|
+| a capture row was written at all | PASS — it does not silently vanish |
+| it reports NOT captured, reason `data` | PASS |
+| the exact required wording is present | PASS |
+| no capture set was created | PASS |
+| the instance gained no update set | PASS — 23 → 23 |
+| the incident itself was really created | PASS — INC0010045 |
+
+### Three defects this phase found in our own code
+
+1. **Every 403 was reported as a credentials failure.** The cross-scope abort and the
+   API-level ACL on `sys_store_app` both answered "the password is wrong … the PDI is
+   hibernating" for requests whose credentials were perfect — trap #51, committed by us, in the
+   one place a sweep hits routinely. Now a pure `diagnoseFailure()` with the branch asserted
+   offline.
+2. **`SkeletonRows` renders a `<tbody>`** and both new pages used it outside a table, which the
+   browser pass caught as three `validateDOMNesting` errors. `SkeletonLines` is the
+   outside-a-table form. Zero console errors after.
+3. **Store-app descriptions are HTML-encoded** — `table&#39;s fields` rendered literally,
+   because React escapes text. Decoded at the service, still rendered as text.
+
+### Cleanup
+
+Both acceptance sessions, their catalog item, business rule, incident and update set deleted,
+then the `DELETE` update rows the cleanup itself produced. Read back: 0 NHA config records,
+0 NHA incidents, 0 NHA update rows, 0 NHA sets, 0 rows in `capture_sets`,
+`sys_update_set` back to **22**, the global Default back to **412** — the two numbers the
+acceptance started from.
+
+### What is NOT done
+
+- **On-demand scoped applications.** The workspace registry generalises the scope → workspace
+  mapping and the harness can mint a scoped set, which is the groundwork; creating a NEW scoped
+  application on demand is not implemented and was not part of Steps 0–3.
+- **Import.** Export is proven; nothing reads an update set XML back in. The parser in
+  `transport-export.js` exists to verify our own output and is not an importer.
+- **A scoped capture has not run end to end.** Every acceptance artifact was born over REST and
+  is therefore global (E4). The scoped path — harness-minted set, same-scope re-parent — was
+  measured directly in §33 (E3.1 and the "Auto triage incident" move) but has not been driven
+  through a whole agent turn, because reaching it needs an SDK install inside the turn.
+- **Multi-scope batch parenting is unexercised as a whole.** The linkage was measured; no
+  session has yet touched two scopes at once, for the same reason.
+
+---
+
+### Trap ledger additions
+
+| # | trap | what it looks like | how to not be fooled |
+|---|---|---|---|
+| 75 | **`sys_recorded_at` looks like a watermark and is not** | typed `counter`, sorts stably, and a sweep built on it silently misses rows | Its order is unrelated to creation time — descending, the newest row here was two days older than the seventh. It is not even a number (`1a01f54d4620000001`). Use `sys_created_on` plus an exclusion of what you already claimed |
+| 76 | **One row per record holds per SET, not globally** | you sweep a row out of Default, edit the record again, and now two rows share a name — the platform does not dedupe, and both apply on import | Collapse by name inside the set after every sweep. It is lossless: a payload is a whole `<record_update>` snapshot, not a diff |
+| 77 | **CDATA cannot nest, and the platform knows it** | your exporter always wraps payloads in CDATA, and every business rule, script include and UI action produces a file that truncates at the first `]]>` | The platform escapes instead whenever the payload already contains CDATA. Always-escape is unconditionally valid and round-trips identically |
+| 78 | **`export_update_set.do` is a UI processor** | the obvious endpoint answers 401 to perfectly good basic auth, and it reads like a credentials problem | It wants a session cookie. `sys_update_xml_list.do?XML` authenticates but emits the generic `<xml>` list, not the `<unload>` an import expects — a reference, not a substitute |
+| 79 | **A row constraint is not a set constraint** | you assume the same-scope rule that blocks re-parenting also blocks batch parenting, and build per-scope sets with no grouping | Measured: a scoped child set took a GLOBAL parent over plain REST and kept its own application. The rule in trap #72 is on `sys_update_xml.update_set` alone |

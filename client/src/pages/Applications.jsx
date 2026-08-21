@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
-import { SkeletonRows, EmptyState } from '../components/states.jsx';
+import { SkeletonLines, LoadingRegion, EmptyState } from '../components/states.jsx';
 import ScopeBadge from '../components/ScopeBadge.jsx';
 
 /**
@@ -102,7 +102,7 @@ export default function Applications() {
           </div>
         </div>
 
-        {loading ? <SkeletonRows rows={6} cols={5} /> : rows.length === 0 ? (
+        {loading ? <><SkeletonLines lines={6} /><LoadingRegion label="Loading applications" /></> : rows.length === 0 ? (
           <EmptyState
             title="No applications match"
             hint={search ? `Nothing on this instance matches "${search}".` : 'Try another filter.'}

@@ -3,7 +3,7 @@
 ```
 client (React + Vite :5173)
   ├── pages: Dashboard · AgentChat · Incidents · Catalog · Flows · SLA ·
-  │          Access · Audit · Settings
+  │          Access · Applications · Transport · Audit · Settings
   ├── components/
   │     states.jsx      skeletons · designed empty states · RequiresInstance
   │                     (applied at the ROUTE, so a gated page never mounts
@@ -13,16 +13,21 @@ client (React + Vite :5173)
   │     ConfirmDialog · confirm.js   one seam for every destructive prompt
   │     Toasts · toast.js            module-level store, not a context
   │     Markdown · markdownConfig.js react-markdown + remark-gfm, no raw HTML
+  │     ScopeBadge.jsx    ONE component for the scope shown on Flows, Catalog,
+  │                       SLA and Access — the scope NAME (the address), never
+  │                       the application's display label
   │     ErrorBoundary.jsx            route-level, copyable stack
   ├── hooks/useHealth.js — ONE shared poller over /api/system/health; the
   │                        single answer to "is an instance bound"
+  ├── hooks/useScopeLabels.js — sys_id → scope name for a WHOLE list in one
+  │                        request; per-row would be 50 requests on SLA
   ├── ReferenceField / TableField — debounced typeahead against /api/system
   └── SSE reader for agent streams (POST body → event stream)
         │  /api proxy
         ▼
 server (Node 22 + Express :4000)
   ├── routes/        system · incidents · catalog · flows · agent · sla ·
-  │                  access · audit
+  │                  access · applications · transport · audit
   ├── servicenow/
   │     client.js    auth (basic / OAuth password grant + token cache), Table API,
   │                  Aggregate API, error normalization (SnowError)
@@ -54,10 +59,31 @@ server (Node 22 + Express :4000)
   │     catalogPolicy.js  catalog UI policies through the SDK — the actions
   │                  cannot be written over REST at all (see §23)
   │     conditions.js · codegen-guards.js  condition building; the A1–A6 guards
+  │     workspaces.js  the SDK workspace REGISTRY — scope → workspace discovered
+  │                  by scanning for now.config.json, so "which scopes do we
+  │                  manage" is data and a second scoped app is a directory
+  │     applications.js  all 743 scopes off sys_scope (sys_store_app, sys_package
+  │                  and sys_plugins are 403 to admin over REST — the class name
+  │                  separates custom/store/global), with the managed flag from
+  │                  the registry and an explicit `visibility` saying so
+  │     transport.js   SESSION CAPTURE. The sweep: find the update rows a call
+  │                  produced, group by the ROW's application, re-parent into a
+  │                  set per scope created lazily — global over REST, scoped
+  │                  through the harness — then collapse same-name rows.
+  │                  Configuration vs data is answered from the live hierarchy
+  │                  (sys_metadata in the super_class chain), never a list
+  │     transport-export.js  update set XML built from Table API reads, always
+  │                  entity-escaped (CDATA cannot nest and payloads contain it),
+  │                  deterministic, and verified against its own source rows
+  │                  before it is ever offered as a download
   ├── agent/
   │     orchestrator.js  session store, agent loop (≤15 iters/turn), approval gate
   │                      (mutating tools await user decision, 5-min timeout), SSE events
-  │     tools.js         37-tool registry with `mutating` flags
+  │     tools.js         39-tool registry with `mutating` flags
+  │     capture.js       the hook after a mutating tool succeeds. Never throws —
+  │                      the write already landed — and a non-config mutation
+  │                      SAYS "not captured — data, not configuration" rather
+  │                      than going quiet, which would read as a failure
   │     prompts.js       system prompt: schema-first, never invent sys_ids, report sys_ids,
   │                      flow authoring tiers (design → build → fallback)
   │     providers/       anthropic.js · openaiCompat.js (OpenAI + Ollama) · index.js factory
@@ -74,6 +100,9 @@ server (Node 22 + Express :4000)
   │     recall.js        embeddings + FTS5 keyword fallback (loudly degraded)
   │     audit.js         build_runs / build_events for UI-driven work, the
   │                      merged timeline, sys_id harvesting, CSV export
+  │     (migration 6)    capture_state (ON by default, so absence = enabled) and
+  │                      capture_sets, keyed (session, instance, scope) — which
+  │                      is what makes set creation lazy and idempotent
   └── config/store.js    local settings.json (connection + llm + agent), secret redaction
         │
         ├──────────────► ServiceNow PDI  ←— REST Table/Aggregate/OAuth endpoints
@@ -169,6 +198,39 @@ Invariants enforced in `fluent.js`, all load-bearing because installs are whole-
 | c | every build/install goes through one serialized queue | concurrent runs would race on `dist/` and `keys.ts` |
 | d | identity follows the **request**, not the model's chosen name | the same spec named its flow "…Incidents" then "…Incident", creating a duplicate. Sources carry a spec fingerprint; an edited request names its target via `updates`; the deployed source is fed back so names and `Now.ID` keys survive verbatim — those strings are what keys.ts is keyed on |
 | e | `deploy()` builds before installing | `install` ships `dist/`, so deploying without building silently installs a stale package — a restored source once reported 3/3 while never reaching the instance |
+
+## Transport and scope
+
+```
+                       REST tier                        SDK tier
+artifact is born in    global, always                   the app's scope
+                       (sys_scope on an insert is
+                        accepted and ignored — 201,
+                        no warning)
+portable by            an update set                    the scoped app itself
+capture mechanism      the sweep                        already a migration unit
+```
+
+That split is the whole reason this layer exists: the SDK tier was already
+portable, and this gives the REST tier its equivalent.
+
+The sweep re-parents update rows AFTER the fact rather than pointing the
+platform's current-set preference at a named set. The preference route works —
+and is not used, because it is a per-USER setting while every session shares
+one API user. Measured: two interleaved sessions put **8 of 16** changes in
+each other's set, with no error anywhere (docs/fluent-research.md §33).
+
+Three rules the sweep obeys, each enforced by the platform rather than chosen:
+
+| rule | what happens if you get it wrong |
+|---|---|
+| group by the ROW's `application`, one set per scope | business rule `Handle updates moving between sets` aborts with a 403 mid-sweep |
+| scoped sets are minted server-side, not over REST | REST returns a *global* set that then refuses every row |
+| collapse rows sharing a name inside a set | the count reads high and the export applies the same record twice |
+
+An update set carries **configuration** — anything extending `sys_metadata`.
+It has never carried task data, and a mutation on `incident` therefore reports
+"not captured — data, not configuration" instead of nothing at all.
 
 ## Claude Code concept mapping
 
