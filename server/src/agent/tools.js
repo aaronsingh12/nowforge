@@ -10,6 +10,7 @@ import { search } from '../memory/recall.js';
 import { recordCalculatedFields, listFacts, recordFact } from '../memory/facts.js';
 import { listApplications } from '../servicenow/applications.js';
 import { listCapturedSets, setContents } from '../servicenow/transport.js';
+import { createApplication, vendorPrefix, suggestScopeName, validateScopeName, studioSteps, MAX_SCOPE_LENGTH } from '../servicenow/app-create.js';
 
 const cellValue = (c) => (c && typeof c === 'object' && 'value' in c ? c.value : c);
 
@@ -40,9 +41,9 @@ export function assertCreatableTable(t) {
     + 'not an application: sys_class_name stays "sys_scope" instead of becoming "sys_app", the technical '
     + '`scope` name is empty (a real one looks like x_<vendor>_<name>), there is no version, and Studio will '
     + 'not list it — nothing can be developed inside it. '
-    + 'A real custom application is created either in Studio (All → Studio → Create Application) or through '
-    + 'the ServiceNow SDK, which scaffolds the scope name, version and prefix. Tell the user that, and do not '
-    + 'submit an insert on this table.'
+    + 'Use the create_application tool instead: it goes through the ServiceNow SDK, which scaffolds a real '
+    + 'sys_app with a valid scope name, version and vendor prefix. The manual route is All → Studio → '
+    + 'Create Application. Do not submit an insert on this table.'
   ), { status: 422, detail: { table: t, reason: 'application-husk-guard', tool: 'create_record' } });
 }
 
@@ -840,6 +841,55 @@ export const TOOLS = [
           managedByNowHelpAssist: a.managed, sources: a.workspace?.sourceCount ?? null,
         })),
         storeApplications: kind === 'store' || search ? undefined : `${r.counts.store || 0} store applications not listed — pass kind:"store" or a search term`,
+      };
+    },
+  },
+  {
+    name: 'create_application',
+    description:
+      'Create a REAL custom ServiceNow application (a sys_app) through the SDK. This is the only supported way to make one here: '
+      + 'inserting into sys_scope over REST produces a husk with no technical scope name that Studio will not list. '
+      + 'Give a plain-language name and the scope is derived and validated against this instance vendor prefix and the '
+      + '18-character platform limit, or pass one explicitly. '
+      + 'This SCAFFOLDS the application workspace on disk and does NOT put anything on the instance yet: installing it is a separate step. '
+      + 'Say so when you report back, and do not tell the user the application exists on the instance.',
+    mutating: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Human-readable application name, e.g. "Fleet Management"' },
+        scope_name: { type: 'string', description: 'Optional explicit scope, e.g. x_2196302_fleet. Derived from the name when omitted.' },
+        description: { type: 'string' },
+      },
+      required: ['name'],
+    },
+    execute: ({ name, scope_name: scopeName, description }) => createApplication({ name, scopeName, description }),
+  },
+  {
+    name: 'check_scope_name',
+    description:
+      'Check what scope name a new application would get on this instance, and whether a proposed one is legal, WITHOUT creating anything. '
+      + 'Read-only. Use before create_application when the technical name matters: the scope is permanent, and a wrong vendor prefix '
+      + 'is only a warning at install time, after which the application may not install correctly.',
+    mutating: false,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'The application name to derive a scope from' },
+        scope_name: { type: 'string', description: 'A proposed scope name to validate instead' },
+      },
+      required: [],
+    },
+    execute: async ({ name, scope_name: scopeName }) => {
+      const prefix = await vendorPrefix();
+      const suggested = name ? suggestScopeName(name, prefix) : null;
+      return {
+        vendorPrefix: prefix,
+        maxLength: MAX_SCOPE_LENGTH,
+        charactersAvailable: MAX_SCOPE_LENGTH - prefix.length,
+        ...(suggested ? { suggested } : {}),
+        ...(scopeName ? { check: validateScopeName(scopeName, prefix) } : {}),
+        manualAlternative: studioSteps(prefix),
       };
     },
   },

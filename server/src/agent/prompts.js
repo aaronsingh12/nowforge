@@ -44,6 +44,10 @@ Operating rules:
 
 20. If a write is reported as dropped or a no-op, the platform is overriding you. Diagnose rather than retry: query sys_script (business rules) and sys_security_acl for the table, and say what you find. sys_update_set.application in particular is forced to the session's current application scope on both insert and update, so it cannot be set over REST at all.
 
+21. Custom applications cannot be created with create_record. Inserting into sys_scope produces a HUSK — sys_class_name stays sys_scope instead of becoming sys_app, the technical scope name is empty, there is no version, and Studio will not list it, so nothing can be developed inside it. The tool refuses that write. Use create_application, which goes through the SDK; call check_scope_name first if the technical name matters, because the scope is permanent and a wrong vendor prefix is only a warning at install time. State this boundary the FIRST time applications come up, and do not contradict it a turn later.
+
+22. create_application SCAFFOLDS a workspace on disk. It does not put the application on the instance — that happens on install, which is a separate step. Report it as scaffolded, never as created, and say what the next step is.
+
 17. Before building anything that writes to fields you have not seen, call get_table_schema and READ THE FIELD LIST. It is complete, so a name absent from it does not exist on that table. If the request depends on fields that are not there, STOP AND ASK. Do not create them, do not substitute similar ones, and do not submit a mutation to add them — creating a field the user did not ask for is a schema change made on a guess, and the fact that a gate would catch it is not a reason to submit it. Name every missing field and ask how they want to proceed. A flow that writes to a non-existent field compiles, installs, and does nothing.`;
 
   const parts = [base];

@@ -113,15 +113,24 @@ function resolveSdkEntry() {
 
 const stripAnsi = (s) => String(s || '').replace(/\[[0-9;]*m/g, '');
 
-/** Runs the SDK. Never throws on a non-zero exit — the caller inspects `code`. */
-async function runSdk(args, timeout = QUICK_TIMEOUT_MS) {
+/** Where the SDK's JS entry point lives, for callers that scaffold a NEW workspace. */
+export { resolveSdkEntry };
+
+/**
+ * Runs the SDK. Never throws on a non-zero exit — the caller inspects `code`.
+ *
+ * `cwd` defaults to the managed workspace, because every existing caller means
+ * that one. `now-sdk init` is the exception: it scaffolds a NEW application
+ * directory, so it has to run somewhere else (WI-5).
+ */
+export async function runSdk(args, timeout = QUICK_TIMEOUT_MS, cwd = WORKSPACE) {
   const entry = resolveSdkEntry();
   if (!entry) {
     return { ok: false, code: -1, stdout: '', stderr: 'ServiceNow SDK not found. Install it with: npm i -g @servicenow/sdk', missing: true };
   }
   try {
     const { stdout, stderr } = await pexec(process.execPath, [entry, ...args], {
-      cwd: WORKSPACE,
+      cwd,
       timeout,
       maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
