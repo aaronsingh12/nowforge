@@ -353,6 +353,27 @@ export function getDb() {
   // for A-2 ("kill and restart the server, resume the same session").
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA synchronous = NORMAL');
+  /*
+   * WAL permits many readers but exactly ONE writer, and SQLite's default
+   * behaviour when the write lock is held is to fail the statement immediately
+   * with SQLITE_BUSY rather than wait for it.
+   *
+   * MEASURED, during the `node --watch` restart investigation: a second server
+   * process overlapping the first for a few hundred milliseconds killed the
+   * NEW one at boot with an uncaught `Error: database is locked` thrown out of
+   * `seedLedger()` — before the listener was ever reached. The old process was
+   * mid-write for microseconds; the new one did not wait even that long.
+   *
+   * The same window exists whenever two things write at once: a chat turn
+   * appending messages while the recall indexer writes an embedding, or a
+   * restart handing over. None of those are errors — they are contention, and
+   * contention should be waited out, not raised.
+   *
+   * 5s is far longer than any write here takes (every statement in this file is
+   * a single small row) and short enough that a genuine deadlock still surfaces
+   * as an error rather than a hang.
+   */
+  db.exec('PRAGMA busy_timeout = 5000');
 
   handle = migrate(db);
   return handle;

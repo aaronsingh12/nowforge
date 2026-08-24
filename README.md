@@ -8,19 +8,44 @@ Connect a ServiceNow PDI and build on it two ways: through clean module UIs, or 
 
 ## Quickstart
 
-Requirements: Node 18+ (tested on 22), a ServiceNow PDI (free at developer.servicenow.com), and an LLM — an Anthropic/OpenAI API key or local Ollama.
+Requirements: **Node 22.5+** (tested on 24.18), a ServiceNow PDI (free at
+developer.servicenow.com), and an LLM — an Anthropic/OpenAI API key or local
+Ollama.
+
+> 22.5 is not a preference. The whole storage layer is built on `node:sqlite`
+> (`DatabaseSync`), which landed in 22.5.0; on anything older the server dies at
+> its first import with `ERR_UNKNOWN_BUILTIN_MODULE`. It is declared in
+> `engines` so npm warns rather than letting you find out that way.
+
+```bash
+npm install --prefix server
+npm install --prefix client
+
+# Both halves, one terminal. Ctrl+C stops both.
+npm run dev
+```
+
+That starts the API on **:4000** and the React client on **:5173**, prefixes
+each line with which half wrote it, and prints a loud `API │ …` line if the
+server ever stops answering.
+
+<details>
+<summary>Two terminals instead</summary>
 
 ```bash
 # Terminal 1 — API server on :4000
-cd server
-npm install
-npm run dev
+cd server && npm install && npm run dev
 
 # Terminal 2 — React client on :5173
-cd client
-npm install
-npm run dev
+cd client && npm install && npm run dev
 ```
+
+Both are needed. The client proxies `/api` to `:4000`, so starting only the
+client gives you a working page whose every request fails — vite reports that
+as `http proxy error … ECONNREFUSED`, which names neither this app nor the
+missing process. The single `npm run dev` above exists to make that
+unreachable.
+</details>
 
 Open http://localhost:5173 and then:
 

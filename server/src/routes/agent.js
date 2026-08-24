@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { log } from '../logging.js';
 import { runTurn, resolveApproval } from '../agent/orchestrator.js';
 import { providerInfo } from '../agent/providers/index.js';
 import {
@@ -156,6 +157,24 @@ agentRouter.post('/chat', async (req, res) => {
       if (remembered) emit({ type: 'remembered', fact: remembered });
     }
     await runTurn(sessionId, message, emit, { retry: Boolean(retry) });
+  } catch (err) {
+    /*
+     * The stream's terminal frame is an INVARIANT, and this is the hole in it.
+     *
+     * `runTurn` catches its own failures and emits `error`, so this block was
+     * assumed unreachable — but everything AROUND it is unguarded: the
+     * `rememberFromChat` call above, and `runTurn`'s own `finally`. A throw
+     * from either ran straight into the `finally` below, which called
+     * `res.end()` on a 200 that had promised an event stream. The client saw a
+     * clean end with no `done` and no `error`, and — because these headers are
+     * already sent — Express's error middleware could not have rendered
+     * anything either. The turn simply stopped, and nothing anywhere said so.
+     *
+     * Not retryable: an exception out here is a defect in the harness, not the
+     * upstream wobbling, and offering Retry on it would just fail again.
+     */
+    log.error('agent', `chat stream failed outside the turn — ${err.message}`, err);
+    emit({ type: 'error', message: err.message, retryable: false });
   } finally {
     clearInterval(keepAlive);
     res.end();

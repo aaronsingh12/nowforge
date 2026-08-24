@@ -49,6 +49,21 @@ export const api = {
  * `method` exists because deleting a catalog UI policy is also a build and an
  * install — it removes the Fluent source and reinstalls the application — so it
  * streams progress exactly like the create does.
+ *
+ * A STREAM MUST END WITH `done` OR `error`, and this enforces it.
+ *
+ * That is an invariant of every SSE route in this app, not a convention: the
+ * agent turn, the three catalog builds, both flow routes and the SLA verifier
+ * all terminate with one or the other on every path, including their failure
+ * paths. Nothing enforced it here, so a stream that simply STOPPED — the server
+ * process dying mid-turn, which is what the `--watch` restart defect did — was
+ * indistinguishable from one that finished. The caller's `await` resolved, its
+ * `finally` cleared the spinner, and the user was left looking at a transcript
+ * that had quietly stopped halfway with no error anywhere.
+ *
+ * A truncated stream now throws, so it lands in the same `catch` every other
+ * failure already uses and renders as the same red bubble. No new UI, and one
+ * fewer way for this app to fail silently.
  */
 export async function sse(path, body, onEvent, method = 'POST') {
   const res = await fetch(BASE + path, {
@@ -65,6 +80,8 @@ export async function sse(path, body, onEvent, method = 'POST') {
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = '';
+  // Set by the `done`/`error` frame. Its ABSENCE at end-of-stream is the bug.
+  let terminated = false;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -79,6 +96,7 @@ export async function sse(path, body, onEvent, method = 'POST') {
           try { evt = JSON.parse(line.slice(6)); }
           catch (err) { logToServer('warn', `${path} sent an unparseable SSE frame: ${err.message}`); }
           if (evt) {
+            if (evt.type === 'done' || evt.type === 'error') terminated = true;
             // The failure that started all this arrived here, was rendered as
             // a red box, and was never written down anywhere.
             if (evt.type === 'error') logToServer('error', `${path} stream error: ${evt.message}`, evt.detail);
@@ -88,6 +106,17 @@ export async function sse(path, body, onEvent, method = 'POST') {
         }
       }
     }
+  }
+  if (!terminated) {
+    // Deliberately not a silent return and deliberately not a toast: the
+    // caller's own error path already knows how to show this, and the terminal
+    // needs the line more than the console does.
+    const message =
+      'The connection to the NowHelpAssist server ended before this finished, so it is unknown how far it got. '
+      + 'Check the server terminal — if it is not running, start it with `npm run dev` in server/. '
+      + 'Anything already written to the instance is on the Audit page.';
+    logToServer('error', `${method} ${path} (stream) ended without a done/error frame — connection lost mid-stream`);
+    throw new Error(message);
   }
 }
 
